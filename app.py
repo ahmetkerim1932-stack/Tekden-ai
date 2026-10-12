@@ -9,15 +9,16 @@ app = FastAPI(title="Tekden AI")
 OLLAMA_URL = "https://ollama.com/api/chat"
 API_KEY = os.environ.get("OLLAMA_API_KEY", "").strip()
 MODEL_NAME = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b-cloud").strip()
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1-mini").strip()
 
 SYSTEM_PROMPT = """
 Sen Tekden AI'sın.
 Ahmet Kerim Kırgız tarafından geliştirilen genel amaçlı bir yapay zekâ asistanısın.
 Kendini tanıtırken adının Tekden AI olduğunu ve geliştiricinin Ahmet Kerim Kırgız olduğunu söyle.
 Türkçe, anlaşılır, nazik ve faydalı cevaplar ver.
-İstenildiği zaman İngilizce konuş.
-İstenildiği zaman başta ingilzce ve türkçe olmak üzere tüm dilleri konuş.
-Kendine dil seçeneği ekle.
+İstenilirse ingilizce konuş.
+İstenildiği zaman tüm dilleri konuş.
 Bilmediğin bilgileri uydurma; emin değilsen bunu açıkça belirt.
 Programlama, eğitim, bilim, yazma ve proje geliştirme konularında yardımcı ol.
 Güvenli olmayan isteklerde güvenli alternatifler sun.
@@ -26,6 +27,50 @@ Güvenli olmayan isteklerde güvenli alternatifler sun.
 
 class ChatRequest(BaseModel):
     message: str
+
+
+def should_generate_image(message: str) -> bool:
+    q = message.casefold()
+    triggers = [
+        "görsel oluştur", "görsel üret", "resim oluştur", "resim çiz", "bir resim çiz",
+        "fotoğraf oluştur", "fotoğraf üret", "çizim oluştur", "illüstrasyon oluştur",
+        "afiş oluştur", "logo oluştur", "görselini yap", "resmini yap", "bana çiz",
+        "generate an image", "create an image", "draw me", "make a picture"
+    ]
+    return any(term in q for term in triggers)
+
+
+def generate_image(prompt: str):
+    if not OPENAI_API_KEY:
+        return {"error": "Görsel oluşturmak için Render Environment bölümüne OPENAI_API_KEY eklenmeli. Bu anahtar Ollama anahtarından ayrıdır."}
+    try:
+        response = requests.post(
+            "https://api.openai.com/v1/images/generations",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json={"model": IMAGE_MODEL, "prompt": prompt, "size": "1024x1024", "quality": "medium", "output_format": "png", "n": 1},
+            timeout=180,
+        )
+        if response.status_code == 401:
+            return {"error": "OpenAI görsel API anahtarı kabul edilmedi. Render'daki OPENAI_API_KEY değerini kontrol et."}
+        if response.status_code == 429:
+            return {"error": "Görsel oluşturma kullanım limiti veya bakiye sınırına ulaşıldı. OpenAI API kullanım ve faturalandırma durumunu kontrol et."}
+        response.raise_for_status()
+        data = response.json().get("data", [])
+        if not data or not data[0].get("b64_json"):
+            return {"error": "Görsel API'si bir görsel döndürmedi. Lütfen tekrar dene."}
+        return {"reply": "İstediğin görsel hazır.", "image": "data:image/png;base64," + data[0]["b64_json"]}
+    except requests.Timeout:
+        return {"error": "Görsel oluşturmak uzun sürdü. Lütfen tekrar dene."}
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "bilinmiyor"
+        detail = ""
+        try:
+            detail = exc.response.json().get("error", {}).get("message", "")
+        except Exception:
+            pass
+        return {"error": f"Görsel API isteği başarısız (HTTP {status}). {detail}".strip()}
+    except (requests.RequestException, ValueError):
+        return {"error": "Görsel oluşturma servisine bağlanılamadı. Biraz sonra tekrar dene."}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -69,6 +114,9 @@ def chat(data: ChatRequest):
     message = data.message.strip()
     if not message:
         return {"reply": "Bir mesaj yazıp tekrar dener misin?"}
+
+    if should_generate_image(message):
+        return generate_image(message)
 
     if not API_KEY:
         return {"error": "Sunucu ayarı eksik: Render'da OLLAMA_API_KEY ortam değişkenini ekle."}
@@ -257,6 +305,20 @@ async function sendMessage(text) {
     if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : (data.error || 'Sunucu hatası oluştu.'));
     waiting.textContent = data.reply || data.error || 'Yanıt alınamadı.';
     if (data.error) waiting.textContent = '⚠️ ' + data.error;
+    if (!data.error && data.image) {
+      const img = document.createElement('img');
+      img.src = data.image;
+      img.alt = text;
+      img.style.display = 'block';
+      img.style.width = '100%';
+      img.style.maxWidth = '640px';
+      img.style.height = 'auto';
+      img.style.marginTop = '10px';
+      img.style.borderRadius = '12px';
+      img.style.border = '1px solid var(--line)';
+      waiting.appendChild(document.createElement('br'));
+      waiting.appendChild(img);
+    }
     if (!data.error && Array.isArray(data.sources) && data.sources.length) {
       const sourceBox = document.createElement('div');
       sourceBox.className = 'sources';
