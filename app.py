@@ -1,382 +1,220 @@
-from fastapi import FastAPI
+import os, re, sqlite3, hashlib, hmac, secrets, time, base64
+from datetime import datetime, timezone
+from urllib.parse import quote
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 import requests
-import os
 
 app = FastAPI(title="Tekden AI")
 
-OLLAMA_URL = "https://ollama.com/api/chat"
-API_KEY = os.environ.get("OLLAMA_API_KEY", "").strip()
-MODEL_NAME = os.environ.get("OLLAMA_MODEL", "gpt-oss:20b-cloud").strip()
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
-IMAGE_MODEL = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1-mini").strip()
+DATABASE_PATH = os.getenv("DATABASE_PATH", "tekden_ai.sqlite3")
+SESSION_SECRET = os.getenv("SESSION_SECRET", "")
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud").strip()
+POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
+IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
 
-SYSTEM_PROMPT = """
-Sen Tekden AI'sın.
-Ahmet Kerim Kırgız tarafından geliştirilen genel amaçlı bir yapay zekâ asistanısın.
-Kendini tanıtırken adının Tekden AI olduğunu ve geliştiricinin Ahmet Kerim Kırgız olduğunu söyle.
-Türkçe, anlaşılır, nazik ve faydalı cevaplar ver.
-İstenilirse ingilizce konuş.
-İstenildiği zaman tüm dilleri konuş.
-Bilmediğin bilgileri uydurma; emin değilsen bunu açıkça belirt.
-Programlama, eğitim, bilim, yazma ve proje geliştirme konularında yardımcı ol.
-Güvenli olmayan isteklerde güvenli alternatifler sun.
-""".strip()
-
+class Credentials(BaseModel):
+    username: str
+    password: str
 
 class ChatRequest(BaseModel):
     message: str
 
+def connect_db():
+    c = sqlite3.connect(DATABASE_PATH, timeout=20)
+    c.row_factory = sqlite3.Row
+    return c
 
-def should_generate_image(message: str) -> bool:
-    q = message.casefold()
-    triggers = [
-        "görsel oluştur", "görsel üret", "resim oluştur", "resim çiz", "bir resim çiz",
-        "fotoğraf oluştur", "fotoğraf üret", "çizim oluştur", "illüstrasyon oluştur",
-        "afiş oluştur", "logo oluştur", "görselini yap", "resmini yap", "bana çiz",
-        "generate an image", "create an image", "draw me", "make a picture"
-    ]
-    return any(term in q for term in triggers)
+def init_db():
+    with connect_db() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS users(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            salt TEXT NOT NULL, password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL)""")
+        c.execute("""CREATE TABLE IF NOT EXISTS image_usage(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            day TEXT NOT NULL,
+            created_at TEXT NOT NULL)""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_usage_user_day ON image_usage(user_id, day)")
 
+def today_utc():
+    return datetime.now(timezone.utc).date().isoformat()
 
-def generate_image(prompt: str):
-    if not OPENAI_API_KEY:
-        return {"error": "Görsel oluşturmak için Render Environment bölümüne OPENAI_API_KEY eklenmeli. Bu anahtar Ollama anahtarından ayrıdır."}
+def pw_hash(password, salt=None):
+    raw_salt = bytes.fromhex(salt) if salt else secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), raw_salt, 310000)
+    return digest.hex(), raw_salt.hex()
+
+def make_session(user_id):
+    if len(SESSION_SECRET) < 32:
+        raise HTTPException(status_code=503, detail="Render Environment bölümüne en az 32 karakterlik SESSION_SECRET ekle.")
+    payload = f"{user_id}:{int(time.time())}"
+    sig = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return payload + ":" + sig
+
+def get_user_id(request: Request):
+    token = request.cookies.get("tekden_session", "")
     try:
-        response = requests.post(
-            "https://api.openai.com/v1/images/generations",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-            json={"model": IMAGE_MODEL, "prompt": prompt, "size": "1024x1024", "quality": "medium", "output_format": "png", "n": 1},
-            timeout=180,
-        )
-        if response.status_code == 401:
-            return {"error": "OpenAI görsel API anahtarı kabul edilmedi. Render'daki OPENAI_API_KEY değerini kontrol et."}
-        if response.status_code == 429:
-            return {"error": "Görsel oluşturma kullanım limiti veya bakiye sınırına ulaşıldı. OpenAI API kullanım ve faturalandırma durumunu kontrol et."}
-        response.raise_for_status()
-        data = response.json().get("data", [])
-        if not data or not data[0].get("b64_json"):
-            return {"error": "Görsel API'si bir görsel döndürmedi. Lütfen tekrar dene."}
-        return {"reply": "İstediğin görsel hazır.", "image": "data:image/png;base64," + data[0]["b64_json"]}
+        uid, timestamp, sig = token.split(":", 2)
+        payload = f"{uid}:{timestamp}"
+        expected = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        if len(SESSION_SECRET) < 32 or not hmac.compare_digest(sig, expected):
+            return None
+        if time.time() - int(timestamp) > 14 * 86400:
+            return None
+        return int(uid)
+    except (ValueError, TypeError):
+        return None
+
+def usage_today(user_id):
+    with connect_db() as c:
+        row = c.execute("SELECT COUNT(*) n FROM image_usage WHERE user_id=? AND day=?",
+                        (user_id, today_utc())).fetchone()
+        return int(row["n"])
+
+def remaining(user_id):
+    return max(0, 3 - usage_today(user_id))
+
+def add_usage(user_id):
+    with connect_db() as c:
+        c.execute("INSERT INTO image_usage(user_id,day,created_at) VALUES(?,?,?)",
+                  (user_id, today_utc(), datetime.now(timezone.utc).isoformat()))
+
+def set_login_cookie(response, user_id):
+    response.set_cookie("tekden_session", make_session(user_id), httponly=True,
+                        secure=True, samesite="lax", max_age=1209600)
+
+init_db()
+
+@app.post("/api/register")
+def register(data: Credentials, response: Response):
+    username = data.username.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,30}", username):
+        raise HTTPException(400, "Kullanıcı adı 3-30 karakter olmalı; harf, rakam, nokta, tire ve alt çizgi kullan.")
+    if len(data.password) < 10:
+        raise HTTPException(400, "Parola en az 10 karakter olmalı.")
+    hashed, salt = pw_hash(data.password)
+    try:
+        with connect_db() as c:
+            cur = c.execute("INSERT INTO users(username,salt,password_hash,created_at) VALUES(?,?,?,?)",
+                            (username, salt, hashed, datetime.now(timezone.utc).isoformat()))
+            uid = cur.lastrowid
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "Bu kullanıcı adı zaten kullanılıyor.")
+    set_login_cookie(response, uid)
+    return {"ok": True, "username": username, "images_remaining": 3}
+
+@app.post("/api/login")
+def login(data: Credentials, response: Response):
+    with connect_db() as c:
+        row = c.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE",
+                        (data.username.strip(),)).fetchone()
+    if not row:
+        raise HTTPException(401, "Kullanıcı adı veya parola yanlış.")
+    hashed, _ = pw_hash(data.password, row["salt"])
+    if not hmac.compare_digest(hashed, row["password_hash"]):
+        raise HTTPException(401, "Kullanıcı adı veya parola yanlış.")
+    set_login_cookie(response, row["id"])
+    return {"ok": True, "username": row["username"], "images_remaining": remaining(row["id"])}
+
+@app.post("/api/logout")
+def logout(response: Response):
+    response.delete_cookie("tekden_session")
+    return {"ok": True}
+
+@app.get("/api/me")
+def me(request: Request):
+    uid = get_user_id(request)
+    if not uid:
+        return {"authenticated": False}
+    with connect_db() as c:
+        row = c.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
+    if not row:
+        return {"authenticated": False}
+    return {"authenticated": True, "username": row["username"], "images_remaining": remaining(uid)}
+
+def is_image_request(text):
+    q = text.casefold()
+    return any(x in q for x in [
+        "görsel oluştur", "görsel üret", "resim oluştur", "resim çiz", "fotoğraf oluştur",
+        "fotoğraf üret", "çizim oluştur", "illüstrasyon oluştur", "afiş oluştur",
+        "logo oluştur", "görselini yap", "resmini yap", "bana çiz",
+        "generate an image", "create an image", "draw me"
+    ])
+
+def generate_image(prompt, uid):
+    if remaining(uid) <= 0:
+        return {"error": "Günlük 3 görsel hakkını kullandın. Hakların UTC gece yarısında yenilenir."}
+    if not POLLINATIONS_API_KEY:
+        return {"error": "OpenAI kullanılmıyor. Görsel üretimi için Render Environment bölümüne POLLINATIONS_API_KEY eklemen gerekiyor. Bu sağlayıcının ücret/kota koşullarını kontrol et."}
+    try:
+        url = "https://gen.pollinations.ai/image/" + quote(prompt, safe="")
+        r = requests.get(url, headers={"Authorization": f"Bearer {POLLINATIONS_API_KEY}"},
+                         params={"model": IMAGE_MODEL, "width": 1024, "height": 1024}, timeout=180)
+        if r.status_code == 401:
+            return {"error": "Pollinations API anahtarı geçersiz."}
+        if r.status_code == 402:
+            return {"error": "Görsel servisi kredi/ödeme isteyebilir. Hesabındaki koşulları kontrol et."}
+        if r.status_code == 429:
+            return {"error": "Görsel servisi limitine ulaşıldı; sonra tekrar dene."}
+        r.raise_for_status()
+        ctype = r.headers.get("content-type", "").lower()
+        if not ctype.startswith("image/"):
+            return {"error": "Görsel servisi resim döndürmedi."}
+        add_usage(uid)
+        mime = "image/png" if "png" in ctype else "image/jpeg"
+        image = "data:" + mime + ";base64," + base64.b64encode(r.content).decode("ascii")
+        return {"reply": "Görsel hazır.", "image": image, "images_remaining": remaining(uid)}
     except requests.Timeout:
-        return {"error": "Görsel oluşturmak uzun sürdü. Lütfen tekrar dene."}
-    except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "bilinmiyor"
-        detail = ""
-        try:
-            detail = exc.response.json().get("error", {}).get("message", "")
-        except Exception:
-            pass
-        return {"error": f"Görsel API isteği başarısız (HTTP {status}). {detail}".strip()}
-    except (requests.RequestException, ValueError):
-        return {"error": "Görsel oluşturma servisine bağlanılamadı. Biraz sonra tekrar dene."}
+        return {"error": "Görsel oluşturma zaman aşımına uğradı."}
+    except requests.RequestException:
+        return {"error": "Görsel servisine bağlanılamadı."}
 
-
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return HTML_PAGE
-
+@app.post("/api/chat")
+def chat(data: ChatRequest, request: Request):
+    message = data.message.strip()
+    if not message:
+        return {"reply": "Bir mesaj yazıp tekrar dene."}
+    uid = get_user_id(request)
+    if not uid:
+        return {"error": "Önce kayıt ol veya giriş yap."}
+    if is_image_request(message):
+        return generate_image(message, uid)
+    if not OLLAMA_API_KEY:
+        return {"error": "Render Environment bölümünde OLLAMA_API_KEY eksik."}
+    try:
+        r = requests.post("https://ollama.com/api/chat",
+            headers={"Authorization": f"Bearer {OLLAMA_API_KEY}", "Content-Type": "application/json"},
+            json={"model": OLLAMA_MODEL, "stream": False,
+                  "messages": [{"role":"system","content":"Sen Tekden AI'sın. Türkçe, anlaşılır ve nazik cevap ver. Geliştiricin Ahmet Kerim Kırgız."},
+                               {"role":"user","content":message}],
+                  "options":{"temperature":0.7}}, timeout=180)
+        if r.status_code == 401:
+            return {"error":"Ollama API anahtarı kabul edilmedi."}
+        if r.status_code == 429:
+            return {"error":"Ollama kullanım kotası dolmuş olabilir."}
+        if r.status_code == 404:
+            return {"error":f"Model bulunamadı: {OLLAMA_MODEL}. OLLAMA_MODEL değerini kontrol et."}
+        r.raise_for_status()
+        answer = r.json().get("message",{}).get("content","").strip()
+        return {"reply": answer or "Şu anda yanıt oluşturamadım."}
+    except requests.Timeout:
+        return {"error":"İstek çok uzun sürdü."}
+    except requests.RequestException:
+        return {"error":"Ollama Cloud bağlantısı başarısız."}
 
 @app.get("/api/health")
 def health():
-    configured = bool(API_KEY)
-    return {
-        "ok": configured,
-        "provider": "Ollama Cloud",
-        "model": MODEL_NAME,
-        "message": (
-            "Ollama Cloud bağlantısı yapılandırıldı."
-            if configured
-            else "Render ortam değişkenlerinde OLLAMA_API_KEY eksik."
-        ),
-    }
+    return {"ok": bool(OLLAMA_API_KEY), "provider":"Ollama Cloud",
+            "model":OLLAMA_MODEL, "image_provider":"Pollinations (OpenAI dışı)"}
+
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return HTML
 
 
-def should_search_web(message: str) -> bool:
-    """Automatically search for current facts or when the user asks for sources/web."""
-    q = message.casefold()
-    triggers = [
-        "internette ara", "internetten ara", "webde ara", "web araması", "kaynak göster",
-        "kaynakları göster", "kaynakların neler", "hangi sitelere baktın", "internetten bul",
-        "güncel", "şu an", "şuanda", "bugün", "dün", "son dakika", "en son", "son haberler",
-        "haberleri", "haberler", "2026", "fiyatı", "fiyatları", "kaç para", "döviz", "kur kaç",
-        "hava durumu", "hava nasıl", "hava kaç derece", "maç sonucu", "puan durumu", "seçim sonucu",
-        "kim kazandı", "ne zaman çıkacak", "yayınlandı mı", "açık mı", "çalışıyor mu",
-        "en iyi", "karşılaştır", "incele", "araştır", "resmî site", "resmi site", "linkini ver",
-        "bağlantısını ver", "kaynakça", "kanıtları", "istatistikleri"
-    ]
-    return any(term in q for term in triggers)
-
-
-@app.post("/api/chat")
-def chat(data: ChatRequest):
-    message = data.message.strip()
-    if not message:
-        return {"reply": "Bir mesaj yazıp tekrar dener misin?"}
-
-    if should_generate_image(message):
-        return generate_image(message)
-
-    if not API_KEY:
-        return {"error": "Sunucu ayarı eksik: Render'da OLLAMA_API_KEY ortam değişkenini ekle."}
-
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    sources = []
-    web_search = should_search_web(message)
-
-    try:
-        if web_search:
-            search_response = requests.post(
-                "https://ollama.com/api/web_search",
-                headers={
-                    "Authorization": f"Bearer {API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={"query": message, "max_results": 5},
-                timeout=30,
-            )
-            if search_response.status_code == 401:
-                return {"error": "Ollama API anahtarı web araması için kabul edilmedi. Render'daki OLLAMA_API_KEY değerini kontrol et."}
-            if search_response.status_code == 429:
-                return {"error": "Web arama kullanım sınırına ulaşıldı. Ollama hesabındaki kullanım durumunu kontrol et."}
-            search_response.raise_for_status()
-            search_data = search_response.json()
-            results = search_data.get("results", [])
-            if not results:
-                return {"error": "Bu sorgu için web arama sonucu bulunamadı. Farklı kelimelerle dene."}
-            sources = [
-                {"title": str(item.get("title", "Kaynak"))[:250], "url": str(item.get("url", ""))}
-                for item in results
-                if str(item.get("url", "")).startswith(("https://", "http://"))
-            ][:5]
-            search_context = "\n\n".join(
-                f"Kaynak {i+1}: {item.get('title', '')}\nURL: {item.get('url', '')}\nÖzet: {item.get('content', '')}"
-                for i, item in enumerate(results[:5])
-            )
-            messages.append({
-                "role": "system",
-                "content": "Kullanıcı web araması istedi. Aşağıdaki güncel arama sonuçlarını kullan. Yalnızca sonuçların desteklediği iddiaları gerçekmiş gibi sun; kaynaklarda olmayan ayrıntıları uydurma. Cevabını Türkçe ve anlaşılır ver. Arama sonuçlarının kaynakları ayrıca arayüzde bağlantı olarak gösterilecek.\n\n" + search_context,
-            })
-
-        messages.append({"role": "user", "content": message})
-        response = requests.post(
-            OLLAMA_URL,
-            headers={
-                "Authorization": f"Bearer {API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": MODEL_NAME,
-                "stream": False,
-                "messages": messages,
-                "options": {"temperature": 0.7},
-            },
-            timeout=180,
-        )
-        if response.status_code == 401:
-            return {"error": "Ollama API anahtarı kabul edilmedi. Render'daki OLLAMA_API_KEY değerini kontrol et."}
-        if response.status_code == 429:
-            return {"error": "Ollama kullanım sınırına ulaşıldı veya kota geçici olarak doldu. Hesabındaki kullanım durumunu kontrol et."}
-        if response.status_code == 404:
-            return {"error": f"Model bulunamadı: {MODEL_NAME}. Render'daki OLLAMA_MODEL değerini desteklenen tam model adıyla güncelle."}
-        response.raise_for_status()
-        result = response.json()
-        reply = result.get("message", {}).get("content", "").strip()
-        if not reply:
-            reply = "Şu anda yanıt oluşturamadım. Bir kez daha dener misin?"
-        return {"reply": reply, "sources": sources}
-    except requests.Timeout:
-        return {"error": "İstek çok uzun sürdü. Lütfen tekrar dene."}
-    except requests.ConnectionError:
-        return {"error": "Ollama Cloud servisine bağlanamadım. Biraz sonra tekrar dene."}
-    except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else "bilinmiyor"
-        return {"error": f"Ollama isteği başarısız oldu (HTTP {status}). API anahtarını ve kullanım kotanı kontrol et."}
-    except (requests.RequestException, ValueError):
-        return {"error": "Web araması veya Ollama yanıtı okunamadı. Biraz sonra tekrar dene."}
-
-
-HTML_PAGE = r"""
-<!doctype html>
-<html lang="tr">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tekden AI</title>
-<style>
-:root{color-scheme:dark;--bg:#0b1020;--panel:#111a2e;--panel2:#17233b;--line:#263653;--text:#edf3ff;--muted:#a8b6d1;--accent:#7c9cff;--accent2:#9d7cff}
-*{box-sizing:border-box}
-body{margin:0;min-height:100vh;background:radial-gradient(ellipse at top,#1b2b4b 0,#0b1020 55%);color:var(--text);font:16px/1.5 system-ui,-apple-system,Segoe UI,sans-serif;display:flex;justify-content:center}
-.app{width:min(100%,980px);height:100vh;min-height:560px;display:flex;flex-direction:column;padding:18px}
-header{display:flex;align-items:center;gap:12px;padding:8px 4px 18px;border-bottom:1px solid var(--line)}
-.logo{width:46px;height:46px;border-radius:15px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;font-size:23px;font-weight:800;color:#fff;box-shadow:0 8px 30px #536fe944}
-.brand{flex:1}.brand h1{font-size:21px;margin:0}.brand p{margin:2px 0 0;color:var(--muted);font-size:13px}
-button{font:inherit;cursor:pointer;border:1px solid var(--line);color:var(--text);background:var(--panel2);border-radius:12px;padding:10px 14px}
-button:hover{filter:brightness(1.15)}button:disabled{opacity:.5;cursor:wait}
-#status{font-size:12px;color:var(--muted);padding:10px 4px}
-#messages{flex:1;overflow:auto;padding:14px 2px 24px;display:flex;flex-direction:column;gap:18px;scroll-behavior:smooth}
-.welcome{margin:auto;text-align:center;max-width:580px;padding:26px}
-.welcome .biglogo{font-size:44px}.welcome h2{font-size:28px;margin:10px 0}.welcome p{color:var(--muted)}
-.suggestions{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:20px}
-.suggestions button{font-size:13px}
-.message{display:flex;gap:10px;max-width:88%;align-items:flex-start}
-.message.user{align-self:flex-end;flex-direction:row-reverse}
-.avatar{flex:0 0 34px;height:34px;border-radius:11px;background:var(--panel2);display:grid;place-items:center;font-size:15px}
-.message.user .avatar{background:#314a83}
-.bubble{padding:12px 15px;border:1px solid var(--line);background:var(--panel);border-radius:5px 16px 16px 16px;white-space:pre-wrap;overflow-wrap:anywhere}
-.message.user .bubble{background:#20345b;border-radius:16px 5px 16px 16px}
-.composer{border:1px solid var(--line);background:#111a2eeF;border-radius:18px;padding:10px;display:flex;gap:10px;align-items:flex-end;box-shadow:0 12px 35px #0003;flex-wrap:wrap}
-.search-toggle{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;padding:4px 8px;width:100%}.search-toggle input{accent-color:var(--accent);width:16px;height:16px}
-.sources{margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#0d1528;font-size:13px}.sources strong{display:block;margin-bottom:6px}.sources a{display:block;color:#a9bcff;text-decoration:none;overflow-wrap:anywhere;margin:5px 0}.sources a:hover{text-decoration:underline}
-textarea{flex:1;resize:none;max-height:180px;min-height:46px;border:0;outline:0;background:transparent;color:var(--text);font:inherit;padding:11px}
-#send{background:linear-gradient(135deg,var(--accent),var(--accent2));border:0;font-weight:700;min-width:86px}
-footer{text-align:center;color:var(--muted);font-size:11px;padding:10px 0 0}
-@media(max-width:600px){.app{padding:10px;min-height:500px}.message{max-width:96%}.brand h1{font-size:19px}.welcome{padding:12px}#newChat{padding:8px;font-size:13px}}
-</style>
-</head>
-<body>
-<div class="app">
-<header>
-  <div class="logo">T</div>
-  <div class="brand"><h1>Tekden AI</h1><p>Ahmet Kerim tarafından geliştirildi</p></div>
-  <button id="newChat" type="button">＋ Yeni sohbet</button>
-</header>
-<div id="status">Ollama Cloud bağlantısı kontrol ediliyor…</div>
-<main id="messages" aria-live="polite">
-  <section class="welcome" id="welcome">
-    <div class="biglogo">✦</div>
-    <h2>Merhaba, ben Tekden AI.</h2>
-    <p>Ahmet Kerim tarafından geliştirilen yapay zekâ asistanın. Bugün ne yapmak istiyorsun?</p>
-    <div class="suggestions">
-      <button type="button" data-prompt="Python öğrenmeye nereden başlamalıyım?">Python öğren</button>
-      <button type="button" data-prompt="Bana yaratıcı bir proje fikri öner.">Proje fikri bul</button>
-      <button type="button" data-prompt="Yapay zekâ nasıl çalışır? Basitçe anlat.">Yapay zekâyı keşfet</button>
-    </div>
-  </section>
-</main>
-<form id="form" class="composer">
-  <textarea id="input" placeholder="Tekden AI'ya bir mesaj yaz…" rows="1" aria-label="Mesaj"></textarea>
-  <button id="send" type="submit">Gönder ↑</button>
-</form>
-<footer>Tekden AI · Ollama Cloud ile çalışır · Gerektiğinde otomatik web araması</footer>
-</div>
-<script>
-const messages = document.getElementById('messages');
-const welcome = document.getElementById('welcome');
-const form = document.getElementById('form');
-const input = document.getElementById('input');
-const send = document.getElementById('send');
-const statusEl = document.getElementById('status');
-let busy = false;
-
-function addMessage(text, who) {
-  if (welcome && welcome.isConnected) welcome.remove();
-  const row = document.createElement('div');
-  row.className = 'message ' + who;
-  const avatar = document.createElement('div');
-  avatar.className = 'avatar';
-  avatar.textContent = who === 'user' ? 'S' : 'T';
-  const bubble = document.createElement('div');
-  bubble.className = 'bubble';
-  bubble.textContent = text;
-  row.append(avatar, bubble);
-  messages.appendChild(row);
-  messages.scrollTop = messages.scrollHeight;
-  return bubble;
-}
-
-async function sendMessage(text) {
-  text = text.trim();
-  if (!text || busy) return;
-  addMessage(text, 'user');
-  input.value = '';
-  input.style.height = '46px';
-  busy = true;
-  send.disabled = true;
-  const waiting = addMessage('Düşünüyorum…', 'assistant');
-  try {
-    const res = await fetch('/api/chat', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text})
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : (data.error || 'Sunucu hatası oluştu.'));
-    waiting.textContent = data.reply || data.error || 'Yanıt alınamadı.';
-    if (data.error) waiting.textContent = '⚠️ ' + data.error;
-    if (!data.error && data.image) {
-      const img = document.createElement('img');
-      img.src = data.image;
-      img.alt = text;
-      img.style.display = 'block';
-      img.style.width = '100%';
-      img.style.maxWidth = '640px';
-      img.style.height = 'auto';
-      img.style.marginTop = '10px';
-      img.style.borderRadius = '12px';
-      img.style.border = '1px solid var(--line)';
-      waiting.appendChild(document.createElement('br'));
-      waiting.appendChild(img);
-    }
-    if (!data.error && Array.isArray(data.sources) && data.sources.length) {
-      const sourceBox = document.createElement('div');
-      sourceBox.className = 'sources';
-      const heading = document.createElement('strong');
-      heading.textContent = 'Kaynaklar';
-      sourceBox.appendChild(heading);
-      data.sources.forEach(source => {
-        const link = document.createElement('a');
-        link.href = source.url;
-        link.target = '_blank';
-        link.rel = 'noopener noreferrer';
-        link.textContent = source.title || source.url;
-        sourceBox.appendChild(link);
-      });
-      waiting.parentElement.appendChild(sourceBox);
-    }
-  } catch (err) {
-    waiting.textContent = '⚠️ ' + (typeof err.message === 'string' ? err.message : 'İstek başarısız oldu.') + '\nGerekirse Render Logs bölümünü kontrol et.';
-  } finally {
-    busy = false;
-    send.disabled = false;
-    input.focus();
-    messages.scrollTop = messages.scrollHeight;
-  }
-}
-
-form.addEventListener('submit', event => {
-  event.preventDefault();
-  sendMessage(input.value);
-});
-input.addEventListener('input', () => {
-  input.style.height = '46px';
-  input.style.height = Math.min(input.scrollHeight, 180) + 'px';
-});
-input.addEventListener('keydown', event => {
-  if (event.key === 'Enter' && !event.shiftKey) {
-    event.preventDefault();
-    form.requestSubmit();
-  }
-});
-document.querySelectorAll('[data-prompt]').forEach(button => {
-  button.addEventListener('click', () => sendMessage(button.dataset.prompt));
-});
-document.getElementById('newChat').addEventListener('click', () => {
-  messages.innerHTML = '';
-  const section = document.createElement('section');
-  section.className = 'welcome';
-  section.innerHTML = '<div class="biglogo">✦</div><h2>Merhaba, ben Tekden AI.</h2><p>Ahmet Kerim tarafından geliştirilen yapay zekâ asistanın. Bugün ne yapmak istiyorsun?</p>';
-  messages.appendChild(section);
-  input.value = '';
-  input.focus();
-});
-fetch('/api/health').then(r => r.json()).then(data => {
-  statusEl.textContent = data.ok
-    ? '● Ollama Cloud bağlı · İnternet araması hazır'
-    : '● Ollama Cloud ayarını kontrol et';
-}).catch(() => { statusEl.textContent = 'Bağlantı durumu kontrol edilemedi.'; });
-</script>
-</body>
-</html>
-"""
+HTML = '<!doctype html>\n<html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Tekden AI</title><style>\n:root{color-scheme:dark;--bg:#0b1020;--panel:#111a2e;--line:#263653;--text:#edf3ff;--muted:#a8b6d1;--accent:#7c9cff}\n*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#1b2b4b,#0b1020 60%);color:var(--text);font:16px/1.5 system-ui;display:flex;justify-content:center}\n.app{width:min(100%,980px);height:100vh;min-height:540px;display:flex;flex-direction:column;padding:16px}\nheader{display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line);padding:8px 0 16px}\n.logo{width:44px;height:44px;border-radius:14px;background:linear-gradient(135deg,#7c9cff,#9d7cff);display:grid;place-items:center;font-size:24px;font-weight:800}\n.brand{flex:1}.brand h1{margin:0;font-size:21px}.brand p{margin:0;color:var(--muted);font-size:13px}\nbutton{cursor:pointer;border:1px solid var(--line);border-radius:11px;padding:9px 12px;color:var(--text);background:#17233b;font:inherit}\n#status{font-size:12px;color:var(--muted);padding:10px 0}#authPanel{background:var(--panel);border:1px solid var(--line);padding:12px;border-radius:14px}\ninput{max-width:100%;padding:10px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--text);margin:4px}\n#messages{flex:1;overflow:auto;display:flex;flex-direction:column;gap:14px;padding:12px 0}\n.msg{max-width:90%;padding:12px 14px;background:var(--panel);border:1px solid var(--line);border-radius:14px;white-space:pre-wrap;overflow-wrap:anywhere}\n.msg.user{align-self:flex-end;background:#20345b}.msg img{display:block;max-width:100%;width:640px;border-radius:12px;margin-top:10px}\nform{display:flex;gap:8px;border:1px solid var(--line);border-radius:15px;padding:8px;background:var(--panel)}\ntextarea{flex:1;min-height:46px;max-height:150px;resize:vertical;background:transparent;border:0;outline:0;color:var(--text);font:inherit;padding:10px}\n#send{background:var(--accent);color:#10172b;font-weight:700}footer{text-align:center;font-size:11px;color:var(--muted);padding-top:8px}\n</style></head><body><div class="app">\n<header><div class="logo">T</div><div class="brand"><h1>Tekden AI</h1><p>Ahmet Kerim tarafından geliştirildi</p></div><button id="authToggle">Giriş / Kayıt</button></header>\n<div id="status">Hesap durumu kontrol ediliyor…</div>\n<section id="authPanel" hidden><b>Hesabın</b><div><input id="username" placeholder="Kullanıcı adı" autocomplete="username"><input id="password" type="password" placeholder="Parola (en az 10 karakter)" autocomplete="current-password"></div><button id="register">Kayıt ol</button><button id="login">Giriş yap</button><button id="logout">Çıkış</button><div id="authMessage"></div></section>\n<main id="messages"><div class="msg">Merhaba, ben Tekden AI. Sohbet etmek için giriş yap. Görsel oluşturmak için “Bir kedi resmi oluştur” gibi bir istek yaz.</div></main>\n<form id="form"><textarea id="input" placeholder="Mesaj yaz… (Enter ile gönder, Shift+Enter yeni satır)"></textarea><button id="send">Gönder</button></form>\n<footer>Tekden AI · Sohbet: Ollama Cloud · Görsel: ayrı sağlayıcı · Günlük 3 görsel hakkı</footer></div>\n<script>\nconst $=id=>document.getElementById(id), msgs=$(\'messages\');let busy=false;\nfunction add(text,who=\'assistant\',image=null){const d=document.createElement(\'div\');d.className=\'msg \'+who;d.textContent=text;if(image){const im=document.createElement(\'img\');im.src=image;im.alt=\'Oluşturulan görsel\';d.appendChild(im)}msgs.appendChild(d);msgs.scrollTop=msgs.scrollHeight;return d}\nasync function requestAuth(path){$(\'authMessage\').textContent=\'İşleniyor…\';try{const r=await fetch(path,{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify({username:$(\'username\').value,password:$(\'password\').value})});const d=await r.json();if(!r.ok)throw Error(d.detail||d.error||\'İşlem başarısız\');$(\'authMessage\').textContent=\'Başarılı. Kalan görsel hakkı: \'+d.images_remaining;await refresh()}catch(e){$(\'authMessage\').textContent=e.message}}\n$(\'authToggle\').onclick=()=>{$(\'authPanel\').hidden=!$(\'authPanel\').hidden};\n$(\'register\').onclick=()=>requestAuth(\'/api/register\');$(\'login\').onclick=()=>requestAuth(\'/api/login\');\n$(\'logout\').onclick=async()=>{await fetch(\'/api/logout\',{method:\'POST\'});$(\'authMessage\').textContent=\'Çıkış yapıldı\';refresh()};\nasync function refresh(){try{const d=await (await fetch(\'/api/me\')).json();$(\'status\').textContent=d.authenticated?d.username+\' · Bugün kalan görsel hakkı: \'+d.images_remaining:\'Giriş yapılmadı · Sohbet ve görsel üretimi için giriş yap\'}catch{$(\'status\').textContent=\'Durum alınamadı\'}}\n$(\'form\').onsubmit=async e=>{e.preventDefault();const text=$(\'input\').value.trim();if(!text||busy)return;add(text,\'user\');$(\'input\').value=\'\';busy=true;$(\'send\').disabled=true;const wait=add(\'Düşünüyorum…\');try{const r=await fetch(\'/api/chat\',{method:\'POST\',headers:{\'Content-Type\':\'application/json\'},body:JSON.stringify({message:text})});const d=await r.json();wait.remove();add(d.error?\'⚠️ \'+d.error:(d.reply||\'Yanıt yok\'), \'assistant\',d.image||null);if(d.images_remaining!==undefined)refresh()}catch{wait.textContent=\'İstek başarısız oldu.\'}finally{busy=false;$(\'send\').disabled=false;$(\'input\').focus()}};\n$(\'input\').onkeydown=e=>{if(e.key===\'Enter\'&&!e.shiftKey){e.preventDefault();$(\'form\').requestSubmit()}};\nrefresh();\n</script></body></html>'
