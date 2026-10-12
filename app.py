@@ -15,17 +15,16 @@ Sen Tekden AI'sın.
 Ahmet Kerim Kırgız tarafından geliştirilen genel amaçlı bir yapay zekâ asistanısın.
 Kendini tanıtırken adının Tekden AI olduğunu ve geliştiricinin Ahmet Kerim Kırgız olduğunu söyle.
 Türkçe, anlaşılır, nazik ve faydalı cevaplar ver.
-İstenildiği zaman İngilizce konuş.
-İstenildiği zaman başta Türkçe ve İngilizce olmak üzere tüm dilleri konuş.
+İstedildiği zaman İngilizce konuş.
+İstenildiği zaman Türkçe ve İngilizce başta olmak üzere tüm dilleri konuş.
 Bilmediğin bilgileri uydurma; emin değilsen bunu açıkça belirt.
-Programlama, eğitim, bilim, yazma, görsel üretme ve proje geliştirme konularında yardımcı ol.
+Programlama, eğitim, bilim, yazma ve proje geliştirme konularında yardımcı ol.
 Güvenli olmayan isteklerde güvenli alternatifler sun.
 """.strip()
 
 
 class ChatRequest(BaseModel):
     message: str
-    web_search: bool = False
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -49,6 +48,22 @@ def health():
 
 
 @app.post("/api/chat")
+def should_search_web(message: str) -> bool:
+    """Automatically search for current facts or when the user asks for sources/web."""
+    q = message.casefold()
+    triggers = [
+        "internette ara", "internetten ara", "webde ara", "web araması", "kaynak göster",
+        "kaynakları göster", "kaynakların neler", "hangi sitelere baktın", "internetten bul",
+        "güncel", "şu an", "şuanda", "bugün", "dün", "son dakika", "en son", "son haberler",
+        "haberleri", "haberler", "2026", "fiyatı", "fiyatları", "kaç para", "döviz", "kur kaç",
+        "hava durumu", "hava nasıl", "hava kaç derece", "maç sonucu", "puan durumu", "seçim sonucu",
+        "kim kazandı", "ne zaman çıkacak", "yayınlandı mı", "açık mı", "çalışıyor mu",
+        "en iyi", "karşılaştır", "incele", "araştır", "resmî site", "resmi site", "linkini ver",
+        "bağlantısını ver", "kaynakça", "kanıtları", "istatistikleri"
+    ]
+    return any(term in q for term in triggers)
+
+
 def chat(data: ChatRequest):
     message = data.message.strip()
     if not message:
@@ -59,9 +74,10 @@ def chat(data: ChatRequest):
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     sources = []
+    web_search = should_search_web(message)
 
     try:
-        if data.web_search:
+        if web_search:
             search_response = requests.post(
                 "https://ollama.com/api/web_search",
                 headers={
@@ -191,11 +207,10 @@ footer{text-align:center;color:var(--muted);font-size:11px;padding:10px 0 0}
   </section>
 </main>
 <form id="form" class="composer">
-  <label class="search-toggle"><input id="webSearch" type="checkbox"> 🌐 İnternette ara ve kaynakları göster</label>
   <textarea id="input" placeholder="Tekden AI'ya bir mesaj yaz…" rows="1" aria-label="Mesaj"></textarea>
   <button id="send" type="submit">Gönder ↑</button>
 </form>
-<footer>Tekden AI · Ollama Cloud ile çalışır · İnternet araması isteğe bağlıdır</footer>
+<footer>Tekden AI · Ollama Cloud ile çalışır · Gerektiğinde otomatik web araması</footer>
 </div>
 <script>
 const messages = document.getElementById('messages');
@@ -235,7 +250,7 @@ async function sendMessage(text) {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text, web_search: document.getElementById('webSearch').checked})
+      body: JSON.stringify({message: text})
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Sunucu hatası oluştu.');
