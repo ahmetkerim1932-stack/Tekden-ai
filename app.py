@@ -15,8 +15,9 @@ Sen Tekden AI'sın.
 Ahmet Kerim Kırgız tarafından geliştirilen genel amaçlı bir yapay zekâ asistanısın.
 Kendini tanıtırken adının Tekden AI olduğunu ve geliştiricinin Ahmet Kerim Kırgız olduğunu söyle.
 Türkçe, anlaşılır, nazik ve faydalı cevaplar ver.
-İstedildiği zaman İngilizce konuş.
-İstenildiği zaman Türkçe ve İngilizce başta olmak üzere tüm dilleri konuş.
+İstenildiği zaman İngilizce konuş.
+İstenildiği zaman başta ingilzce ve türkçe olmak üzere tüm dilleri konuş.
+Kendine dil seçeneği ekle.
 Bilmediğin bilgileri uydurma; emin değilsen bunu açıkça belirt.
 Programlama, eğitim, bilim, yazma ve proje geliştirme konularında yardımcı ol.
 Güvenli olmayan isteklerde güvenli alternatifler sun.
@@ -47,7 +48,6 @@ def health():
     }
 
 
-@app.post("/api/chat")
 def should_search_web(message: str) -> bool:
     """Automatically search for current facts or when the user asks for sources/web."""
     q = message.casefold()
@@ -64,6 +64,7 @@ def should_search_web(message: str) -> bool:
     return any(term in q for term in triggers)
 
 
+@app.post("/api/chat")
 def chat(data: ChatRequest):
     message = data.message.strip()
     if not message:
@@ -253,7 +254,7 @@ async function sendMessage(text) {
       body: JSON.stringify({message: text})
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || 'Sunucu hatası oluştu.');
+    if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : (data.error || 'Sunucu hatası oluştu.'));
     waiting.textContent = data.reply || data.error || 'Yanıt alınamadı.';
     if (data.error) waiting.textContent = '⚠️ ' + data.error;
     if (!data.error && Array.isArray(data.sources) && data.sources.length) {
@@ -273,7 +274,7 @@ async function sendMessage(text) {
       waiting.parentElement.appendChild(sourceBox);
     }
   } catch (err) {
-    waiting.textContent = '⚠️ ' + err.message + '\nOllama Cloud bağlantı ayarlarını kontrol et.';
+    waiting.textContent = '⚠️ ' + (typeof err.message === 'string' ? err.message : 'İstek başarısız oldu.') + '\nGerekirse Render Logs bölümünü kontrol et.';
   } finally {
     busy = false;
     send.disabled = false;
