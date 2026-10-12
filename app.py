@@ -15,9 +15,8 @@ Sen Tekden AI'sın.
 Ahmet Kerim Kırgız tarafından geliştirilen genel amaçlı bir yapay zekâ asistanısın.
 Kendini tanıtırken adının Tekden AI olduğunu ve geliştiricinin Ahmet Kerim Kırgız olduğunu söyle.
 Türkçe, anlaşılır, nazik ve faydalı cevaplar ver.
-İstenildiği zaman İngilizce de konuş.
-İstenildiği zaman istenilen dili konuş.
-İstenildiği zaman sesli sohbet özelliği ekle.
+İstenildiği zaman İngilizce konuş.
+İstenildiği zaman başta Türkçe ve İngilizce olmak üzere tüm dilleri konuş.
 Bilmediğin bilgileri uydurma; emin değilsen bunu açıkça belirt.
 Programlama, eğitim, bilim, yazma, görsel üretme ve proje geliştirme konularında yardımcı ol.
 Güvenli olmayan isteklerde güvenli alternatifler sun.
@@ -26,6 +25,7 @@ Güvenli olmayan isteklerde güvenli alternatifler sun.
 
 class ChatRequest(BaseModel):
     message: str
+    web_search: bool = False
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -57,7 +57,44 @@ def chat(data: ChatRequest):
     if not API_KEY:
         return {"error": "Sunucu ayarı eksik: Render'da OLLAMA_API_KEY ortam değişkenini ekle."}
 
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    sources = []
+
     try:
+        if data.web_search:
+            search_response = requests.post(
+                "https://ollama.com/api/web_search",
+                headers={
+                    "Authorization": f"Bearer {API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={"query": message, "max_results": 5},
+                timeout=30,
+            )
+            if search_response.status_code == 401:
+                return {"error": "Ollama API anahtarı web araması için kabul edilmedi. Render'daki OLLAMA_API_KEY değerini kontrol et."}
+            if search_response.status_code == 429:
+                return {"error": "Web arama kullanım sınırına ulaşıldı. Ollama hesabındaki kullanım durumunu kontrol et."}
+            search_response.raise_for_status()
+            search_data = search_response.json()
+            results = search_data.get("results", [])
+            if not results:
+                return {"error": "Bu sorgu için web arama sonucu bulunamadı. Farklı kelimelerle dene."}
+            sources = [
+                {"title": str(item.get("title", "Kaynak"))[:250], "url": str(item.get("url", ""))}
+                for item in results
+                if str(item.get("url", "")).startswith(("https://", "http://"))
+            ][:5]
+            search_context = "\n\n".join(
+                f"Kaynak {i+1}: {item.get('title', '')}\nURL: {item.get('url', '')}\nÖzet: {item.get('content', '')}"
+                for i, item in enumerate(results[:5])
+            )
+            messages.append({
+                "role": "system",
+                "content": "Kullanıcı web araması istedi. Aşağıdaki güncel arama sonuçlarını kullan. Yalnızca sonuçların desteklediği iddiaları gerçekmiş gibi sun; kaynaklarda olmayan ayrıntıları uydurma. Cevabını Türkçe ve anlaşılır ver. Arama sonuçlarının kaynakları ayrıca arayüzde bağlantı olarak gösterilecek.\n\n" + search_context,
+            })
+
+        messages.append({"role": "user", "content": message})
         response = requests.post(
             OLLAMA_URL,
             headers={
@@ -67,10 +104,7 @@ def chat(data: ChatRequest):
             json={
                 "model": MODEL_NAME,
                 "stream": False,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": message},
-                ],
+                "messages": messages,
                 "options": {"temperature": 0.7},
             },
             timeout=180,
@@ -80,21 +114,22 @@ def chat(data: ChatRequest):
         if response.status_code == 429:
             return {"error": "Ollama kullanım sınırına ulaşıldı veya kota geçici olarak doldu. Hesabındaki kullanım durumunu kontrol et."}
         if response.status_code == 404:
-            return {"error": f"Model bulunamadı: {MODEL_NAME}. Render'daki OLLAMA_MODEL değerini Ollama Cloud'da desteklenen tam model adıyla güncelle."}
+            return {"error": f"Model bulunamadı: {MODEL_NAME}. Render'daki OLLAMA_MODEL değerini desteklenen tam model adıyla güncelle."}
         response.raise_for_status()
         result = response.json()
         reply = result.get("message", {}).get("content", "").strip()
         if not reply:
             reply = "Şu anda yanıt oluşturamadım. Bir kez daha dener misin?"
-        return {"reply": reply}
+        return {"reply": reply, "sources": sources}
     except requests.Timeout:
-        return {"error": "Yanıt oluşturmak çok uzun sürdü. Lütfen tekrar dene."}
+        return {"error": "İstek çok uzun sürdü. Lütfen tekrar dene."}
     except requests.ConnectionError:
         return {"error": "Ollama Cloud servisine bağlanamadım. Biraz sonra tekrar dene."}
-    except requests.HTTPError:
-        return {"error": f"Ollama Cloud isteği başarısız oldu (HTTP {response.status_code}). API anahtarını, model adını ve kullanım kotanı kontrol et."}
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "bilinmiyor"
+        return {"error": f"Ollama isteği başarısız oldu (HTTP {status}). API anahtarını ve kullanım kotanı kontrol et."}
     except (requests.RequestException, ValueError):
-        return {"error": "Ollama Cloud yanıtı okunamadı. Biraz sonra tekrar dene."}
+        return {"error": "Web araması veya Ollama yanıtı okunamadı. Biraz sonra tekrar dene."}
 
 
 HTML_PAGE = r"""
@@ -126,7 +161,9 @@ button:hover{filter:brightness(1.15)}button:disabled{opacity:.5;cursor:wait}
 .message.user .avatar{background:#314a83}
 .bubble{padding:12px 15px;border:1px solid var(--line);background:var(--panel);border-radius:5px 16px 16px 16px;white-space:pre-wrap;overflow-wrap:anywhere}
 .message.user .bubble{background:#20345b;border-radius:16px 5px 16px 16px}
-.composer{border:1px solid var(--line);background:#111a2eeF;border-radius:18px;padding:10px;display:flex;gap:10px;align-items:flex-end;box-shadow:0 12px 35px #0003}
+.composer{border:1px solid var(--line);background:#111a2eeF;border-radius:18px;padding:10px;display:flex;gap:10px;align-items:flex-end;box-shadow:0 12px 35px #0003;flex-wrap:wrap}
+.search-toggle{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;padding:4px 8px;width:100%}.search-toggle input{accent-color:var(--accent);width:16px;height:16px}
+.sources{margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:#0d1528;font-size:13px}.sources strong{display:block;margin-bottom:6px}.sources a{display:block;color:#a9bcff;text-decoration:none;overflow-wrap:anywhere;margin:5px 0}.sources a:hover{text-decoration:underline}
 textarea{flex:1;resize:none;max-height:180px;min-height:46px;border:0;outline:0;background:transparent;color:var(--text);font:inherit;padding:11px}
 #send{background:linear-gradient(135deg,var(--accent),var(--accent2));border:0;font-weight:700;min-width:86px}
 footer{text-align:center;color:var(--muted);font-size:11px;padding:10px 0 0}
@@ -154,10 +191,11 @@ footer{text-align:center;color:var(--muted);font-size:11px;padding:10px 0 0}
   </section>
 </main>
 <form id="form" class="composer">
+  <label class="search-toggle"><input id="webSearch" type="checkbox"> 🌐 İnternette ara ve kaynakları göster</label>
   <textarea id="input" placeholder="Tekden AI'ya bir mesaj yaz…" rows="1" aria-label="Mesaj"></textarea>
   <button id="send" type="submit">Gönder ↑</button>
 </form>
-<footer>Tekden AI · Ollama Cloud ile çalışır</footer>
+<footer>Tekden AI · Ollama Cloud ile çalışır · İnternet araması isteğe bağlıdır</footer>
 </div>
 <script>
 const messages = document.getElementById('messages');
@@ -197,12 +235,28 @@ async function sendMessage(text) {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message: text})
+      body: JSON.stringify({message: text, web_search: document.getElementById('webSearch').checked})
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || 'Sunucu hatası oluştu.');
     waiting.textContent = data.reply || data.error || 'Yanıt alınamadı.';
     if (data.error) waiting.textContent = '⚠️ ' + data.error;
+    if (!data.error && Array.isArray(data.sources) && data.sources.length) {
+      const sourceBox = document.createElement('div');
+      sourceBox.className = 'sources';
+      const heading = document.createElement('strong');
+      heading.textContent = 'Kaynaklar';
+      sourceBox.appendChild(heading);
+      data.sources.forEach(source => {
+        const link = document.createElement('a');
+        link.href = source.url;
+        link.target = '_blank';
+        link.rel = 'noopener noreferrer';
+        link.textContent = source.title || source.url;
+        sourceBox.appendChild(link);
+      });
+      waiting.parentElement.appendChild(sourceBox);
+    }
   } catch (err) {
     waiting.textContent = '⚠️ ' + err.message + '\nOllama Cloud bağlantı ayarlarını kontrol et.';
   } finally {
@@ -241,8 +295,8 @@ document.getElementById('newChat').addEventListener('click', () => {
 });
 fetch('/api/health').then(r => r.json()).then(data => {
   statusEl.textContent = data.ok
-    ? (data.model_available ? '● Ollama bağlı · Qwen3:8B hazır' : '● Ollama bağlı · Model adı kontrol edilmeli')
-    : '● Ollama bağlantısı yok · Ollama uygulamasını aç';
+    ? '● Ollama Cloud bağlı · İnternet araması hazır'
+    : '● Ollama Cloud ayarını kontrol et';
 }).catch(() => { statusEl.textContent = 'Bağlantı durumu kontrol edilemedi.'; });
 </script>
 </body>
