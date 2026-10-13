@@ -4,7 +4,8 @@ from urllib.parse import quote
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-import requestsimport os, re, json, time, hmac, hashlib, secrets, base64
+import requests
+import os, re, json, time, hmac, hashlib, secrets, base64
 from urllib.parse import quote
 from datetime import datetime, timezone
 from typing import Optional
