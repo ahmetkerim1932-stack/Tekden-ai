@@ -1,3 +1,227 @@
+import os, re, json, time, hmac, hashlib, secrets, base64
+from datetime import datetime, timezone
+from urllib.parse import quote
+import requests
+import psycopg
+from psycopg.rows import dict_row
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field
+
+APP_NAME = "Tekden AI"
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip()
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud").strip()
+POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
+POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+COOKIE_NAME = "tekden_session"
+SESSION_DAYS = 14
+
+app = FastAPI(title=APP_NAME)
+
+def db():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL eksik. Supabase PostgreSQL bağlantısını Render Environment bölümüne ekle.")
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
+
+def init_db():
+    with db() as conn:
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id BIGSERIAL PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS chats (
+            id UUID PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            title TEXT NOT NULL DEFAULT 'Yeni sohbet',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id BIGSERIAL PRIMARY KEY,
+            chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK (role IN ('user','assistant')),
+            content TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chats_user_updated ON chats(user_id, updated_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id, id)")
+
+@app.on_event("startup")
+def startup():
+    if SESSION_SECRET and len(SESSION_SECRET) >= 32 and DATABASE_URL:
+        init_db()
+    else:
+        # App can show setup errors rather than crashing during import/startup.
+        pass
+
+def b64e(s: str) -> str:
+    return base64.urlsafe_b64encode(s.encode()).decode().rstrip("=")
+
+def b64d(s: str) -> str:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode()
+
+def make_session(user_id: int) -> str:
+    payload = f"{user_id}:{int(time.time()) + SESSION_DAYS*86400}:{secrets.token_hex(8)}"
+    sig = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return b64e(payload + ":" + sig)
+
+def read_session(request: Request):
+    token = request.cookies.get(COOKIE_NAME)
+    if not token or not SESSION_SECRET or len(SESSION_SECRET) < 32:
+        return None
+    try:
+        raw = b64d(token)
+        user_id, expires, nonce, sig = raw.split(":", 3)
+        payload = f"{user_id}:{expires}:{nonce}"
+        expected = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected) or int(expires) < int(time.time()):
+            return None
+        return int(user_id)
+    except Exception:
+        return None
+
+def hash_password(password: str, salt: bytes = None) -> str:
+    salt = salt or secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 310000)
+    return base64.urlsafe_b64encode(salt + digest).decode()
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        raw = base64.urlsafe_b64decode(stored.encode())
+        salt, digest = raw[:16], raw[16:]
+        candidate = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 310000)
+        return hmac.compare_digest(candidate, digest)
+    except Exception:
+        return False
+
+def current_user(request: Request):
+    uid = read_session(request)
+    if not uid:
+        return None
+    with db() as conn:
+        return conn.execute("SELECT id, username FROM users WHERE id=%s", (uid,)).fetchone()
+
+def web_search(query: str):
+    if TAVILY_API_KEY:
+        try:
+            r = requests.post("https://api.tavily.com/search",
+                json={"api_key": TAVILY_API_KEY, "query": query, "search_depth": "basic", "max_results": 5},
+                timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            return [{"title": x.get("title",""), "url": x.get("url",""), "snippet": x.get("content","")} for x in data.get("results", [])]
+        except Exception:
+            pass
+    # DuckDuckGo fallback, no API key required; availability can vary.
+    try:
+        from ddgs import DDGS
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=5))
+        return [{"title": x.get("title",""), "url": x.get("href",""), "snippet": x.get("body","")} for x in results]
+    except Exception:
+        return []
+
+def should_search(text: str) -> bool:
+    t = text.lower()
+    cues = ["internette ara", "web'de ara", "webde ara", "güncel", "bugün", "son dakika",
+            "en son", "kaynak göster", "kaynakları", "araştır", "2026", "şu an", "fiyatı ne",
+            "latest", "current", "today", "search the web", "look up"]
+    return any(x in t for x in cues) or t.strip().startswith("/search ")
+
+def call_ollama(messages):
+    if not OLLAMA_API_KEY:
+        raise RuntimeError("OLLAMA_API_KEY eksik. Render Environment bölümüne Ollama Cloud API anahtarını ekle.")
+    r = requests.post("https://ollama.com/api/chat",
+        headers={"Authorization": f"Bearer {OLLAMA_API_KEY}", "Content-Type": "application/json"},
+        json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
+        timeout=120)
+    if not r.ok:
+        raise RuntimeError(f"Ollama API hatası ({r.status_code}): {r.text[:500]}")
+    data = r.json()
+    return data.get("message", {}).get("content") or data.get("response") or "Yanıt alınamadı."
+
+class AuthBody(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    password: str = Field(min_length=8, max_length=128)
+
+class ChatBody(BaseModel):
+    message: str = Field(min_length=1, max_length=12000)
+    chat_id: str | None = None
+    guest_history: list[dict] = Field(default_factory=list)
+    force_search: bool = False
+
+class ImageBody(BaseModel):
+    prompt: str = Field(min_length=2, max_length=2000)
+
+@app.get("/health")
+def health():
+    return {"ok": True, "app": APP_NAME, "database_configured": bool(DATABASE_URL),
+            "ollama_configured": bool(OLLAMA_API_KEY), "image_configured": bool(POLLINATIONS_API_KEY)}
+
+@app.post("/api/register")
+def register(body: AuthBody, response: JSONResponse):
+    username = body.username.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
+        raise HTTPException(400, "Kullanıcı adı 3-32 karakter olmalı; harf, sayı, nokta, tire ve alt çizgi kullan.")
+    if not SESSION_SECRET or len(SESSION_SECRET) < 32:
+        raise HTTPException(500, "SESSION_SECRET eksik veya çok kısa.")
+    try:
+        with db() as conn:
+            row = conn.execute("INSERT INTO users(username,password_hash) VALUES(%s,%s) RETURNING id, username",
+                               (username, hash_password(body.password))).fetchone()
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(409, "Bu kullanıcı adı zaten alınmış.")
+    token = make_session(row["id"])
+    out = JSONResponse({"ok": True, "user": {"id": row["id"], "username": row["username"]}})
+    out.set_cookie(COOKIE_NAME, token, httponly=True, secure=True, samesite="lax", max_age=SESSION_DAYS*86400)
+    return out
+
+@app.post("/api/login")
+def login(body: AuthBody):
+    with db() as conn:
+        row = conn.execute("SELECT id, username, password_hash FROM users WHERE lower(username)=lower(%s)", (body.username.strip(),)).fetchone()
+    if not row or not verify_password(body.password, row["password_hash"]):
+        raise HTTPException(401, "Kullanıcı adı veya şifre hatalı.")
+    out = JSONResponse({"ok": True, "user": {"id": row["id"], "username": row["username"]}})
+    out.set_cookie(COOKIE_NAME, make_session(row["id"]), httponly=True, secure=True, samesite="lax", max_age=SESSION_DAYS*86400)
+    return out
+
+@app.post("/api/logout")
+def logout():
+    out = JSONResponse({"ok": True})
+    out.delete_cookie(COOKIE_NAME, secure=True, httponly=True, samesite="lax")
+    return out
+
+@app.get("/api/me")
+def me(request: Request):
+    try:
+        user = current_user(request)
+    except Exception:
+        user = None
+    return {"user": user}
+
+@app.get("/api/chats")
+def list_chats(request: Request):
+    user = current_user(request)
+    if not user:
+        raise HTTPException(401, "Sohbet geçmişi için giriş yap.")
+    with db() as conn:
+        rows = conn.execute("SELECT id, title, created_at, updated_at FROM chats WHERE user_id=%s ORDER BY updated_at DESC LIMIT 100", (user["id"],)).fetchall()
+    return {"chats": rows}
+
+@app.get("/api/chats/{chat_id}")
+def get_chat(chat_id: str, request: Request):
+    user = current_user(request)
+    if not user:
+        raise HTTPException(401, "Giriş yap.")
     with db() as conn:
         chat = conn.execute("SELECT id, title FROM chats WHERE id=%s AND user_id=%s", (chat_id, user["id"])).fetchone()
         if not chat:
