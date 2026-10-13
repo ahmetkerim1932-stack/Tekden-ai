@@ -190,7 +190,7 @@ def chat(data: ChatRequest, request: Request):
         r = requests.post("https://ollama.com/api/chat",
             headers={"Authorization": f"Bearer {OLLAMA_API_KEY}", "Content-Type": "application/json"},
             json={"model": OLLAMA_MODEL, "stream": False,
-                  "messages": [{"role":"system","content":"Sen Tekden AI'sın. Türkçe, anlaşılır ve nazik cevap ver. Geliştiricin Ahmet Kerim Kırgız."},
+                  "messages": [{"role":"system","content":"Sen Tekden AI'sın. Türkçe, anlaşılır ve nazik cevap ver. Geliştiricin Ahmet Kerim."},
                                {"role":"user","content":message}],
                   "options":{"temperature":0.7}}, timeout=180)
         if r.status_code == 401:
