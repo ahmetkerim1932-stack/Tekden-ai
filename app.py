@@ -314,7 +314,7 @@ def image(body: ImageBody):
         )
 
     enhanced_prompt = improve_image_prompt(body.prompt)
-    url = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell"
+    url = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-3-medium-diffusers"
     try:
         r = requests.post(
             url,
@@ -335,7 +335,7 @@ def image(body: ImageBody):
         if not content_type.startswith("image/"):
             raise HTTPException(502, "Görsel servisi görsel yerine beklenmeyen yanıt döndürdü.")
         data = base64.b64encode(r.content).decode("ascii")
-        return {"image_data": f"data:{content_type};base64,{data}", "model": "black-forest-labs/FLUX.1-schnell"}
+        return {"image_data": f"data:{content_type};base64,{data}", "model": "stabilityai/stable-diffusion-3-medium-diffusers"}
     except requests.RequestException as e:
         raise HTTPException(502, f"Görsel servisine bağlanılamadı: {str(e)[:200]}")
 
