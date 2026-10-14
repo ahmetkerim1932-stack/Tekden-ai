@@ -285,17 +285,17 @@ Türkçe dahil kullanıcının dilinde açık, doğru ve güvenli yanıt ver. We
     msgs.append({"role":"user","content":user_message})
     return {"answer": call_ollama(msgs), "chat_id": None, "sources": sources, "saved": False}
 
-
 def improve_image_prompt(prompt: str) -> str:
+    """Improve clarity and visual direction without changing the user's idea."""
     prompt = prompt.strip()
     return (
-        "Create a polished, high-quality image matching the user's request. "
-        "Use a clear composition, coherent perspective, realistic lighting, "
-        "rich but natural colors, detailed textures, sharp focus, "
-        "consistent anatomy and proportions, and professional visual quality. "
-        "Avoid blurry details, distorted objects, duplicated elements, "
-        "unintended text, watermarks, and malformed hands or faces. "
-        "Follow the user's requested subject and style faithfully. "
+        "Create a high-quality image that faithfully follows the user's request. "
+        "Prioritize a clear subject, strong composition, believable perspective, "
+        "intentional framing, consistent proportions, detailed materials and textures, "
+        "natural light and shadows, balanced colors, crisp focus, and professional finish. "
+        "Keep the requested art style and subject; do not add unrelated objects or themes. "
+        "Avoid blur, visual glitches, duplicated objects, malformed anatomy, random lettering, "
+        "logos, and watermarks. Only include readable text if the user explicitly requests it. "
         "User's original request: " + prompt
     )
 
@@ -303,64 +303,33 @@ def improve_image_prompt(prompt: str) -> str:
 @app.post("/api/image")
 def image(body: ImageBody):
     if not POLLINATIONS_API_KEY:
-        raise HTTPException(
-            503,
-            "Görsel üretimi ayarlı değil: POLLINATIONS_API_KEY eklenmeli."
-        )
+        raise HTTPException(503, "Görsel üretimi ayarlı değil: POLLINATIONS_API_KEY eklenmeli.")
 
-    url = "https://gen.pollinations.ai/image/" + quote(
-        improve_image_prompt(body.prompt), safe=""
-    )
+    enhanced_prompt = improve_image_prompt(body.prompt)
+    url = "https://gen.pollinations.ai/image/" + quote(enhanced_prompt, safe="")
 
     try:
-      
         r = requests.get(
             url,
             params={
                 "model": "black-forest-labs/flux.2-pro",
                 "width": 1024,
                 "height": 1024,
-                "nologo": "true"
+                "nologo": "true",
             },
             headers={"Authorization": f"Bearer {POLLINATIONS_API_KEY}"},
-            timeout=180
+            timeout=180,
         )
-
-
-        if not r.ok:
-            raise HTTPException(
-                r.status_code,
-                "Görsel servisi hata verdi: " + r.text[:250]
-            )
-
-        content_type = r.headers.get("content-type", "")
-        if not content_type.startswith("image/"):
-            raise HTTPException(
-                502,
-                "Görsel servisi görsel yerine beklenmeyen yanıt döndürdü."
-            )
-
-        data = base64.b64encode(r.content).decode("ascii")
-        return {
-            "image_data": f"data:{content_type};base64,{data}",
-            "model": "black-forest-labs/flux.2-pro"
-        }
-
-    except requests.RequestException as e:
-        raise HTTPException(
-            502,
-            f"Görsel servisine bağlanılamadı: {str(e)[:200]}"
-        )
-
-
-            headers={"Authorization": f"Bearer {POLLINATIONS_API_KEY}"}, timeout=180)
         if not r.ok:
             raise HTTPException(r.status_code, "Görsel servisi hata verdi: " + r.text[:250])
         content_type = r.headers.get("content-type", "")
         if not content_type.startswith("image/"):
             raise HTTPException(502, "Görsel servisi görsel yerine beklenmeyen yanıt döndürdü.")
         data = base64.b64encode(r.content).decode("ascii")
-        return {"image_data": f"data:{content_type};base64,{data}", "model": POLLINATIONS_IMAGE_MODEL}
+        return {
+            "image_data": f"data:{content_type};base64,{data}",
+            "model": "black-forest-labs/flux.2-pro",
+        }
     except requests.RequestException as e:
         raise HTTPException(502, f"Görsel servisine bağlanılamadı: {str(e)[:200]}")
 
