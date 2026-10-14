@@ -299,24 +299,57 @@ def improve_image_prompt(prompt: str) -> str:
         "User's original request: " + prompt
     )
 
-@app.post("/api/image")
-def image(body: ImageBody):
 
 @app.post("/api/image")
 def image(body: ImageBody):
     if not POLLINATIONS_API_KEY:
-        raise HTTPException(503, "Görsel üretimi ayarlı değil: POLLINATIONS_API_KEY eklenmeli.")
+        raise HTTPException(
+            503,
+            "Görsel üretimi ayarlı değil: POLLINATIONS_API_KEY eklenmeli."
+        )
+
     url = "https://gen.pollinations.ai/image/" + quote(
-    improve_image_prompt(body.prompt), safe=""
-)
+        improve_image_prompt(body.prompt), safe=""
+    )
+
     try:
-       
-r = requests.get(url, params={
-    "model": "black-forest-labs/flux.2-pro",
-    "width": 1024,
-    "height": 1024,
-    "nologo": "true"
-},
+        r = requests.get(
+            url,
+            params={
+                "model": "black-forest-labs/flux.2-pro",
+                "width": 1024,
+                "height": 1024,
+                "nologo": "true"
+            },
+            headers={"Authorization": f"Bearer {POLLINATIONS_API_KEY}"},
+            timeout=180
+        )
+
+        if not r.ok:
+            raise HTTPException(
+                r.status_code,
+                "Görsel servisi hata verdi: " + r.text[:250]
+            )
+
+        content_type = r.headers.get("content-type", "")
+        if not content_type.startswith("image/"):
+            raise HTTPException(
+                502,
+                "Görsel servisi görsel yerine beklenmeyen yanıt döndürdü."
+            )
+
+        data = base64.b64encode(r.content).decode("ascii")
+        return {
+            "image_data": f"data:{content_type};base64,{data}",
+            "model": "black-forest-labs/flux.2-pro"
+        }
+
+    except requests.RequestException as e:
+        raise HTTPException(
+            502,
+            f"Görsel servisine bağlanılamadı: {str(e)[:200]}"
+        )
+
 
             headers={"Authorization": f"Bearer {POLLINATIONS_API_KEY}"}, timeout=180)
         if not r.ok:
