@@ -15,6 +15,8 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud").strip()
 POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
+# Hugging Face free-tier credits are limited and may change.
+HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
 COOKIE_NAME = "tekden_session"
 SESSION_DAYS = 14
@@ -302,34 +304,38 @@ def improve_image_prompt(prompt: str) -> str:
 
 @app.post("/api/image")
 def image(body: ImageBody):
-    if not POLLINATIONS_API_KEY:
-        raise HTTPException(503, "Görsel üretimi ayarlı değil: POLLINATIONS_API_KEY eklenmeli.")
+    # Hugging Face Inference Providers currently includes a small monthly credit
+    # allowance for free accounts; this is limited, not unlimited free generation.
+    if not HF_TOKEN:
+        raise HTTPException(
+            503,
+            "Görsel üretimi için Render Environment bölümüne HF_TOKEN ekle. "
+            "Hugging Face ücretsiz hesabındaki aylık kullanım kredisi sınırlıdır."
+        )
 
     enhanced_prompt = improve_image_prompt(body.prompt)
-    url = "https://gen.pollinations.ai/image/" + quote(enhanced_prompt, safe="")
-
+    url = "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell"
     try:
-        r = requests.get(
+        r = requests.post(
             url,
-            params={
-                "model": "black-forest-labs/flux.2-pro",
-                "width": 1024,
-                "height": 1024,
-                "nologo": "true",
-            },
-            headers={"Authorization": f"Bearer {POLLINATIONS_API_KEY}"},
+            headers={"Authorization": f"Bearer {HF_TOKEN}", "Accept": "image/*"},
+            json={"inputs": enhanced_prompt},
             timeout=180,
         )
         if not r.ok:
-            raise HTTPException(r.status_code, "Görsel servisi hata verdi: " + r.text[:250])
+            if r.status_code in (401, 403):
+                raise HTTPException(502, "Hugging Face anahtarı kabul edilmedi veya model erişimi yok. HF_TOKEN değerini kontrol et.")
+            if r.status_code == 429:
+                raise HTTPException(429, "Ücretsiz görsel üretim kotası dolmuş olabilir. Bir süre sonra yeniden dene.")
+            if r.status_code == 402:
+                raise HTTPException(402, "Hugging Face ücretsiz kredisi tükenmiş olabilir; hesabındaki kullanım durumunu kontrol et.")
+            raise HTTPException(502, "Görsel servisi hata verdi: " + r.text[:300])
+
         content_type = r.headers.get("content-type", "")
         if not content_type.startswith("image/"):
             raise HTTPException(502, "Görsel servisi görsel yerine beklenmeyen yanıt döndürdü.")
         data = base64.b64encode(r.content).decode("ascii")
-        return {
-            "image_data": f"data:{content_type};base64,{data}",
-            "model": "black-forest-labs/flux.2-pro",
-        }
+        return {"image_data": f"data:{content_type};base64,{data}", "model": "black-forest-labs/FLUX.1-schnell"}
     except requests.RequestException as e:
         raise HTTPException(502, f"Görsel servisine bağlanılamadı: {str(e)[:200]}")
 
