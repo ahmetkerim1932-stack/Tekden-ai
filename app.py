@@ -313,6 +313,7 @@ def image(body: ImageBody):
     )
 
     try:
+      
         r = requests.get(
             url,
             params={
@@ -324,6 +325,7 @@ def image(body: ImageBody):
             headers={"Authorization": f"Bearer {POLLINATIONS_API_KEY}"},
             timeout=180
         )
+
 
         if not r.ok:
             raise HTTPException(
