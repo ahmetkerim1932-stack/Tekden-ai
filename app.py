@@ -285,13 +285,39 @@ Türkçe dahil kullanıcının dilinde açık, doğru ve güvenli yanıt ver. We
     msgs.append({"role":"user","content":user_message})
     return {"answer": call_ollama(msgs), "chat_id": None, "sources": sources, "saved": False}
 
+
+def improve_image_prompt(prompt: str) -> str:
+    prompt = prompt.strip()
+    return (
+        "Create a polished, high-quality image matching the user's request. "
+        "Use a clear composition, coherent perspective, realistic lighting, "
+        "rich but natural colors, detailed textures, sharp focus, "
+        "consistent anatomy and proportions, and professional visual quality. "
+        "Avoid blurry details, distorted objects, duplicated elements, "
+        "unintended text, watermarks, and malformed hands or faces. "
+        "Follow the user's requested subject and style faithfully. "
+        "User's original request: " + prompt
+    )
+
+@app.post("/api/image")
+def image(body: ImageBody):
+
 @app.post("/api/image")
 def image(body: ImageBody):
     if not POLLINATIONS_API_KEY:
         raise HTTPException(503, "Görsel üretimi ayarlı değil: POLLINATIONS_API_KEY eklenmeli.")
-    url = "https://gen.pollinations.ai/image/" + quote(body.prompt, safe="")
+    url = "https://gen.pollinations.ai/image/" + quote(
+    improve_image_prompt(body.prompt), safe=""
+)
     try:
-        r = requests.get(url, params={"model": POLLINATIONS_IMAGE_MODEL, "nologo": "true"},
+       
+r = requests.get(url, params={
+    "model": "black-forest-labs/flux.2-pro",
+    "width": 1024,
+    "height": 1024,
+    "nologo": "true"
+},
+
             headers={"Authorization": f"Bearer {POLLINATIONS_API_KEY}"}, timeout=180)
         if not r.ok:
             raise HTTPException(r.status_code, "Görsel servisi hata verdi: " + r.text[:250])
