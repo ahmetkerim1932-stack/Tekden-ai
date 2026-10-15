@@ -18,6 +18,10 @@ POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
 # Hugging Face free-tier credits are limited and may change.
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
+STRIPE_PRICE_ID_PRO = os.getenv("STRIPE_PRICE_ID_PRO", "").strip()
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
+PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "").strip().rstrip("/")
 COOKIE_NAME = "tekden_session"
 SESSION_DAYS = 14
 
@@ -35,6 +39,9 @@ def init_db():
             id BIGSERIAL PRIMARY KEY,
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
+            plan TEXT NOT NULL DEFAULT 'free',
+            stripe_customer_id TEXT,
+            stripe_subscription_id TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""")
         conn.execute("""
@@ -53,6 +60,9 @@ def init_db():
             content TEXT NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""")
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'free'")
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_customer_id TEXT")
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chats_user_updated ON chats(user_id, updated_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id, id)")
 
@@ -112,34 +122,45 @@ def current_user(request: Request):
         return conn.execute("SELECT id, username FROM users WHERE id=%s", (uid,)).fetchone()
 
 def web_search(query: str):
+    """Search the web with deeper results and a resilient fallback chain."""
     query = query.strip()
     if not query:
         return []
-    # Prefer the configured Tavily provider when available.
     if TAVILY_API_KEY:
         try:
             r = requests.post(
                 "https://api.tavily.com/search",
-                json={"api_key": TAVILY_API_KEY, "query": query, "search_depth": "basic", "max_results": 5},
-                timeout=20,
+                json={"api_key": TAVILY_API_KEY, "query": query, "search_depth": "advanced",
+                      "max_results": 8, "include_answer": False, "include_raw_content": False,
+                      "topic": "general"},
+                timeout=25,
             )
             r.raise_for_status()
             data = r.json()
-            results = [{"title": x.get("title", ""), "url": x.get("url", ""), "snippet": x.get("content", "")} for x in data.get("results", [])]
+            results = []
+            for x in data.get("results", []):
+                url = x.get("url", "")
+                if url.startswith("http"):
+                    results.append({"title": x.get("title", "Untitled source"), "url": url,
+                                    "snippet": x.get("content", ""), "score": x.get("score")})
             if results:
-                return results
+                return results[:8]
         except Exception:
             pass
-    # First fallback: DDGS, if installed in the existing environment.
     try:
         from ddgs import DDGS
         with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=5))
+            raw = list(ddgs.text(query, max_results=8, safesearch="moderate"))
+        results = []
+        for x in raw:
+            url = x.get("href", x.get("url", ""))
+            if url.startswith("http"):
+                results.append({"title": x.get("title", "Untitled source"), "url": url,
+                                "snippet": x.get("body", x.get("snippet", ""))})
         if results:
-            return [{"title": x.get("title", ""), "url": x.get("href", x.get("url", "")), "snippet": x.get("body", x.get("snippet", ""))} for x in results]
+            return results[:8]
     except Exception:
         pass
-    # Dependency-free fallback using DuckDuckGo's HTML results page.
     try:
         from html.parser import HTMLParser
         from urllib.parse import urlparse, parse_qs, unquote
@@ -160,18 +181,18 @@ def web_search(query: str):
                     self.items.append(self.current); self.current=None; self.capture=None
                 elif self.current is not None and self.capture == "snippet" and tag == "div":
                     self.capture=None
-        response=requests.get("https://html.duckduckgo.com/html/", params={"q":query}, headers={"User-Agent":"Mozilla/5.0"}, timeout=15)
-        response.raise_for_status()
-        parser=DDGParser(); parser.feed(response.text)
+        response=requests.get("https://html.duckduckgo.com/html/", params={"q":query},
+                              headers={"User-Agent":"Mozilla/5.0 (compatible; TekdenAI/1.0)"}, timeout=18)
+        response.raise_for_status(); parser=DDGParser(); parser.feed(response.text)
         cleaned=[]
         for item in parser.items:
             url=item.get("url", "")
             if "duckduckgo.com/l/?" in url:
-                target=parse_qs(urlparse(url).query).get("uddg", [url])[0]
-                url=unquote(target)
+                url=unquote(parse_qs(urlparse(url).query).get("uddg", [url])[0])
             if url.startswith("http") and item.get("title"):
-                cleaned.append({"title":item["title"].strip(), "url":url, "snippet":item.get("snippet", "").strip()})
-            if len(cleaned)>=5: break
+                cleaned.append({"title":item["title"].strip(), "url":url,
+                                "snippet":item.get("snippet", "").strip()})
+            if len(cleaned)>=8: break
         return cleaned
     except Exception:
         return []
@@ -180,7 +201,7 @@ def should_search(text: str) -> bool:
     t = text.lower()
     cues = ["internette ara", "web'de ara", "webde ara", "güncel", "bugün", "son dakika",
             "en son", "kaynak göster", "kaynakları", "araştır", "2026", "şu an", "fiyatı ne", "internette ara", "web ara", "web araması", "internetten bul", "kaynaklarla cevapla",
-            "latest", "current", "today", "search the web", "look up"]
+            "latest", "current", "today", "search the web", "look up", "kaynaklarla araştır", "derin araştır", "detaylı araştır", "karşılaştır", "incele", "kimdir", "nedir", "ne zaman", "neden", "nasıl çalışır", "istatistik", "raporu", "bilimsel çalışma", "araştırma makalesi"]
     return any(x in t for x in cues) or t.strip().startswith("/search ")
 
 def call_ollama(messages):
@@ -207,6 +228,12 @@ class ChatBody(BaseModel):
 
 class ImageBody(BaseModel):
     prompt: str = Field(min_length=2, max_length=2000)
+
+class SaveAnalysisBody(BaseModel):
+    question: str = Field(min_length=1, max_length=12000)
+    answer: str = Field(min_length=1, max_length=30000)
+    filename: str = Field(default="", max_length=255)
+    chat_id: str | None = None
 
 @app.get("/health")
 def health():
@@ -287,6 +314,101 @@ def delete_chat(chat_id: str, request: Request):
             raise HTTPException(404, "Sohbet bulunamadı.")
     return {"ok": True}
 
+@app.post("/api/save-analysis")
+def save_analysis(body: SaveAnalysisBody, request: Request):
+    user=current_user(request)
+    if not user:
+        return {"saved":False,"chat_id":None}
+    import uuid
+    chat_id=body.chat_id
+    with db() as conn:
+        if chat_id:
+            row=conn.execute("SELECT id FROM chats WHERE id=%s AND user_id=%s",(chat_id,user["id"])).fetchone()
+            if not row: chat_id=None
+        if not chat_id:
+            chat_id=str(uuid.uuid4())
+            title=(body.question or ("Dosya analizi: "+body.filename))[:70] or "Dosya analizi"
+            conn.execute("INSERT INTO chats(id,user_id,title) VALUES(%s,%s,%s)",(chat_id,user["id"],title))
+        user_content=body.question + ("\n[Ekli dosya: "+body.filename+"]" if body.filename else "")
+        conn.execute("INSERT INTO messages(chat_id,role,content) VALUES(%s,'user',%s)",(chat_id,user_content))
+        conn.execute("INSERT INTO messages(chat_id,role,content) VALUES(%s,'assistant',%s)",(chat_id,body.answer))
+        conn.execute("UPDATE chats SET updated_at=NOW() WHERE id=%s",(chat_id,))
+    return {"saved":True,"chat_id":chat_id}
+
+@app.post("/api/billing/checkout")
+def billing_checkout(request: Request):
+    user = current_user(request)
+    if not user:
+        raise HTTPException(401, "Pro üyeliği satın almak için önce giriş yap.")
+    if not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID_PRO:
+        raise HTTPException(503, "Ödeme henüz etkinleştirilmedi. Stripe hesabı, aylık fiyat ürünü ve Render ortam değişkenleri yapılandırılmalı.")
+    base = PUBLIC_APP_URL or str(request.base_url).rstrip("/")
+    try:
+        r = requests.post("https://api.stripe.com/v1/checkout/sessions",
+            auth=(STRIPE_SECRET_KEY, ""), timeout=25,
+            data={"mode":"subscription", "success_url":base+"/?payment=success",
+                  "cancel_url":base+"/?payment=cancelled", "client_reference_id":str(user["id"]),
+                  "line_items[0][price]":STRIPE_PRICE_ID_PRO, "line_items[0][quantity]":"1",
+                  "metadata[user_id]":str(user["id"]), "subscription_data[metadata][user_id]":str(user["id"]),
+                  "allow_promotion_codes":"true"})
+        if not r.ok:
+            raise HTTPException(502, "Ödeme sağlayıcısı oturum oluşturamadı. Stripe fiyat kimliği ve hesap ayarlarını kontrol et.")
+        data=r.json()
+        if not data.get("url"):
+            raise HTTPException(502, "Ödeme sağlayıcısı yönlendirme adresi döndürmedi.")
+        return {"url":data["url"]}
+    except requests.RequestException:
+        raise HTTPException(502, "Ödeme sağlayıcısına bağlanılamadı.")
+
+@app.post("/api/billing/webhook")
+async def billing_webhook(request: Request):
+    # Stripe signs the raw request body. Never trust a client-supplied plan status.
+    if not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(503, "Stripe webhook secret yapılandırılmamış.")
+    raw = await request.body()
+    signature = request.headers.get("stripe-signature", "")
+    parts = {}
+    for item in signature.split(","):
+        if "=" in item:
+            k,v=item.split("=",1); parts.setdefault(k,[]).append(v)
+    timestamp=(parts.get("t") or [""])[0]
+    signatures=parts.get("v1") or []
+    try:
+        signed = timestamp.encode()+b"."+raw
+        expected = hmac.new(STRIPE_WEBHOOK_SECRET.encode(), signed, hashlib.sha256).hexdigest()
+        valid = abs(int(time.time())-int(timestamp)) < 300 and any(hmac.compare_digest(expected,x) for x in signatures)
+    except Exception:
+        valid=False
+    if not valid:
+        raise HTTPException(400, "Stripe webhook imzası doğrulanamadı.")
+    try:
+        event=json.loads(raw.decode("utf-8")); typ=event.get("type",""); obj=event.get("data",{}).get("object",{})
+        uid=(obj.get("metadata") or {}).get("user_id") or obj.get("client_reference_id")
+        if typ == "checkout.session.completed" and uid and obj.get("mode")=="subscription":
+            with db() as conn:
+                conn.execute("UPDATE users SET plan='pro', stripe_customer_id=%s, stripe_subscription_id=%s WHERE id=%s",
+                             (obj.get("customer"), obj.get("subscription"), int(uid)))
+        elif typ in ("customer.subscription.deleted", "customer.subscription.paused"):
+            subid=obj.get("id")
+            if subid:
+                with db() as conn:
+                    conn.execute("UPDATE users SET plan='free', stripe_subscription_id=NULL WHERE stripe_subscription_id=%s", (subid,))
+        return {"received":True}
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(400, "Webhook olayı okunamadı.")
+
+@app.get("/api/billing/status")
+def billing_status(request: Request):
+    user=current_user(request)
+    if not user:
+        return {"plan":"free", "authenticated":False}
+    try:
+        with db() as conn:
+            row=conn.execute("SELECT plan FROM users WHERE id=%s", (user["id"],)).fetchone()
+        return {"plan":(row or {}).get("plan","free"), "authenticated":True}
+    except Exception:
+        return {"plan":"free", "authenticated":True}
+
 @app.post("/api/chat")
 def chat(body: ChatBody, request: Request):
     user = current_user(request)
@@ -303,7 +425,7 @@ Türkçe dahil kullanıcının dilinde açık, doğru ve güvenli yanıt ver. We
     msgs = [{"role":"system","content":system}]
     if sources:
         source_text = "\n\n".join(f"[{i+1}] {x['title']}\nURL: {x['url']}\nÖzet: {x['snippet']}" for i,x in enumerate(sources))
-        msgs.append({"role":"system","content":"Aşağıdaki internet arama sonuçlarını kullan. Kaynak numaralarını ve URL'leri yanıtta göster:\n"+source_text})
+        msgs.append({"role":"system","content":"Aşağıdaki internet arama sonuçlarını kanıt olarak değerlendir. Birden fazla kaynağı karşılaştır, tarih ve çelişkileri kontrol et, sonuçlarda bulunmayan ayrıntıları uydurma. Her önemli iddiayı [1], [2] gibi numaralarla kaynaklandır ve sonunda kısa kaynakça ver.\n"+source_text})
     if user:
         chat_id = body.chat_id
         with db() as conn:
@@ -389,19 +511,20 @@ HTML = r"""<!doctype html>
 <title>Tekden AI</title><style>
 :root{color-scheme:dark;--bg:#101114;--panel:#191a20;--panel2:#22242b;--text:#f3f4f6;--muted:#9ca3af;--accent:#8b5cf6;--line:#30323a}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}button,input,textarea{font:inherit}button{cursor:pointer;border:0;border-radius:10px;padding:10px 14px;background:var(--accent);color:white;font-weight:600}button.secondary{background:var(--panel2);border:1px solid var(--line)}button:disabled{opacity:.5;cursor:wait}
-.layout{display:grid;grid-template-columns:270px 1fr;height:100dvh}.sidebar{background:#15161b;border-right:1px solid var(--line);padding:16px;display:flex;flex-direction:column;gap:12px;min-height:0}.brand{font-size:22px;font-weight:800;letter-spacing:-.6px}.brand span{color:#a78bfa}.sideactions{display:grid;gap:8px}.history{overflow:auto;display:grid;gap:5px}.history button{background:transparent;text-align:left;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history button:hover{background:var(--panel2)}.userbar{margin-top:auto;border-top:1px solid var(--line);padding-top:12px}.main{display:flex;flex-direction:column;min-width:0;min-height:0}.top{padding:15px 22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}.top small{color:var(--muted)}.messages{flex:1;overflow:auto;padding:26px max(20px,calc((100% - 820px)/2));display:flex;flex-direction:column;gap:20px}.welcome{margin:auto;text-align:center;max-width:650px}.welcome h1{font-size:clamp(28px,4vw,42px);letter-spacing:-1px;margin:0 0 8px}.welcome p{color:var(--muted)}.bubble{max-width:850px;padding:14px 16px;border-radius:16px;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.user{align-self:flex-end;background:#2a2440}.bubble.assistant{align-self:flex-start;background:var(--panel);border:1px solid var(--line);width:min(100%,850px)}.bubble img{max-width:100%;border-radius:12px;margin-top:8px}.sources{font-size:13px;color:var(--muted);margin-top:10px}.sources a{color:#c4b5fd}.composerwrap{padding:12px 20px 20px}.composer{max-width:850px;margin:auto;background:var(--panel);border:1px solid #3b3d46;border-radius:18px;padding:10px;box-shadow:0 10px 40px #0003}.composer textarea{width:100%;resize:vertical;min-height:55px;max-height:180px;background:transparent;border:0;outline:0;color:var(--text);padding:8px}.tools{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}.toolleft{display:flex;gap:8px;align-items:center}.status{font-size:12px;color:var(--muted);padding:0 5px}.modalback{position:fixed;inset:0;background:#0009;display:none;align-items:center;justify-content:center;padding:16px}.modal{width:min(420px,100%);background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px}.modal h2{margin-top:0}.modal input{display:block;width:100%;padding:12px;margin:9px 0;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:10px}.modal .row{display:flex;gap:8px}.modal .row button{flex:1}.notice{color:var(--muted);font-size:12px}.mobile{display:none}@media(max-width:720px){.layout{grid-template-columns:1fr}.sidebar{display:none}.mobile{display:inline-block}.messages{padding:20px 14px}.top{padding:12px 14px}.composerwrap{padding:8px 10px 12px}}
+.layout{display:grid;grid-template-columns:270px 1fr;height:100dvh}.sidebar{background:#15161b;border-right:1px solid var(--line);padding:16px;display:flex;flex-direction:column;gap:12px;min-height:0}.brand{font-size:22px;font-weight:800;letter-spacing:-.6px}.brand span{color:#a78bfa}.sideactions{display:grid;gap:8px}.history{overflow:auto;display:grid;gap:5px}.history button{background:transparent;text-align:left;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history button:hover{background:var(--panel2)}.userbar{margin-top:auto;border-top:1px solid var(--line);padding-top:12px}.main{display:flex;flex-direction:column;min-width:0;min-height:0}.top{padding:15px 22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}.top small{color:var(--muted)}.messages{flex:1;overflow:auto;padding:26px max(20px,calc((100% - 820px)/2));display:flex;flex-direction:column;gap:20px}.welcome{margin:auto;text-align:center;max-width:650px}.welcome h1{font-size:clamp(28px,4vw,42px);letter-spacing:-1px;margin:0 0 8px}.welcome p{color:var(--muted)}.bubble{max-width:850px;padding:14px 16px;border-radius:16px;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.user{align-self:flex-end;background:#2a2440}.bubble.assistant{align-self:flex-start;background:var(--panel);border:1px solid var(--line);width:min(100%,850px)}.bubble img{max-width:100%;border-radius:12px;margin-top:8px}.sources{font-size:13px;color:var(--muted);margin-top:10px}.sources a{color:#c4b5fd}.composerwrap{padding:12px 20px 20px}.composer{max-width:850px;margin:auto;background:var(--panel);border:1px solid #3b3d46;border-radius:18px;padding:10px;box-shadow:0 10px 40px #0003}.composer textarea{width:100%;resize:vertical;min-height:55px;max-height:180px;background:transparent;border:0;outline:0;color:var(--text);padding:8px}.tools{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}.toolleft{display:flex;gap:8px;align-items:center}.status{font-size:12px;color:var(--muted);padding:0 5px}.attachrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:0 8px 8px}.attachlabel{display:inline-flex;gap:6px;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:7px 10px;cursor:pointer}.attachname{font-size:12px;color:#c4b5fd;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.plans{display:grid;gap:10px}.plan{border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--bg)}.plan strong{font-size:18px}.plan p{margin:6px 0;color:var(--muted);font-size:13px}.modalback{position:fixed;inset:0;background:#0009;display:none;align-items:center;justify-content:center;padding:16px}.modal{width:min(420px,100%);background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px}.modal h2{margin-top:0}.modal input{display:block;width:100%;padding:12px;margin:9px 0;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:10px}.modal .row{display:flex;gap:8px}.modal .row button{flex:1}.notice{color:var(--muted);font-size:12px}.mobile{display:none}@media(max-width:720px){.layout{grid-template-columns:1fr}.sidebar{display:none}.mobile{display:inline-block}.messages{padding:20px 14px}.top{padding:12px 14px}.composerwrap{padding:8px 10px 12px}}
 </style></head><body>
 <div class="layout"><aside class="sidebar"><div class="brand">Tekden <span>AI</span></div>
 <div class="sideactions"><button id="newChat">＋ Yeni sohbet</button><button class="secondary" id="loginSide">Giriş yap / Kayıt ol</button></div>
 <div><small style="color:var(--muted)">SOHBET GEÇMİŞİ</small></div><div class="history" id="history"><div class="notice">Geçmişi görmek için giriş yap.</div></div>
 <div class="userbar" id="userbar"><div class="notice">Misafir modu · Sohbetler kaydedilmez.</div></div></aside>
-<main class="main"><header class="top"><button class="secondary mobile" id="mobileNew">＋</button><div><strong>Tekden AI</strong><br><small>Yardımcı yapay zekân</small></div><div><button class="secondary" id="loginTop">Giriş yap</button></div></header>
+<main class="main"><header class="top"><button class="secondary mobile" id="mobileNew">＋</button><div><strong>Tekden AI</strong><br><small>Yardımcı yapay zekân</small></div><div style="display:flex;gap:8px"><button class="secondary" id="plansBtn">Planlar</button><button class="secondary" id="loginTop">Giriş yap</button></div></header>
 <section class="messages" id="messages"><div class="welcome" id="welcome"><h1>Bugün ne yapmak istersin?</h1><p>Soru sor, internette araştırma yap veya bir görsel oluştur.</p><div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap"><button class="secondary suggestion">Bir konuyu açıkla</button><button class="secondary suggestion">Güncel haberleri araştır</button><button class="secondary suggestion">Bir görsel oluştur</button></div></div></section>
-<div class="composerwrap"><div class="composer"><textarea id="prompt" placeholder="Tekden AI'a mesaj yaz..."></textarea><div class="tools"><div class="toolleft"><button class="secondary" id="searchBtn" title="İnternette ara">⌕ Web ara</button><button class="secondary" id="imageBtn" title="Görsel oluştur">▧ Görsel</button><span class="status" id="status">Hazır</span></div><button id="sendBtn">Gönder ↑</button></div></div><div class="notice" style="text-align:center;margin-top:8px">Misafir sohbetleri kaydedilmez. Oturum açarsan sohbet geçmişin hesabına kaydedilir.</div></div></main></div>
+<div class="composerwrap"><div class="composer"><textarea id="prompt" placeholder="Tekden AI'a mesaj yaz..."></textarea><div class="attachrow"><label class="attachlabel" for="fileInput">📎 Dosya / görsel ekle</label><input id="fileInput" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.docx" hidden><span class="attachname" id="fileName">Dosya seçilmedi</span></div><div class="tools"><div class="toolleft"><button class="secondary" id="searchBtn" title="İnternette ara">⌕ Web ara</button><button class="secondary" id="imageBtn" title="Görsel oluştur">▧ Görsel</button><span class="status" id="status">Hazır</span></div><button id="sendBtn">Gönder ↑</button></div></div><div class="notice" style="text-align:center;margin-top:8px">Misafir sohbetleri kaydedilmez. Oturum açarsan sohbet geçmişin hesabına kaydedilir.</div></div></main></div>
 <div class="modalback" id="modalback"><div class="modal"><h2 id="modalTitle">Tekden AI'a giriş yap</h2><p class="notice">Hesabınla sohbet geçmişin saklanır.</p><input id="authUser" placeholder="Kullanıcı adı" autocomplete="username"><input id="authPass" type="password" placeholder="Şifre (en az 8 karakter)" autocomplete="current-password"><div class="row"><button id="authSubmit">Giriş yap</button><button class="secondary" id="registerBtn">Kayıt ol</button></div><p id="authError" class="notice"></p><button class="secondary" id="closeModal" style="width:100%;margin-top:8px">Kapat</button></div></div>
-<script src="https://js.puter.com/v2/"></script>
+<div class="modalback" id="plansBack"><div class="modal"><h2>Tekden AI planları</h2><div class="plans"><div class="plan"><strong>Free · 0 TL/ay</strong><p>Temel sohbet, web araması ve sınırlı gelişmiş özellikler.</p><button class="secondary" disabled>Mevcut başlangıç planı</button></div><div class="plan"><strong>Pro · 100 TL/ay</strong><p>Daha yüksek kullanım limitleri ve gelişmiş özellikler. Limitler ve model erişimi sağlayıcıya bağlıdır.</p><button id="buyPro">Pro'ya geç</button></div></div><p class="notice">Ödemeler Stripe üzerinden açılır. Satın alma, ödeme hesabı ve vergi/mesafeli satış yükümlülükleri doğru yapılandırılmadan etkin değildir.</p><button class="secondary" id="closePlans" style="width:100%">Kapat</button></div></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.8.0/mammoth.browser.min.js"></script><script src="https://js.puter.com/v2/"></script>
 <script>
-const $=id=>document.getElementById(id);let user=null,chatId=null,guestHistory=[],forceSearch=false;
+const $=id=>document.getElementById(id);let user=null,chatId=null,guestHistory=[],forceSearch=false,selectedFile=null;
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function setStatus(s){$('status').textContent=s}
 function showModal(){ $('modalback').style.display='flex';$('authError').textContent=''; }
@@ -435,12 +558,59 @@ async function createAndShowImage(requestText){
  if(!img?.src)throw new Error('Görsel servisi görsel döndürmedi.');
  imageBubble(img.src);
 }
-async function send(){const text=$('prompt').value.trim();if(!text)return;$('prompt').value='';bubble('user',text);setStatus(looksLikeImageRequest(text)?'İstenen görsel oluşturuluyor…':(forceSearch?'İnternette aranıyor…':'Yanıt hazırlanıyor…'));$('sendBtn').disabled=true;try{if(looksLikeImageRequest(text)){await createAndShowImage(text);setStatus('Görsel hazır');}else{const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-16)}if(user)loadChats();setStatus(d.sources?.length?'Kaynaklarla yanıtlandı':(forceSearch?'Arama sonucu bulunamadı; yanıt kaynaklarla doğrulanamadı':'Tamamlandı'));}}catch(e){bubble('assistant',(looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)'}}
+function getPuterText(result){
+ if(typeof result==='string')return result;
+ if(result?.message?.content){const c=result.message.content;return Array.isArray(c)?c.map(x=>x.text||'').filter(Boolean).join('\n'):String(c)}
+ if(result?.text)return result.text;
+ return JSON.stringify(result);
+}
+async function readDocument(file){
+ const name=file.name.toLowerCase();
+ if(name.endsWith('.txt')||name.endsWith('.md')||name.endsWith('.csv')||name.endsWith('.json'))return await file.text();
+ if(name.endsWith('.docx')){
+  if(!window.mammoth)throw new Error('DOCX okuyucu yüklenemedi; dosyayı TXT veya PDF olarak dışa aktarıp tekrar dene.');
+  const result=await mammoth.extractRawText({arrayBuffer:await file.arrayBuffer()});return result.value;
+ }
+ if(name.endsWith('.pdf')){
+  const pdfjs=await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs');
+  pdfjs.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs';
+  const pdf=await pdfjs.getDocument({data:await file.arrayBuffer()}).promise;let out='';
+  for(let i=1;i<=Math.min(pdf.numPages,20);i++){const page=await pdf.getPage(i);const c=await page.getTextContent();out+='\n[Sayfa '+i+']\n'+c.items.map(x=>x.str).join(' ');if(out.length>90000)break;}
+  if(!out.trim())throw new Error('PDF içinden metin çıkarılamadı. Taranmış PDF ise sayfaları görsel olarak yükle.');return out;
+ }
+ throw new Error('Bu dosya türü desteklenmiyor. PNG/JPG, PDF, DOCX, TXT, MD, CSV veya JSON kullan.');
+}
+async function analyzeAttachment(question,file){
+ if(!window.puter?.ai?.chat)throw new Error('Dosya analizi servisi yüklenemedi. Sayfayı yenileyip tekrar dene.');
+ const isImage=file.type.startsWith('image/');
+ if(isImage){
+  const prompt=(question||'Bu görseli ayrıntılı olarak analiz et.')+'\nGörselde gerçekten görülebilen bilgilere dayan. Emin olmadığın şeyleri kesinmiş gibi söyleme; metin varsa okuyabildiğin kısmı belirt.';
+  const result=await puter.ai.chat(prompt,file,{model:'openai/gpt-5.4-nano'});return getPuterText(result);
+ }
+ const text=await readDocument(file);if(!text.trim())throw new Error('Dosyanın içinde okunabilir metin bulunamadı.');
+ const prompt=(question||'Bu belgeyi analiz et ve önemli noktalarını açıkla.')+'\n\nBelge adı: '+file.name+'\nBelge içeriği (kaynağa sadık kal, eksik bilgiyi uydurma):\n'+text.slice(0,90000);
+ const result=await puter.ai.chat(prompt,{model:'openai/gpt-5.4-nano'});return getPuterText(result);
+}
+async function send(){
+ const text=$('prompt').value.trim();const file=selectedFile;if(!text&&!file)return;
+ $('prompt').value='';bubble('user',(text||'Ekli dosyayı analiz et.')+(file?'\n📎 '+file.name:''));
+ setStatus(file?'Dosya analiz ediliyor…':looksLikeImageRequest(text)?'İstenen görsel oluşturuluyor…':(forceSearch?'Derin web araması yapılıyor…':'Yanıt hazırlanıyor…'));$('sendBtn').disabled=true;
+ try{
+  if(file){const answer=await analyzeAttachment(text,file);bubble('assistant',answer);if(user){try{const saved=await api('/api/save-analysis',{method:'POST',body:JSON.stringify({question:text||'Ekli dosyayı analiz et.',answer,filename:file.name,chat_id:chatId})});if(saved.chat_id)chatId=saved.chat_id;loadChats()}catch(saveError){console.warn('Dosya analizi geçmişe kaydedilemedi',saveError)}}else guestHistory.push({role:'user',content:(text||'Ekli dosyayı analiz et.')+' [Dosya: '+file.name+']'},{role:'assistant',content:answer});selectedFile=null;$('fileInput').value='';$('fileName').textContent='Dosya seçilmedi';setStatus('Dosya analizi tamamlandı');}
+  else if(looksLikeImageRequest(text)){await createAndShowImage(text);setStatus('Görsel hazır');}
+  else {const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-16)}if(user)loadChats();setStatus(d.sources?.length?'Kaynaklarla yanıtlandı':(forceSearch?'Kaynak bulunamadı; yanıt doğrulanamadı':'Tamamlandı'));}
+ }catch(e){bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}
+ finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)'}
+}
+
 async function generateImage(){const requestText=$('prompt').value.trim();if(!requestText){alert('Önce oluşturmak istediğin görseli ayrıntılarıyla yaz.');return}bubble('user','Görsel oluştur: '+requestText);$('prompt').value='';setStatus('İstediğin görsel oluşturuluyor…');$('imageBtn').disabled=true;try{await createAndShowImage(requestText);setStatus('Görsel hazır')}catch(e){bubble('assistant','Görsel oluşturulamadı: '+e.message);setStatus('Hata')}finally{$('imageBtn').disabled=false}}
-$('sendBtn').onclick=send;$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('imageBtn').onclick=generateImage;$('searchBtn').onclick=()=>{forceSearch=!forceSearch;$('searchBtn').style.borderColor=forceSearch?'#a78bfa':'var(--line)';setStatus(forceSearch?'Web araması açık':'Otomatik arama')};$('newChat').onclick=newChat;$('mobileNew').onclick=newChat;$('loginSide').onclick=showModal;$('loginTop').onclick=showModal;$('closeModal').onclick=closeModal;$('modalback').onclick=e=>{if(e.target===$('modalback'))closeModal()};
+$('sendBtn').onclick=send;$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('fileInput').onchange=e=>{selectedFile=e.target.files?.[0]||null;if(selectedFile&&selectedFile.size>12*1024*1024){alert('Dosya en fazla 12 MB olabilir.');selectedFile=null;$('fileInput').value=''}$('fileName').textContent=selectedFile?selectedFile.name:'Dosya seçilmedi';if(selectedFile)setStatus("Dosya hazır · sorunu yazıp Gönder'e bas")};$('imageBtn').onclick=generateImage;$('searchBtn').onclick=()=>{forceSearch=!forceSearch;$('searchBtn').style.borderColor=forceSearch?'#a78bfa':'var(--line)';setStatus(forceSearch?'Web araması açık':'Otomatik arama')};$('newChat').onclick=newChat;$('mobileNew').onclick=newChat;$('loginSide').onclick=showModal;$('loginTop').onclick=showModal;$('closeModal').onclick=closeModal;$('modalback').onclick=e=>{if(e.target===$('modalback'))closeModal()};
 let authMode='login';$('authSubmit').onclick=()=>auth('login');$('registerBtn').onclick=()=>auth('register');
 async function auth(mode){authMode=mode;const username=$('authUser').value.trim(),password=$('authPass').value;try{const d=await api('/api/'+mode,{method:'POST',body:JSON.stringify({username,password})});user=d.user;closeModal();renderUser();newChat();loadChats()}catch(e){$('authError').textContent=e.message}}
 document.querySelectorAll('.suggestion').forEach(b=>b.onclick=()=>{$('prompt').value=b.textContent==='Güncel haberleri araştır'?'Bugünkü önemli haberleri araştır ve kaynak göster.':b.textContent==='Bir görsel oluştur'?'Görsel oluştur: Fütüristik, sinematik bir şehir manzarası':'Bana bu konuyu anlaşılır örneklerle açıkla';$('prompt').focus()});
+$('plansBtn').onclick=()=>{$('plansBack').style.display='flex'};$('closePlans').onclick=()=>$('plansBack').style.display='none';$('plansBack').onclick=e=>{if(e.target===$('plansBack'))$('plansBack').style.display='none'};
+$('buyPro').onclick=async()=>{if(!user){$('plansBack').style.display='none';showModal();$('authError').textContent='Pro üyeliği için giriş yap veya kayıt ol.';return}try{const d=await api('/api/billing/checkout',{method:'POST'});if(d.url)location.href=d.url}catch(e){alert(e.message)}};
+const payState=new URLSearchParams(location.search).get('payment');if(payState==='success')setTimeout(()=>alert('Ödeme onayının hesabına yansıması webhook doğrulamasından sonra gerçekleşir.'),300);if(payState==='cancelled')setStatus('Ödeme iptal edildi');
 refreshMe();
 </script></body></html>"""
 
