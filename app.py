@@ -112,29 +112,74 @@ def current_user(request: Request):
         return conn.execute("SELECT id, username FROM users WHERE id=%s", (uid,)).fetchone()
 
 def web_search(query: str):
+    query = query.strip()
+    if not query:
+        return []
+    # Prefer the configured Tavily provider when available.
     if TAVILY_API_KEY:
         try:
-            r = requests.post("https://api.tavily.com/search",
+            r = requests.post(
+                "https://api.tavily.com/search",
                 json={"api_key": TAVILY_API_KEY, "query": query, "search_depth": "basic", "max_results": 5},
-                timeout=20)
+                timeout=20,
+            )
             r.raise_for_status()
             data = r.json()
-            return [{"title": x.get("title",""), "url": x.get("url",""), "snippet": x.get("content","")} for x in data.get("results", [])]
+            results = [{"title": x.get("title", ""), "url": x.get("url", ""), "snippet": x.get("content", "")} for x in data.get("results", [])]
+            if results:
+                return results
         except Exception:
             pass
-    # DuckDuckGo fallback, no API key required; availability can vary.
+    # First fallback: DDGS, if installed in the existing environment.
     try:
         from ddgs import DDGS
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=5))
-        return [{"title": x.get("title",""), "url": x.get("href",""), "snippet": x.get("body","")} for x in results]
+        if results:
+            return [{"title": x.get("title", ""), "url": x.get("href", x.get("url", "")), "snippet": x.get("body", x.get("snippet", ""))} for x in results]
+    except Exception:
+        pass
+    # Dependency-free fallback using DuckDuckGo's HTML results page.
+    try:
+        from html.parser import HTMLParser
+        from urllib.parse import urlparse, parse_qs, unquote
+        class DDGParser(HTMLParser):
+            def __init__(self):
+                super().__init__(); self.items=[]; self.current=None; self.capture=None
+            def handle_starttag(self, tag, attrs):
+                a=dict(attrs); cls=a.get("class", "")
+                if tag == "a" and "result__a" in cls:
+                    self.current={"title":"", "url":a.get("href", ""), "snippet":""}; self.capture="title"
+                elif self.current is not None and tag in ("a", "div") and "result__snippet" in cls:
+                    self.capture="snippet"
+            def handle_data(self, data):
+                if self.current is not None and self.capture in ("title", "snippet"):
+                    self.current[self.capture] += data
+            def handle_endtag(self, tag):
+                if self.current is not None and tag == "a" and self.capture == "title":
+                    self.items.append(self.current); self.current=None; self.capture=None
+                elif self.current is not None and self.capture == "snippet" and tag == "div":
+                    self.capture=None
+        response=requests.get("https://html.duckduckgo.com/html/", params={"q":query}, headers={"User-Agent":"Mozilla/5.0"}, timeout=15)
+        response.raise_for_status()
+        parser=DDGParser(); parser.feed(response.text)
+        cleaned=[]
+        for item in parser.items:
+            url=item.get("url", "")
+            if "duckduckgo.com/l/?" in url:
+                target=parse_qs(urlparse(url).query).get("uddg", [url])[0]
+                url=unquote(target)
+            if url.startswith("http") and item.get("title"):
+                cleaned.append({"title":item["title"].strip(), "url":url, "snippet":item.get("snippet", "").strip()})
+            if len(cleaned)>=5: break
+        return cleaned
     except Exception:
         return []
 
 def should_search(text: str) -> bool:
     t = text.lower()
     cues = ["internette ara", "web'de ara", "webde ara", "güncel", "bugün", "son dakika",
-            "en son", "kaynak göster", "kaynakları", "araştır", "2026", "şu an", "fiyatı ne",
+            "en son", "kaynak göster", "kaynakları", "araştır", "2026", "şu an", "fiyatı ne", "internette ara", "web ara", "web araması", "internetten bul", "kaynaklarla cevapla",
             "latest", "current", "today", "search the web", "look up"]
     return any(x in t for x in cues) or t.strip().startswith("/search ")
 
@@ -369,9 +414,29 @@ function renderUser(){ $('userbar').innerHTML=user?`<div><b>${esc(user.username)
 async function loadChats(){try{const d=await api('/api/chats');$('history').innerHTML='';d.chats.forEach(c=>{const b=document.createElement('button');b.textContent=c.title;b.title=c.title;b.onclick=()=>openChat(c.id);$('history').appendChild(b)})}catch(e){$('history').innerHTML='<div class="notice">Geçmiş yüklenemedi.</div>'}}
 async function openChat(id){try{const d=await api('/api/chats/'+id);chatId=id;$('messages').innerHTML='';d.messages.forEach(m=>bubble(m.role==='user'?'user':'assistant',m.content));}catch(e){alert(e.message)}}
 function newChat(){chatId=null;guestHistory=[];$('messages').innerHTML='<div class="welcome" id="welcome"><h1>Bugün ne yapmak istersin?</h1><p>Soru sor, internette araştırma yap veya bir görsel oluştur.</p></div>'; $('prompt').focus()}
-function looksLikeImageRequest(text){const t=text.toLocaleLowerCase('tr-TR').trim();const cues=['görsel oluştur','görsel üret','görselini oluştur','resim oluştur','resmi oluştur','resmini oluştur','resim çiz','resmini çiz','fotoğraf oluştur','fotoğraf üret','çizim oluştur','illüstrasyon oluştur','logo oluştur','afiş oluştur','bana çiz','çizimini yap','generate an image','create an image','make a picture','draw me','görsel oluştur:','görsel:'];return cues.some(c=>t.includes(c))||/^(bir\s+)?(kedi|köpek|aslan|araba|karakter|manzara|portre)\s+(resmi|çizimi)\s*(yap|oluştur|çiz)$/i.test(t)}
-async function send(){const text=$('prompt').value.trim();if(!text)return;$('prompt').value='';bubble('user',text);setStatus(looksLikeImageRequest(text)?'Görsel oluşturuluyor…':'Yanıt hazırlanıyor…');$('sendBtn').disabled=true;try{if(looksLikeImageRequest(text)){const prompt=text.replace(/^(lütfen\s*)?(bana\s*)?(bir\s*)?(görsel|resim|fotoğraf)\s*(oluştur|üret|çiz)\s*:?\s*/i,'').trim()||text.replace(/^görsel\s*:\s*/i,'').trim()||text;if(!window.puter?.ai?.txt2img)throw new Error('Görsel servisi yüklenemedi. Sayfayı yenileyip tekrar dene.');const img=await puter.ai.txt2img(prompt,{model:'black-forest-labs/flux-schnell'});if(!img?.src)throw new Error('Görsel servisi görsel döndürmedi.');imageBubble(img.src);setStatus('Görsel hazır');}else{const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-16)}if(user)loadChats();setStatus(d.sources?.length?'Kaynaklarla yanıtlandı':'Tamamlandı');}}catch(e){bubble('assistant',(looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)'}}
-async function generateImage(){const prompt=$('prompt').value.trim();if(!prompt){alert('Önce oluşturmak istediğin görseli açıklayan bir metin yaz.');return}bubble('user','Görsel oluştur: '+prompt);$('prompt').value='';setStatus('Görsel oluşturuluyor…');$('imageBtn').disabled=true;try{if(!window.puter?.ai?.txt2img)throw new Error('Görsel servisi yüklenemedi. Sayfayı yenileyip tekrar dene.');const img=await puter.ai.txt2img(prompt,{model:'black-forest-labs/flux-schnell'});if(!img?.src)throw new Error('Görsel servisi görsel döndürmedi.');imageBubble(img.src);setStatus('Görsel hazır')}catch(e){bubble('assistant','Görsel oluşturulamadı: '+e.message);setStatus('Hata')}finally{$('imageBtn').disabled=false}}
+function looksLikeImageRequest(text){
+ const t=text.toLocaleLowerCase('tr-TR').trim();
+ const cues=['görsel oluştur','görsel üret','görseli oluştur','görselini oluştur','görseli üret','resim oluştur','resmi oluştur','resmini oluştur','resmi çiz','resmini çiz','resim çiz','fotoğraf oluştur','fotoğraf üret','fotoğrafını oluştur','çizim oluştur','illüstrasyon oluştur','logo oluştur','afiş oluştur','bana çiz','çizimini yap','görsel yap','resim yap','generate an image','create an image','make a picture','draw me','görsel oluştur:','görsel:'];
+ return cues.some(c=>t.includes(c)) || /\b(görseli?|resmi|resmini|fotoğrafı|fotoğrafını)\s+(oluştur|üret|çiz|yap)\b/i.test(t) || /\b(oluştur|üret|çiz|yap)\s+(bir\s+)?(görsel|resim|fotoğraf)\b/i.test(t);
+}
+function imagePromptFromRequest(text){
+ let p=text.trim();
+ p=p.replace(/^\s*(lütfen\s*)?(bana\s*)?(bir\s*)?(görsel|resim|fotoğraf)\s*(oluştur|üret|çiz|yap)\s*:?\s*/i,'');
+ p=p.replace(/\s*(bir\s*)?(görseli?|resmi|resmini|fotoğrafı|fotoğrafını|çizimi)\s*(oluştur|üret|çiz|yap)\s*[.!?]*$/i,'');
+ p=p.replace(/^\s*(görsel|resim|fotoğraf)\s*:\s*/i,'').trim();
+ if(!p || p.length<2) p=text.trim();
+ return 'Create an image that closely follows this exact user request. Preserve the requested subject, objects, setting, action, visual style, mood, colors, camera angle, and composition. Do not replace the subject, do not invent unrelated elements, and do not turn the request into a generic interpretation. If the user specifies multiple details, include all of them. Avoid unwanted text, logos, and watermarks unless explicitly requested. User request (keep its meaning faithfully): '+p;
+}
+async function createAndShowImage(requestText){
+ if(!window.puter?.ai?.txt2img)throw new Error('Görsel servisi yüklenemedi. Sayfayı yenileyip tekrar dene.');
+ const prompt=imagePromptFromRequest(requestText);
+ // Gemini image generation generally follows detailed natural-language instructions better than the previous fast FLUX model.
+ const img=await puter.ai.txt2img(prompt,{model:'google/gemini-3-pro-image'});
+ if(!img?.src)throw new Error('Görsel servisi görsel döndürmedi.');
+ imageBubble(img.src);
+}
+async function send(){const text=$('prompt').value.trim();if(!text)return;$('prompt').value='';bubble('user',text);setStatus(looksLikeImageRequest(text)?'İstenen görsel oluşturuluyor…':(forceSearch?'İnternette aranıyor…':'Yanıt hazırlanıyor…'));$('sendBtn').disabled=true;try{if(looksLikeImageRequest(text)){await createAndShowImage(text);setStatus('Görsel hazır');}else{const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-16)}if(user)loadChats();setStatus(d.sources?.length?'Kaynaklarla yanıtlandı':(forceSearch?'Arama sonucu bulunamadı; yanıt kaynaklarla doğrulanamadı':'Tamamlandı'));}}catch(e){bubble('assistant',(looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)'}}
+async function generateImage(){const requestText=$('prompt').value.trim();if(!requestText){alert('Önce oluşturmak istediğin görseli ayrıntılarıyla yaz.');return}bubble('user','Görsel oluştur: '+requestText);$('prompt').value='';setStatus('İstediğin görsel oluşturuluyor…');$('imageBtn').disabled=true;try{await createAndShowImage(requestText);setStatus('Görsel hazır')}catch(e){bubble('assistant','Görsel oluşturulamadı: '+e.message);setStatus('Hata')}finally{$('imageBtn').disabled=false}}
 $('sendBtn').onclick=send;$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('imageBtn').onclick=generateImage;$('searchBtn').onclick=()=>{forceSearch=!forceSearch;$('searchBtn').style.borderColor=forceSearch?'#a78bfa':'var(--line)';setStatus(forceSearch?'Web araması açık':'Otomatik arama')};$('newChat').onclick=newChat;$('mobileNew').onclick=newChat;$('loginSide').onclick=showModal;$('loginTop').onclick=showModal;$('closeModal').onclick=closeModal;$('modalback').onclick=e=>{if(e.target===$('modalback'))closeModal()};
 let authMode='login';$('authSubmit').onclick=()=>auth('login');$('registerBtn').onclick=()=>auth('register');
 async function auth(mode){authMode=mode;const username=$('authUser').value.trim(),password=$('authPass').value;try{const d=await api('/api/'+mode,{method:'POST',body:JSON.stringify({username,password})});user=d.user;closeModal();renderUser();newChat();loadChats()}catch(e){$('authError').textContent=e.message}}
