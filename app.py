@@ -13,6 +13,9 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SESSION_SECRET = os.getenv("SESSION_SECRET", "").strip()
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud").strip()
+OLLAMA_PRO_MODEL = os.getenv("OLLAMA_PRO_MODEL", "gpt-oss:120b-cloud").strip()
+OWNER_USERNAME = os.getenv("OWNER_USERNAME", "AhmetKerim.").strip()
+OWNER_PASSWORD = os.getenv("OWNER_PASSWORD", "").strip()
 POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
 # Hugging Face free-tier credits are limited and may change.
@@ -65,6 +68,13 @@ def init_db():
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS stripe_subscription_id TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chats_user_updated ON chats(user_id, updated_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id, id)")
+        # Owner account is provisioned from Render environment variables, never from a hard-coded password.
+        if OWNER_PASSWORD and len(OWNER_PASSWORD) >= 8 and OWNER_USERNAME:
+            owner = conn.execute("SELECT id FROM users WHERE lower(username)=lower(%s)", (OWNER_USERNAME,)).fetchone()
+            if owner:
+                conn.execute("UPDATE users SET plan='pro', password_hash=%s WHERE id=%s", (hash_password(OWNER_PASSWORD), owner["id"]))
+            else:
+                conn.execute("INSERT INTO users(username,password_hash,plan) VALUES(%s,%s,'pro')", (OWNER_USERNAME, hash_password(OWNER_PASSWORD)))
 
 @app.on_event("startup")
 def startup():
@@ -204,12 +214,12 @@ def should_search(text: str) -> bool:
             "latest", "current", "today", "search the web", "look up", "kaynaklarla araştır", "derin araştır", "detaylı araştır", "karşılaştır", "incele", "kimdir", "nedir", "ne zaman", "neden", "nasıl çalışır", "istatistik", "raporu", "bilimsel çalışma", "araştırma makalesi"]
     return any(x in t for x in cues) or t.strip().startswith("/search ")
 
-def call_ollama(messages):
+def call_ollama(messages, model=None):
     if not OLLAMA_API_KEY:
         raise RuntimeError("OLLAMA_API_KEY eksik. Render Environment bölümüne Ollama Cloud API anahtarını ekle.")
     r = requests.post("https://ollama.com/api/chat",
         headers={"Authorization": f"Bearer {OLLAMA_API_KEY}", "Content-Type": "application/json"},
-        json={"model": OLLAMA_MODEL, "messages": messages, "stream": False},
+        json={"model": model or OLLAMA_MODEL, "messages": messages, "stream": False},
         timeout=120)
     if not r.ok:
         raise RuntimeError(f"Ollama API hatası ({r.status_code}): {r.text[:500]}")
@@ -238,33 +248,35 @@ class SaveAnalysisBody(BaseModel):
 @app.get("/health")
 def health():
     return {"ok": True, "app": APP_NAME, "database_configured": bool(DATABASE_URL),
-            "ollama_configured": bool(OLLAMA_API_KEY), "image_configured": bool(POLLINATIONS_API_KEY)}
+            "ollama_configured": bool(OLLAMA_API_KEY), "image_configured": True, "pro_model": OLLAMA_PRO_MODEL}
 
 @app.post("/api/register")
 def register(body: AuthBody, response: JSONResponse):
     username = body.username.strip()
+    if OWNER_PASSWORD and username.lower() == OWNER_USERNAME.lower():
+        raise HTTPException(409, "Bu kullanıcı adı ayrılmış.")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{3,32}", username):
         raise HTTPException(400, "Kullanıcı adı 3-32 karakter olmalı; harf, sayı, nokta, tire ve alt çizgi kullan.")
     if not SESSION_SECRET or len(SESSION_SECRET) < 32:
         raise HTTPException(500, "SESSION_SECRET eksik veya çok kısa.")
     try:
         with db() as conn:
-            row = conn.execute("INSERT INTO users(username,password_hash) VALUES(%s,%s) RETURNING id, username",
+            row = conn.execute("INSERT INTO users(username,password_hash) VALUES(%s,%s) RETURNING id, username, plan",
                                (username, hash_password(body.password))).fetchone()
     except psycopg.errors.UniqueViolation:
         raise HTTPException(409, "Bu kullanıcı adı zaten alınmış.")
     token = make_session(row["id"])
-    out = JSONResponse({"ok": True, "user": {"id": row["id"], "username": row["username"]}})
+    out = JSONResponse({"ok": True, "user": {"id": row["id"], "username": row["username"], "plan": row.get("plan", "free")}})
     out.set_cookie(COOKIE_NAME, token, httponly=True, secure=True, samesite="lax", max_age=SESSION_DAYS*86400)
     return out
 
 @app.post("/api/login")
 def login(body: AuthBody):
     with db() as conn:
-        row = conn.execute("SELECT id, username, password_hash FROM users WHERE lower(username)=lower(%s)", (body.username.strip(),)).fetchone()
+        row = conn.execute("SELECT id, username, password_hash, plan FROM users WHERE lower(username)=lower(%s)", (body.username.strip(),)).fetchone()
     if not row or not verify_password(body.password, row["password_hash"]):
         raise HTTPException(401, "Kullanıcı adı veya şifre hatalı.")
-    out = JSONResponse({"ok": True, "user": {"id": row["id"], "username": row["username"]}})
+    out = JSONResponse({"ok": True, "user": {"id": row["id"], "username": row["username"], "plan": ("pro" if row["username"].lower()==OWNER_USERNAME.lower() and OWNER_PASSWORD else row.get("plan", "free"))}})
     out.set_cookie(COOKIE_NAME, make_session(row["id"]), httponly=True, secure=True, samesite="lax", max_age=SESSION_DAYS*86400)
     return out
 
@@ -280,6 +292,8 @@ def me(request: Request):
         user = current_user(request)
     except Exception:
         user = None
+    if user and user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD:
+        user["plan"] = "pro"
     return {"user": user}
 
 @app.get("/api/chats")
@@ -415,11 +429,11 @@ def chat(body: ChatBody, request: Request):
     user_message = body.message.strip()
     use_search = body.force_search or should_search(user_message)
     sources = web_search(user_message.replace("/search ", "", 1)) if use_search else []
-    plan = (user or {}).get("plan", "free")
+    plan = "pro" if user and user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else (user or {}).get("plan", "free")
     if plan == "pro":
-        plan_rules = """Kullanıcının planı Tekden AI Pro. Sorulara daha kapsamlı ve özenli yanıt ver; zor görevlerde çözümü adımlara ayır, varsayımları ve belirsizlikleri belirt, mümkün olduğunda örnek ve uygulanabilir öneriler sun. Kullanıcı kısa yanıt isterse kısa tut. Pro özelliği varmış gibi davranma; gerçekten mevcut olmayan araçları veya yetenekleri iddia etme."""
+        plan_rules = """Kullanıcının planı Tekden AI Pro. Önce problemi doğru tanımla, belirsizlikleri ayır, çok adımlı görevlerde plan kur ve sonucu doğrula. Uygun olduğunda alternatifleri karşılaştır, artı/eksi ve uygulanabilir adımlar sun; web kaynakları mevcutsa kaynakları çapraz kontrol et. Dosya/görsel içeriğine sadık kal. Yanıtı doğal Türkçe ve temiz biçimlendirmeyle yaz. Kullanıcı kısa yanıt isterse kısa tut. Gerçekte çalıştırılmamış işlemleri yaptığını iddia etme. Pro modeli kullanılamazsa temel modele geçiş olabilir; bunu gerekiyorsa açıkça belirt."""
     else:
-        plan_rules = """Kullanıcının planı Tekden AI Free. Doğru, yararlı ve anlaşılır yanıt ver; basit soruları gereksiz uzatma. Karmaşık konularda temel açıklama ve uygulanabilir ilk adımları sun. Free planı bilerek yanlış veya kalitesiz yanıt vermek için gerekçe yapma. Gerçekten mevcut olmayan araçları veya yetenekleri iddia etme."""
+        plan_rules = """Kullanıcının planı Tekden AI Free. Doğru ve anlaşılır yanıt ver; basit soruları gereksiz uzatma. Karmaşık görevlerde temel açıklama ve ilk adımları sun. Kullanıcıyı yanıltma veya kaliteyi bilerek düşürme; gerçekten mevcut olmayan araçları ya da sınırsız kullanımı vaat etme."""
     system = """Sen Tekden AI adlı yapay zekâ asistanısın. Kimliğin ve ürün bilgilerin:
 - Tekden AI uygulaması Ahmet Kerim Kırgız tarafından tasarlanmıştır.
 - Tekden AI'ın oluşturulma tarihi sorulursa 11 Ekim 2026 olarak belirt.
@@ -456,7 +470,14 @@ Yazım ve anlatım kuralları:
             history.reverse()
             msgs.extend({"role": x["role"], "content": x["content"]} for x in history)
             msgs.append({"role":"user","content":user_message})
-            answer = call_ollama(msgs)
+            if plan == "pro":
+                try:
+                    answer = call_ollama(msgs, OLLAMA_PRO_MODEL)
+                except RuntimeError:
+                    # A misconfigured/unavailable Pro model must not break chat; use the configured base model.
+                    answer = call_ollama(msgs, OLLAMA_MODEL)
+            else:
+                answer = call_ollama(msgs, OLLAMA_MODEL)
             conn.execute("INSERT INTO messages(chat_id,role,content) VALUES(%s,'user',%s)", (chat_id,user_message))
             conn.execute("INSERT INTO messages(chat_id,role,content) VALUES(%s,'assistant',%s)", (chat_id,answer))
             conn.execute("UPDATE chats SET updated_at=NOW() WHERE id=%s", (chat_id,))
@@ -523,11 +544,11 @@ def image(body: ImageBody):
 HTML = r"""<!doctype html>
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Tekden AI</title><style>
-:root{color-scheme:light;--bg:#f7f8fc;--panel:#ffffff;--panel2:#eef0f7;--text:#202334;--muted:#687086;--accent:#7651e8;--line:#dfe3ed}
+:root{color-scheme:light;--bg:#f3f7ff;--panel:#ffffff;--panel2:#e9f0ff;--text:#172033;--muted:#5e6b82;--accent:#6842df;--line:#d5def0}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}button,input,textarea{font:inherit}button{cursor:pointer;border:0;border-radius:10px;padding:10px 14px;background:var(--accent);color:white;font-weight:600}button.secondary{background:var(--panel2);border:1px solid var(--line)}button:disabled{opacity:.5;cursor:wait}
-.layout{display:grid;grid-template-columns:270px 1fr;height:100dvh}.sidebar{background:#ffffff;border-right:1px solid var(--line);padding:16px;display:flex;flex-direction:column;gap:12px;min-height:0}.brand{font-size:22px;font-weight:800;letter-spacing:-.6px}.brand span{color:#a78bfa}.sideactions{display:grid;gap:8px}.history{overflow:auto;display:grid;gap:5px}.history button{background:transparent;text-align:left;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history button:hover{background:var(--panel2)}.userbar{margin-top:auto;border-top:1px solid var(--line);padding-top:12px}.main{display:flex;flex-direction:column;min-width:0;min-height:0}.top{padding:15px 22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}.top small{color:var(--muted)}.messages{flex:1;overflow:auto;padding:26px max(20px,calc((100% - 820px)/2));display:flex;flex-direction:column;gap:20px}.welcome{margin:auto;text-align:center;max-width:650px}.welcome h1{font-size:clamp(28px,4vw,42px);letter-spacing:-1px;margin:0 0 8px}.welcome p{color:var(--muted)}.bubble{max-width:850px;padding:14px 16px;border-radius:16px;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.user{align-self:flex-end;background:#eee8ff;color:#27213a}.bubble.assistant{align-self:flex-start;background:var(--panel);border:1px solid var(--line);width:min(100%,850px)}.bubble img{max-width:100%;border-radius:12px;margin-top:8px}.sources{font-size:13px;color:var(--muted);margin-top:10px}.sources a{color:#7651e8}.composerwrap{padding:12px 20px 20px}.composer{max-width:850px;margin:auto;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:10px;box-shadow:0 10px 40px #0003}.composer textarea{width:100%;resize:vertical;min-height:55px;max-height:180px;background:transparent;border:0;outline:0;color:var(--text);padding:8px}.tools{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}.toolleft{display:flex;gap:8px;align-items:center}.status{font-size:12px;color:var(--muted);padding:0 5px}.attachrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:0 8px 8px}.attachlabel{display:inline-flex;gap:6px;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:7px 10px;cursor:pointer}.attachname{font-size:12px;color:#7651e8;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.plans{display:grid;gap:10px}.plan{border:1px solid var(--line);border-radius:12px;padding:14px;background:var(--bg)}.plan strong{font-size:18px}.plan p{margin:6px 0;color:var(--muted);font-size:13px}.modalback{position:fixed;inset:0;background:#0009;display:none;align-items:center;justify-content:center;padding:16px}.modal{width:min(420px,100%);background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px}.modal h2{margin-top:0}.modal input{display:block;width:100%;padding:12px;margin:9px 0;background:#ffffff;color:var(--text);border:1px solid var(--line);border-radius:10px}.modal .row{display:flex;gap:8px}.modal .row button{flex:1}.notice{color:var(--muted);font-size:12px}.mobile{display:none}@media(max-width:720px){.layout{grid-template-columns:1fr}.sidebar{display:none}.mobile{display:inline-block}.messages{padding:20px 14px}.top{padding:12px 14px}.composerwrap{padding:8px 10px 12px}}
+.layout{display:grid;grid-template-columns:270px 1fr;height:100dvh}.sidebar{background:#fbfdff;border-right:1px solid var(--line);padding:16px;display:flex;flex-direction:column;gap:12px;min-height:0}.brand{font-size:22px;font-weight:800;letter-spacing:-.6px}.brand span{color:#a78bfa}.sideactions{display:grid;gap:8px}.history{overflow:auto;display:grid;gap:5px}.history button{background:transparent;text-align:left;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.history button:hover{background:var(--panel2)}.userbar{margin-top:auto;border-top:1px solid var(--line);padding-top:12px}.main{display:flex;flex-direction:column;min-width:0;min-height:0}.top{padding:15px 22px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}.top small{color:var(--muted)}.messages{flex:1;overflow:auto;padding:26px max(20px,calc((100% - 820px)/2));display:flex;flex-direction:column;gap:20px}.welcome{margin:auto;text-align:center;max-width:650px}.welcome h1{font-size:clamp(28px,4vw,42px);letter-spacing:-1px;margin:0 0 8px}.welcome p{color:var(--muted)}.bubble{max-width:850px;padding:14px 16px;border-radius:16px;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.user{align-self:flex-end;background:#e8e1ff;color:#24164f}.bubble.assistant{align-self:flex-start;background:#ffffff;border:1px solid var(--line);box-shadow:0 4px 18px #536b9b0d;width:min(100%,850px)}.bubble img{max-width:100%;border-radius:12px;margin-top:8px}.sources{font-size:13px;color:var(--muted);margin-top:10px}.sources a{color:#7651e8}.composerwrap{padding:12px 20px 20px}.composer{max-width:850px;margin:auto;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:10px;box-shadow:0 12px 38px #536b9b18}.composer textarea{width:100%;resize:vertical;min-height:55px;max-height:180px;background:transparent;border:0;outline:0;color:var(--text);padding:8px}.tools{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}.toolleft{display:flex;gap:8px;align-items:center}.status{font-size:12px;color:var(--muted);padding:0 5px}.attachrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:0 8px 8px}.attachlabel{display:inline-flex;gap:6px;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:7px 10px;cursor:pointer}.attachname{font-size:12px;color:#7651e8;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.plans{display:grid;gap:10px}.plan{border:1px solid var(--line);border-radius:14px;padding:16px;background:#f8faff}.plan:last-child{border:2px solid #8b6cf0;background:linear-gradient(135deg,#f5f0ff,#ffffff)}.plan strong{font-size:18px}.plan p{margin:6px 0;color:var(--muted);font-size:13px}.modalback{position:fixed;inset:0;background:#0009;display:none;align-items:center;justify-content:center;padding:16px}.modal{width:min(420px,100%);background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:22px}.modal h2{margin-top:0}.modal input{display:block;width:100%;padding:12px;margin:9px 0;background:#ffffff;color:var(--text);border:1px solid var(--line);border-radius:10px}.modal .row{display:flex;gap:8px}.modal .row button{flex:1}.notice{color:var(--muted);font-size:12px}.mobile{display:none}@media(max-width:720px){.layout{grid-template-columns:1fr}.sidebar{display:none}.mobile{display:inline-block}.messages{padding:20px 14px}.top{padding:12px 14px}.composerwrap{padding:8px 10px 12px}}
 </style></head><body>
-<div class="layout"><aside class="sidebar"><div class="brand">Tekden <span>AI</span></div>
+<div class="layout"><aside class="sidebar"><div class="brand">Tekden <span>AI</span></div><div class="notice" style="background:#f0ebff;color:#5334bb;padding:10px 12px;border-radius:12px">Daha aydınlık, daha akıllı bir sohbet alanı</div>
 <div class="sideactions"><button id="newChat">＋ Yeni sohbet</button><button class="secondary" id="loginSide">Giriş yap / Kayıt ol</button></div>
 <div><small style="color:var(--muted)">SOHBET GEÇMİŞİ</small></div><div class="history" id="history"><div class="notice">Geçmişi görmek için giriş yap.</div></div>
 <div class="userbar" id="userbar"><div class="notice">Misafir modu · Sohbetler kaydedilmez.</div></div></aside>
@@ -535,7 +556,7 @@ HTML = r"""<!doctype html>
 <section class="messages" id="messages"><div class="welcome" id="welcome"><h1>Bugün ne yapmak istersin?</h1><p>Soru sor, internette araştırma yap veya bir görsel oluştur.</p><div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap"><button class="secondary suggestion">Bir konuyu açıkla</button><button class="secondary suggestion">Güncel haberleri araştır</button><button class="secondary suggestion">Bir görsel oluştur</button></div></div></section>
 <div class="composerwrap"><div class="composer"><textarea id="prompt" placeholder="Tekden AI'a mesaj yaz..."></textarea><div class="attachrow"><label class="attachlabel" for="fileInput">📎 Dosya / görsel ekle</label><input id="fileInput" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.docx" hidden><span class="attachname" id="fileName">Dosya seçilmedi</span></div><div class="tools"><div class="toolleft"><button class="secondary" id="searchBtn" title="İnternette ara">⌕ Web ara</button><button class="secondary" id="imageBtn" title="Görsel oluştur">▧ Görsel</button><span class="status" id="status">Hazır</span></div><button id="sendBtn">Gönder ↑</button></div></div><div class="notice" style="text-align:center;margin-top:8px">Misafir sohbetleri kaydedilmez. Oturum açarsan sohbet geçmişin hesabına kaydedilir.</div></div></main></div>
 <div class="modalback" id="modalback"><div class="modal"><h2 id="modalTitle">Tekden AI'a giriş yap</h2><p class="notice">Hesabınla sohbet geçmişin saklanır.</p><input id="authUser" placeholder="Kullanıcı adı" autocomplete="username"><input id="authPass" type="password" placeholder="Şifre (en az 8 karakter)" autocomplete="current-password"><div class="row"><button id="authSubmit">Giriş yap</button><button class="secondary" id="registerBtn">Kayıt ol</button></div><p id="authError" class="notice"></p><button class="secondary" id="closeModal" style="width:100%;margin-top:8px">Kapat</button></div></div>
-<div class="modalback" id="plansBack"><div class="modal"><h2>Tekden AI planları</h2><div class="plans"><div class="plan"><strong>Free · 0 TL/ay</strong><p>Günlük sorular için doğal sohbet, web araması ve temel dosya veya görsel analizi.</p><button class="secondary" disabled>Mevcut başlangıç planı</button></div><div class="plan"><strong>Pro · 100 TL/ay</strong><p>Daha kapsamlı açıklamalar, karmaşık görevlerde adım adım çözüm, daha fazla örnek ve özenli analiz. Model ve servis limitleri sağlayıcıya bağlıdır.</p><button id="buyPro">Pro'ya geç</button></div></div><p class="notice">Ödemeler Stripe üzerinden açılır. Satın alma, ödeme hesabı ve vergi/mesafeli satış yükümlülükleri doğru yapılandırılmadan etkin değildir.</p><button class="secondary" id="closePlans" style="width:100%">Kapat</button></div></div>
+<div class="modalback" id="plansBack"><div class="modal"><h2>Tekden AI planları</h2><div class="plans"><div class="plan"><strong>Free · 0 TL/ay</strong><p>Standart sohbet modeli, gerektiğinde web araması, temel dosya ve görsel analizi. Günlük kullanım için.</p><button class="secondary" disabled>Ücretsiz plan</button></div><div class="plan"><strong>✦ Pro · 100 TL/ay</strong><p><b>Gelişmiş model denemesi</b>, daha derin akıl yürütme yönergeleri, uzun ve yapılandırılmış yanıtlar, kapsamlı araştırma isteği, daha ayrıntılı belge inceleme ve öncelikli Pro araç akışı. Harici servislerin kendi limitleri devam eder.</p><button id="buyPro">Pro'ya geç</button></div></div><p class="notice">Ödemeler Stripe üzerinden açılır. Satın alma, ödeme hesabı ve vergi/mesafeli satış yükümlülükleri doğru yapılandırılmadan etkin değildir.</p><button class="secondary" id="closePlans" style="width:100%">Kapat</button></div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.8.0/mammoth.browser.min.js"></script><script src="https://js.puter.com/v2/"></script>
 <script>
 const $=id=>document.getElementById(id);let user=null,chatId=null,guestHistory=[],forceSearch=false,selectedFile=null;
@@ -547,7 +568,7 @@ function bubble(role,content,sources=[]){$('welcome')?.remove();const d=document
 function imageBubble(data){$('welcome')?.remove();const d=document.createElement('div');d.className='bubble assistant';const title=document.createElement('div');title.textContent='Oluşturulan görsel';d.appendChild(title);const img=document.createElement('img');img.src=data;img.alt='Yapay zekâ tarafından oluşturulan görsel';img.loading='lazy';d.appendChild(img);const link=document.createElement('a');link.href=data;link.download='tekden-ai-gorsel.png';link.textContent='Görseli indir ↓';link.style.cssText='display:inline-block;margin-top:10px;color:#7651e8;font-weight:600';d.appendChild(link);$('messages').appendChild(d);$('messages').scrollTop=$('messages').scrollHeight}
 async function api(url,opts={}){const r=await fetch(url,{...opts,headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok)throw new Error(d.detail||'İstek başarısız oldu.');return d}
 async function refreshMe(){try{const d=await api('/api/me');user=d.user;renderUser();if(user)loadChats()}catch{user=null;renderUser()}}
-function renderUser(){ $('userbar').innerHTML=user?`<div><b>${esc(user.username)}</b></div><button class="secondary" id="logoutBtn" style="width:100%;margin-top:8px">Çıkış yap</button>`:'<div class="notice">Misafir modu · Sohbetler kaydedilmez.</div>'; $('loginSide').textContent=user?'Hesap açık':'Giriş yap / Kayıt ol';$('loginTop').textContent=user?'Hesap açık':'Giriş yap';$('loginSide').onclick=user?null:showModal;$('loginTop').onclick=user?null:showModal;if(user)$('logoutBtn').onclick=async()=>{await api('/api/logout',{method:'POST'});user=null;chatId=null;guestHistory=[];$('messages').innerHTML='';newChat();renderUser();$('history').innerHTML='';}}
+function renderUser(){ $('userbar').innerHTML=user?`<div><b>${esc(user.username)}</b></div><div style="display:inline-block;margin-top:5px;padding:3px 9px;border-radius:999px;background:${user.plan==='pro'?'#e8ddff':'#e9f0ff'};color:${user.plan==='pro'?'#5a2cc4':'#43516a'};font-size:12px;font-weight:800">${user.plan==='pro'?'✦ PRO ÜYELİK':'FREE PLAN'}</div><button class="secondary" id="logoutBtn" style="width:100%;margin-top:8px">Çıkış yap</button>`:'<div class="notice">Misafir modu · Sohbetler kaydedilmez.</div>'; $('loginSide').textContent=user?'Hesap açık':'Giriş yap / Kayıt ol';$('loginTop').textContent=user?'Hesap açık':'Giriş yap';$('loginSide').onclick=user?null:showModal;$('loginTop').onclick=user?null:showModal;if(user)$('logoutBtn').onclick=async()=>{await api('/api/logout',{method:'POST'});user=null;chatId=null;guestHistory=[];$('messages').innerHTML='';newChat();renderUser();$('history').innerHTML='';}}
 async function loadChats(){try{const d=await api('/api/chats');$('history').innerHTML='';d.chats.forEach(c=>{const b=document.createElement('button');b.textContent=c.title;b.title=c.title;b.onclick=()=>openChat(c.id);$('history').appendChild(b)})}catch(e){$('history').innerHTML='<div class="notice">Geçmiş yüklenemedi.</div>'}}
 async function openChat(id){try{const d=await api('/api/chats/'+id);chatId=id;$('messages').innerHTML='';d.messages.forEach(m=>bubble(m.role==='user'?'user':'assistant',m.content));}catch(e){alert(e.message)}}
 function newChat(){chatId=null;guestHistory=[];$('messages').innerHTML='<div class="welcome" id="welcome"><h1>Bugün ne yapmak istersin?</h1><p>Soru sor, internette araştırma yap veya bir görsel oluştur.</p></div>'; $('prompt').focus()}
