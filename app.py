@@ -79,14 +79,16 @@ def init_db():
                 conn.execute("UPDATE users SET plan='pro', password_hash=%s WHERE id=%s", (hash_password(OWNER_PASSWORD), owner["id"]))
             else:
                 conn.execute("INSERT INTO users(username,password_hash,plan) VALUES(%s,%s,'pro')", (OWNER_USERNAME, hash_password(OWNER_PASSWORD)))
-        # Optional extra Pro account, configured privately in Render Environment.
-        # It is an ordinary user with Pro, not an administrator.
+        # Optional additional Pro account, configured through Render Environment.
+        # This grants Pro only; it does not grant owner/admin privileges.
         if EXTRA_PRO_USERNAME and EXTRA_PRO_PASSWORD and len(EXTRA_PRO_PASSWORD) >= 8:
             extra = conn.execute("SELECT id FROM users WHERE lower(username)=lower(%s)", (EXTRA_PRO_USERNAME,)).fetchone()
             if extra:
-                conn.execute("UPDATE users SET plan='pro', password_hash=%s WHERE id=%s", (hash_password(EXTRA_PRO_PASSWORD), extra["id"]))
+                conn.execute("UPDATE users SET plan='pro', password_hash=%s WHERE id=%s",
+                             (hash_password(EXTRA_PRO_PASSWORD), extra["id"]))
             else:
-                conn.execute("INSERT INTO users(username,password_hash,plan) VALUES(%s,%s,'pro')", (EXTRA_PRO_USERNAME, hash_password(EXTRA_PRO_PASSWORD)))
+                conn.execute("INSERT INTO users(username,password_hash,plan) VALUES(%s,%s,'pro')",
+                             (EXTRA_PRO_USERNAME, hash_password(EXTRA_PRO_PASSWORD)))
 
 @app.on_event("startup")
 def startup():
@@ -277,15 +279,14 @@ class SaveAnalysisBody(BaseModel):
 @app.get("/health")
 def health():
     return {"ok": True, "app": APP_NAME, "database_configured": bool(DATABASE_URL),
-            "ollama_configured": bool(OLLAMA_API_KEY), "image_configured": True, "pro_model": OLLAMA_PRO_MODEL, "session_configured": bool(SESSION_SECRET and len(SESSION_SECRET) >= 32)}
+            "ollama_configured": bool(OLLAMA_API_KEY), "image_configured": True, "pro_model": OLLAMA_PRO_MODEL}
 
 @app.post("/api/register")
 def register(body: AuthBody, response: JSONResponse):
     username = body.username.strip()
     if OWNER_PASSWORD and username.lower() == OWNER_USERNAME.lower():
         raise HTTPException(409, "Bu kullanıcı adı ayrılmış.")
-    # Accept Turkish and other Unicode letters, so usernames such as şerefyektayazici can register.
-    if not (3 <= len(username) <= 32 and all(ch.isalnum() or ch in "_.-" for ch in username)):
+    if not re.fullmatch(r"[\w.-]{3,32}", username, flags=re.UNICODE):
         raise HTTPException(400, "Kullanıcı adı 3-32 karakter olmalı; harf, sayı, nokta, tire ve alt çizgi kullan.")
     if not SESSION_SECRET or len(SESSION_SECRET) < 32:
         raise HTTPException(500, "SESSION_SECRET eksik veya çok kısa.")
@@ -754,7 +755,7 @@ function bubble(role,content,sources=[]){$('welcome')?.remove();const d=document
 function gameBubble(html){$('welcome')?.remove();const wrap=document.createElement('div');wrap.className='bubble assistant';wrap.style.cssText='width:min(100%,1100px);padding:14px';const bar=document.createElement('div');bar.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px';const heading=document.createElement('div');heading.textContent='🎮 Tekden AI Pro oyun stüdyosu · Oyun hazır';heading.style.cssText='font-weight:800';bar.appendChild(heading);const actions=document.createElement('div');actions.style.cssText='display:flex;gap:7px;flex-wrap:wrap';const full=document.createElement('button');full.className='secondary';full.textContent='⛶ Tam ekran';const download=document.createElement('button');download.className='secondary';download.textContent='↓ HTML indir';actions.append(full,download);bar.appendChild(actions);wrap.appendChild(bar);const frame=document.createElement('iframe');frame.title='Tekden AI Pro tarafından oluşturulan oynanabilir oyun';frame.sandbox='allow-scripts allow-pointer-lock';frame.srcdoc=html;frame.style.cssText='display:block;width:100%;height:clamp(560px,75vh,820px);border:1px solid #bcd8f5;border-radius:14px;background:#07111f';wrap.appendChild(frame);full.onclick=()=>{if(frame.requestFullscreen)frame.requestFullscreen().catch(()=>{});else alert('Bu tarayıcı tam ekranı desteklemiyor.')};download.onclick=()=>{const blob=new Blob([html],{type:'text/html;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='tekden-ai-oyunu.html';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)};const note=document.createElement('div');note.textContent='Kontroller oyunun içinde görünür. Tam ekran oynayabilir veya HTML dosyası olarak indirip bilgisayarında açabilirsin.';note.style.cssText='font-size:12px;color:#526784;margin-top:9px';wrap.appendChild(note);$('messages').appendChild(wrap);$('messages').scrollTop=$('messages').scrollHeight}
 function looksLikeGameRequest(text){const t=String(text||'').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');const hasGame=/(^|\s)(oyun|oyunu|oyuncu|game|mini oyun|platformer)(\s|$)/.test(t);const action=/(olustur|yap|tasarla|gelistir|kodla|uret|hazirla|baslat|oynanabilir|yapalim)/.test(t);return (hasGame&&action)||/araba yarisi|araba oyunu|platform oyunu|oyun yap/.test(t)}
 function imageBubble(data){$('welcome')?.remove();const d=document.createElement('div');d.className='bubble assistant';const title=document.createElement('div');title.textContent='Oluşturulan görsel';d.appendChild(title);const img=document.createElement('img');img.src=data;img.alt='Yapay zekâ tarafından oluşturulan görsel';img.loading='lazy';d.appendChild(img);const link=document.createElement('a');link.href=data;link.download='tekden-ai-gorsel.png';link.textContent='Görseli indir ↓';link.style.cssText='display:inline-block;margin-top:10px;color:#7651e8;font-weight:600';d.appendChild(link);$('messages').appendChild(d);$('messages').scrollTop=$('messages').scrollHeight}
-async function api(url,opts={}){const r=await fetch(url,{...opts,credentials:'same-origin',headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok){let msg=d.detail??d.message??d.error??'İstek başarısız oldu.';if(typeof msg!=='string')msg=JSON.stringify(msg);throw new Error(msg)}return d}
+async function api(url,opts={}){const r=await fetch(url,{...opts,headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok){let detail=d.detail??d.message??'İstek başarısız oldu.';if(Array.isArray(detail))detail=detail.map(x=>x.msg||JSON.stringify(x)).join(' · ');else if(typeof detail==='object')detail=JSON.stringify(detail);throw new Error(String(detail))}return d}
 async function refreshMe(){try{const d=await api('/api/me');user=d.user;renderUser();if(user)loadChats()}catch{user=null;renderUser()} }
 function renderUser(){
  $('topAvatar').textContent=user?(user.username[0]||'U').toUpperCase():'?';
