@@ -16,6 +16,9 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud").strip()
 OLLAMA_PRO_MODEL = os.getenv("OLLAMA_PRO_MODEL", "gpt-oss:120b-cloud").strip()
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "AhmetKerim.").strip()
 OWNER_PASSWORD = os.getenv("OWNER_PASSWORD", "").strip()
+# Optional additional Pro account; set these as private Render environment variables.
+EXTRA_PRO_USERNAME = os.getenv("EXTRA_PRO_USERNAME", "").strip()
+EXTRA_PRO_PASSWORD = os.getenv("EXTRA_PRO_PASSWORD", "").strip()
 POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
 # Hugging Face free-tier credits are limited and may change.
@@ -77,6 +80,14 @@ def init_db():
                 conn.execute("UPDATE users SET plan='pro', password_hash=%s WHERE id=%s", (hash_password(OWNER_PASSWORD), owner["id"]))
             else:
                 conn.execute("INSERT INTO users(username,password_hash,plan) VALUES(%s,%s,'pro')", (OWNER_USERNAME, hash_password(OWNER_PASSWORD)))
+        # Optional friend/extra Pro account, configured privately in Render Environment.
+        # Never hard-code the password in this source file.
+        if EXTRA_PRO_USERNAME and len(EXTRA_PRO_PASSWORD) >= 8 and EXTRA_PRO_USERNAME.lower() != OWNER_USERNAME.lower():
+            extra = conn.execute("SELECT id FROM users WHERE lower(username)=lower(%s)", (EXTRA_PRO_USERNAME,)).fetchone()
+            if extra:
+                conn.execute("UPDATE users SET plan='pro', password_hash=%s WHERE id=%s", (hash_password(EXTRA_PRO_PASSWORD), extra["id"]))
+            else:
+                conn.execute("INSERT INTO users(username,password_hash,plan) VALUES(%s,%s,'pro')", (EXTRA_PRO_USERNAME, hash_password(EXTRA_PRO_PASSWORD)))
 
 @app.on_event("startup")
 def startup():
