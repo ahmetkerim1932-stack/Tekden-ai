@@ -909,6 +909,29 @@ def billing_status(request: Request):
     except Exception:
         return {"plan":"free", "authenticated":True}
 
+@app.get("/api/db/my-chats")
+def my_chats_db_check(request: Request):
+    """Return only the signed-in user's recent chat/message counts for diagnostics."""
+    user = current_user(request)
+    if not user:
+        raise HTTPException(401, "Giriş yap.")
+    try:
+        with db() as conn:
+            rows = conn.execute("""
+                SELECT c.id, c.title, c.created_at, c.updated_at,
+                       COUNT(m.id)::int AS message_count,
+                       MAX(m.created_at) AS last_message_at
+                FROM chats c LEFT JOIN messages m ON m.chat_id=c.id
+                WHERE c.user_id=%s
+                GROUP BY c.id
+                ORDER BY c.updated_at DESC LIMIT 30
+            """, (user["id"],)).fetchall()
+        return {"user_id": user["id"], "username": user["username"], "chat_count": len(rows), "chats": rows}
+    except Exception as exc:
+        print(f"DB_MY_CHATS_ERROR user_id={user['id']} error={type(exc).__name__}: {exc}", flush=True)
+        raise HTTPException(503, "Supabase sohbet kayıtları okunamadı.")
+
+
 @app.post("/api/chat")
 def chat(body: ChatBody, request: Request):
     user = current_user(request)
@@ -948,37 +971,82 @@ Yazım ve anlatım kuralları:
         source_text = "\n\n".join(f"[{i+1}] {x['title']}\nURL: {x['url']}\nÖzet: {x['snippet']}" for i,x in enumerate(sources))
         msgs.append({"role":"system","content":"Aşağıdaki internet arama sonuçlarını kanıt olarak değerlendir. Birden fazla kaynağı karşılaştır, tarih ve çelişkileri kontrol et, sonuçlarda bulunmayan ayrıntıları uydurma. Her önemli iddiayı [1], [2] gibi numaralarla kaynaklandır ve sonunda kısa kaynakça ver.\n"+source_text})
     if user:
+        # Keep DB transactions short: persist the user's message before calling the model.
+        # This means a slow/failed model call cannot silently discard the user's message.
+        import uuid
         chat_id = body.chat_id
-        with db() as conn:
-            if chat_id:
-                row = conn.execute("SELECT id FROM chats WHERE id=%s AND user_id=%s", (chat_id, user["id"])).fetchone()
-                if not row:
-                    raise HTTPException(404, "Sohbet bulunamadı.")
-            else:
-                import uuid
-                chat_id = str(uuid.uuid4())
-                title = user_message[:70] or "Yeni sohbet"
-                conn.execute("INSERT INTO chats(id,user_id,title) VALUES(%s,%s,%s)", (chat_id, user["id"], title))
-            history = conn.execute("SELECT role, content FROM messages WHERE chat_id=%s ORDER BY id DESC LIMIT 40", (chat_id,)).fetchall()
-            history.reverse()
-            msgs.extend({"role": x["role"], "content": x["content"]} for x in history)
-            msgs.append({"role":"user","content":user_message})
+        try:
+            with db() as conn:
+                if chat_id:
+                    row = conn.execute(
+                        "SELECT id FROM chats WHERE id=%s AND user_id=%s",
+                        (chat_id, user["id"]),
+                    ).fetchone()
+                    if not row:
+                        raise HTTPException(404, "Sohbet bulunamadı. Yeni sohbet açıp tekrar dene.")
+                else:
+                    chat_id = str(uuid.uuid4())
+                    title = user_message[:70] or "Yeni sohbet"
+                    conn.execute(
+                        "INSERT INTO chats(id,user_id,title) VALUES(%s,%s,%s)",
+                        (chat_id, user["id"], title),
+                    )
+                history = conn.execute(
+                    "SELECT role, content FROM messages WHERE chat_id=%s ORDER BY id DESC LIMIT 40",
+                    (chat_id,),
+                ).fetchall()
+                history.reverse()
+                # Commit the chat row (if new) and user's message in the same transaction.
+                conn.execute(
+                    "INSERT INTO messages(chat_id,role,content) VALUES(%s,'user',%s)",
+                    (chat_id, user_message),
+                )
+                conn.execute(
+                    "UPDATE chats SET updated_at=NOW(), title=CASE WHEN title='Yeni sohbet' THEN %s ELSE title END WHERE id=%s",
+                    (user_message[:70] or "Yeni sohbet", chat_id),
+                )
+                conn.commit()
+            print(f"CHAT_SAVE user_id={user['id']} chat_id={chat_id} stage=user_message_committed", flush=True)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            print(f"CHAT_SAVE_ERROR user_id={user.get('id')} stage=user_message error={type(exc).__name__}: {exc}", flush=True)
+            raise HTTPException(503, "Mesaj Supabase'e kaydedilemedi. Render loglarında CHAT_SAVE_ERROR kaydını kontrol et.")
+
+        msgs.extend({"role": x["role"], "content": x["content"]} for x in history)
+        msgs.append({"role": "user", "content": user_message})
+        try:
             if plan == "pro":
                 try:
                     answer = call_ollama(msgs, OLLAMA_PRO_MODEL)
                 except RuntimeError:
-                    # A misconfigured/unavailable Pro model must not break chat; use the configured base model.
                     answer = call_ollama(msgs, OLLAMA_MODEL)
             else:
                 answer = call_ollama(msgs, OLLAMA_MODEL)
-            conn.execute("INSERT INTO messages(chat_id,role,content) VALUES(%s,'user',%s)", (chat_id,user_message))
-            conn.execute("INSERT INTO messages(chat_id,role,content) VALUES(%s,'assistant',%s)", (chat_id,answer))
-            conn.execute("UPDATE chats SET updated_at=NOW(), title=CASE WHEN title='Yeni sohbet' THEN %s ELSE title END WHERE id=%s", (user_message[:70] or "Yeni sohbet", chat_id))
-            # Verify both rows inside the same transaction before reporting a successful save.
-            verify = conn.execute("SELECT COUNT(*) AS n FROM messages WHERE chat_id=%s AND content IN (%s,%s)", (chat_id, user_message, answer)).fetchone()
-            if not verify or int(verify.get("n", 0)) < 2:
-                raise RuntimeError("Mesajlar veritabanına yazıldı olarak doğrulanamadı.")
-        return {"answer": answer, "chat_id": chat_id, "sources": sources, "saved": True, "save_status": "saved"}
+        except Exception as exc:
+            print(f"CHAT_MODEL_ERROR user_id={user['id']} chat_id={chat_id} error={type(exc).__name__}: {exc}", flush=True)
+            raise HTTPException(502, "Mesajın Supabase'e kaydedildi ancak yapay zekâ yanıtı alınamadı. Sohbeti tekrar açıp devam edebilirsin.")
+
+        try:
+            with db() as conn:
+                conn.execute(
+                    "INSERT INTO messages(chat_id,role,content) VALUES(%s,'assistant',%s)",
+                    (chat_id, answer),
+                )
+                conn.execute("UPDATE chats SET updated_at=NOW() WHERE id=%s AND user_id=%s", (chat_id, user["id"]))
+                conn.commit()
+                verify = conn.execute(
+                    "SELECT COUNT(*) AS n FROM messages WHERE chat_id=%s AND role='user' AND content=%s",
+                    (chat_id, user_message),
+                ).fetchone()
+                if not verify or int(verify.get("n", 0)) < 1:
+                    raise RuntimeError("Kullanıcı mesajı commit sonrasında doğrulanamadı")
+            print(f"CHAT_SAVE user_id={user['id']} chat_id={chat_id} stage=assistant_message_committed", flush=True)
+        except Exception as exc:
+            print(f"CHAT_SAVE_ERROR user_id={user['id']} chat_id={chat_id} stage=assistant_message error={type(exc).__name__}: {exc}", flush=True)
+            # Do not hide the fact that the user message itself was already persisted.
+            raise HTTPException(503, "Kullanıcı mesajı kaydedildi; asistan yanıtı kaydedilemedi. Render loglarında CHAT_SAVE_ERROR kaydını kontrol et.")
+        return {"answer": answer, "chat_id": chat_id, "sources": sources, "saved": True, "save_status": "saved", "saved_user_id": user["id"]}
     # Guest chat is intentionally not written to the database.
     for item in body.guest_history[-24:]:
         if isinstance(item, dict) and item.get("role") in ("user","assistant") and isinstance(item.get("content"), str):
