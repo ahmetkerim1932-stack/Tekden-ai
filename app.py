@@ -180,13 +180,26 @@ def game_export_filename(title: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", str(title or "tekden-ai-oyunu")).strip("-_")
     return (slug[:48] or "tekden-ai-oyunu") + ".html"
 
+DB_INIT_ERROR = None
+
 @app.on_event("startup")
 def startup():
-    if SESSION_SECRET and len(SESSION_SECRET) >= 32 and DATABASE_URL:
+    """Initialize database tables whenever PostgreSQL is configured.
+
+    Session configuration is independent from database schema setup: a missing
+    SESSION_SECRET must not silently prevent tables from being created.
+    """
+    global DB_INIT_ERROR
+    if not DATABASE_URL:
+        DB_INIT_ERROR = "DATABASE_URL eksik"
+        return
+    try:
         init_db()
-    else:
-        # App can show setup errors rather than crashing during import/startup.
-        pass
+        DB_INIT_ERROR = None
+    except Exception as exc:
+        # Keep the app available so /api/health/db can explain the setup issue.
+        DB_INIT_ERROR = f"{type(exc).__name__}: {str(exc)[:350]}"
+        print("[Tekden AI] Veritabanı başlatılamadı:", DB_INIT_ERROR)
 
 def b64e(s: str) -> str:
     return base64.urlsafe_b64encode(s.encode()).decode().rstrip("=")
@@ -726,6 +739,21 @@ def logout():
     out = JSONResponse({"ok": True})
     out.delete_cookie(COOKIE_NAME, secure=True, httponly=True, samesite="lax")
     return out
+
+@app.get("/api/health/db")
+def database_health():
+    result = {"database_url_configured": bool(DATABASE_URL), "session_secret_configured": bool(SESSION_SECRET and len(SESSION_SECRET) >= 32), "startup_error": DB_INIT_ERROR, "connected": False, "tables": {}}
+    if not DATABASE_URL: return result
+    try:
+        with db() as conn:
+            result["connected"] = bool(conn.execute("SELECT 1 AS ok").fetchone())
+            for table in ("users", "chats", "messages"):
+                exists = conn.execute("SELECT to_regclass(%s) AS name", ("public." + table,)).fetchone()
+                result["tables"][table] = bool(exists and exists.get("name"))
+            if all(result["tables"].values()):
+                result["counts"] = {"users": conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"], "chats": conn.execute("SELECT COUNT(*) AS n FROM chats").fetchone()["n"], "messages": conn.execute("SELECT COUNT(*) AS n FROM messages").fetchone()["n"]}
+    except Exception as exc: result["error"] = f"{type(exc).__name__}: {str(exc)[:350]}"
+    return result
 
 @app.get("/api/me")
 def me(request: Request):
@@ -1326,8 +1354,8 @@ function bubble(role,content,sources=[]){$('welcome')?.remove();const d=document
 function gameBubble(html){$('welcome')?.remove();const wrap=document.createElement('div');wrap.className='bubble assistant';wrap.style.cssText='width:min(100%,1100px);padding:14px';const bar=document.createElement('div');bar.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px';const heading=document.createElement('div');heading.textContent='🎮 Tekden AI Pro oyun stüdyosu · Oyun hazır';heading.style.cssText='font-weight:800';bar.appendChild(heading);const actions=document.createElement('div');actions.style.cssText='display:flex;gap:7px;flex-wrap:wrap';const full=document.createElement('button');full.className='secondary';full.textContent='⛶ Tam ekran';const download=document.createElement('button');download.className='secondary';download.textContent='↓ HTML indir';actions.append(full,download);bar.appendChild(actions);wrap.appendChild(bar);const frame=document.createElement('iframe');frame.title='Tekden AI Pro tarafından oluşturulan oynanabilir oyun';frame.sandbox='allow-scripts allow-pointer-lock';frame.srcdoc=html;frame.style.cssText='display:block;width:100%;height:clamp(560px,75vh,820px);border:1px solid #bcd8f5;border-radius:14px;background:#07111f';wrap.appendChild(frame);full.onclick=()=>{if(frame.requestFullscreen)frame.requestFullscreen().catch(()=>{});else alert('Bu tarayıcı tam ekranı desteklemiyor.')};download.onclick=()=>{const blob=new Blob([html],{type:'text/html;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='tekden-ai-oyunu.html';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)};const note=document.createElement('div');note.textContent='Kontroller oyunun içinde görünür. Tam ekran oynayabilir veya HTML dosyası olarak indirip bilgisayarında açabilirsin.';note.style.cssText='font-size:12px;color:#526784;margin-top:9px';wrap.appendChild(note);$('messages').appendChild(wrap);$('messages').scrollTop=$('messages').scrollHeight}
 function looksLikeGameRequest(text){const t=String(text||'').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');const hasGame=/(^|\s)(oyun|oyunu|oyuncu|game|mini oyun|platformer)(\s|$)/.test(t);const action=/(olustur|yap|tasarla|gelistir|kodla|uret|hazirla|baslat|oynanabilir|yapalim)/.test(t);return (hasGame&&action)||/araba yarisi|araba oyunu|platform oyunu|oyun yap/.test(t)}
 function imageBubble(data){$('welcome')?.remove();const d=document.createElement('div');d.className='bubble assistant';const title=document.createElement('div');title.textContent='Oluşturulan görsel';d.appendChild(title);const img=document.createElement('img');img.src=data;img.alt='Yapay zekâ tarafından oluşturulan görsel';img.loading='lazy';d.appendChild(img);const link=document.createElement('a');link.href=data;link.download='tekden-ai-gorsel.png';link.textContent='Görseli indir ↓';link.style.cssText='display:inline-block;margin-top:10px;color:#7651e8;font-weight:600';d.appendChild(link);$('messages').appendChild(d);$('messages').scrollTop=$('messages').scrollHeight}
-async function api(url,opts={}){const r=await fetch(url,{...opts,headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok){let detail=d.detail??d.message??'İstek başarısız oldu.';if(Array.isArray(detail))detail=detail.map(x=>x.msg||JSON.stringify(x)).join(' · ');else if(typeof detail==='object')detail=JSON.stringify(detail);throw new Error(String(detail))}return d}
-async function refreshMe(){try{const d=await api('/api/me');user=d.user;renderUser();if(user)loadChats()}catch{user=null;renderUser()} }
+async function api(url,opts={}){const r=await fetch(url,{credentials:'same-origin',...opts,headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok){let detail=d.detail??d.message??'İstek başarısız oldu.';if(Array.isArray(detail))detail=detail.map(x=>x.msg||JSON.stringify(x)).join(' · ');else if(typeof detail==='object')detail=JSON.stringify(detail);throw new Error(String(detail))}return d}
+async function refreshMe(){try{const d=await api('/api/me');user=d.user;renderUser();if(user)await window.loadChats();else restoreGuestHistory()}catch(e){console.warn('Oturum kontrolü başarısız:',e);user=null;renderUser();restoreGuestHistory()} }
 function renderUser(){
  $('topAvatar').textContent=user?(user.username[0]||'U').toUpperCase():'?';
  $('profileButtonText').textContent=user?user.username:'Profil';
@@ -1419,6 +1447,10 @@ async function loadChats(){
  }
 }
 
+// Make chat history callable from every UI handler and recover safely if a legacy script calls it.
+window.loadChats = loadChats;
+window.refreshChatHistory = loadChats;
+
 async function readDocument(file){
  const name=file.name.toLowerCase();
  if(name.endsWith('.txt')||name.endsWith('.md')||name.endsWith('.csv')||name.endsWith('.json'))return await file.text();
@@ -1454,7 +1486,7 @@ async function send(){
   if(file){const answer=await analyzeAttachment(text,file);bubble('assistant',answer);if(user){try{const saved=await api('/api/save-analysis',{method:'POST',body:JSON.stringify({question:text||'Ekli dosyayı analiz et.',answer,filename:file.name,chat_id:chatId})});if(saved.chat_id)chatId=saved.chat_id;loadChats()}catch(saveError){console.warn('Dosya analizi geçmişe kaydedilemedi',saveError)}}else {guestHistory.push({role:'user',content:(text||'Ekli dosyayı analiz et.')+' [Dosya: '+file.name+']'},{role:'assistant',content:answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}selectedFile=null;$('fileInput').value='';$('fileName').textContent='Dosya seçilmedi';setStatus('Dosya analizi tamamlandı');}
   else if(looksLikeGameRequest(text)){const game=await api('/api/game',{method:'POST',body:JSON.stringify({prompt:text})});gameBubble(game.html);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İsteğine göre oynanabilir bir oyun oluşturuldu.'});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Oyun hazır');}
   else if(looksLikeImageRequest(text)){await createAndShowImage(text);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İstenen görsel oluşturuldu. İstek: '+text});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Görsel hazır');}
-  else {const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(user)loadChats();setStatus(d.sources?.length?'Kaynaklarla yanıtlandı':(forceSearch?'Kaynak bulunamadı; yanıt doğrulanamadı':'Tamamlandı'));}
+  else {const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}setStatus(d.sources?.length?'Kaynaklarla yanıtlandı':(forceSearch?'Kaynak bulunamadı; yanıt doğrulanamadı':'Tamamlandı'));}
  }catch(e){bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeGameRequest(text)?'Oyun oluşturulamadı: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}
  finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)'}
 }
