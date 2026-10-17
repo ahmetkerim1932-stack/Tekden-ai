@@ -679,7 +679,11 @@ def image(body: ImageBody):
         raise HTTPException(502, f"Görsel servisine bağlanılamadı: {str(e)[:200]}")
 
 HTML = r"""<!doctype html>
+
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3311978441761062"
+     crossorigin="anonymous"></script>
+     
 <title>Tekden AI</title><style>
 :root{color-scheme:light;--bg:#fff;--panel:#fff;--panel2:#edf5ff;--text:#111c32;--muted:#526784;--accent:#086cff;--accent2:#e3f0ff;--line:#d6e5f8;--green:#0da96b;--shadow:0 10px 32px rgba(28,91,170,.10)}
 *{box-sizing:border-box}body{margin:0;background:#fff;color:var(--text);font:15px/1.5 Inter,system-ui,-apple-system,Segoe UI,sans-serif}button,input,textarea{font:inherit}button{cursor:pointer;border:1px solid transparent;border-radius:12px;padding:10px 14px;background:var(--accent);color:#fff;font-weight:650;transition:background .15s,transform .15s,border-color .15s}button:hover{background:#0067dc;transform:translateY(-1px)}button.secondary{background:#f4f8fd;color:#1a365d;border:1px solid #d9e6f5}button.secondary:hover{background:#e5f1ff;border-color:#a9d0ff}button:disabled{opacity:.5;cursor:wait;transform:none}
