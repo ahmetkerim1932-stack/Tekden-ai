@@ -22,9 +22,9 @@ POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
 # Hugging Face free-tier credits are limited and may change.
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
-# ACE-Step-compatible music generation server. Keep API keys server-side only.
-MUSIC_API_URL = os.getenv("MUSIC_API_URL", "").strip().rstrip("/")
-MUSIC_API_KEY = os.getenv("MUSIC_API_KEY", "").strip()
+# eroq music generation API. Keep this key server-side only.
+EROQ_API_KEY = os.getenv("EROQ_API_KEY", "").strip() or os.getenv("MUSIC_API_KEY", "").strip()
+EROQ_API_BASE = "https://eroq.ai/v1"
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
 STRIPE_PRICE_ID_PRO = os.getenv("STRIPE_PRICE_ID_PRO", "").strip()
@@ -1258,78 +1258,103 @@ def create_song(body: SongBody, request: Request):
 
 @app.post("/api/studio/song/generate")
 def generate_vocal_song(body: SongAudioBody, request: Request):
-    """Pro-only bridge to an ACE-Step-compatible music-generation server.
-
-    Audio is generated through Tekden AI's UI; the model runs at MUSIC_API_URL.
-    No browser redirect and no provider credentials are exposed to the client.
-    """
+    """Start a Pro-only eroq vocal song generation. API key stays server-side."""
     require_song_pro(request)
-    if not MUSIC_API_URL:
-        raise HTTPException(503, "Vokalli şarkı motoru henüz bağlanmadı. Render Environment bölümünde MUSIC_API_URL olarak ACE-Step uyumlu model sunucusunun adresi yapılandırılmalı. Bu özellik şu anda Swara'ya yönlendirme yapmaz.")
-    headers = {"Content-Type": "application/json"}
-    if MUSIC_API_KEY:
-        headers["Authorization"] = "Bearer " + MUSIC_API_KEY
+    if not EROQ_API_KEY:
+        raise HTTPException(503, "Şarkı motoru yapılandırılmadı. Render Environment bölümüne EROQ_API_KEY ekle.")
+
+    # eroq supports 30–240 seconds in 30-second increments. One take is used
+    # to avoid charging twice by default. Price: 3 credits per started 30 sec.
+    seconds = max(30, min(240, int(round(body.duration / 30) * 30)))
     payload = {
-        "caption": f"{body.style}. Song title: {body.title}. Vocal language: Turkish.",
-        "lyrics": body.lyrics,
-        "thinking": True,
-        "vocal_language": body.language,
-        "audio_format": "mp3",
-        "audio_duration": body.duration,
-        "use_format": True,
+        "model": "eroq-music-one",
+        "title": (body.title or "Tekden AI şarkısı")[:80],
+        "style": (body.style + f", {body.language}, vocals, full song with instruments")[:600],
+        "lyrics": body.lyrics[:3000],
+        "instrumental": False,
+        "seconds": seconds,
+        "n": 1,
     }
+    headers = {"Authorization": "Bearer " + EROQ_API_KEY, "Content-Type": "application/json"}
     try:
-        r = requests.post(MUSIC_API_URL + "/v1/music/generate", json=payload, headers=headers, timeout=45)
-        if r.status_code == 404:
-            # Some ACE-Step deployments expose the legacy task endpoint.
-            r = requests.post(MUSIC_API_URL + "/release_task", json={**payload, "prompt": payload["caption"]}, headers=headers, timeout=45)
-        r.raise_for_status()
+        r = requests.post(EROQ_API_BASE + "/music/generations", json=payload, headers=headers, timeout=45)
+        if r.status_code >= 400:
+            try:
+                err = r.json()
+                detail = err.get("error", {}).get("message") if isinstance(err.get("error"), dict) else None
+                detail = detail or err.get("detail") or err.get("message") or str(err)
+            except Exception:
+                detail = r.text[:350]
+            if r.status_code == 401:
+                raise HTTPException(502, "eroq API anahtarı geçersiz görünüyor. Render Environment bölümündeki EROQ_API_KEY değerini kontrol et.")
+            if r.status_code == 402:
+                raise HTTPException(402, "eroq ücretsiz kredileri bitmiş olabilir. eroq hesabındaki kredi bakiyesini kontrol et.")
+            if r.status_code == 503:
+                raise HTTPException(503, "eroq müzik motoru şu anda kullanılamıyor. Daha sonra tekrar dene; bu durumda genellikle kredi harcanmaz.")
+            raise HTTPException(502, "eroq şarkı isteği reddedildi: " + str(detail)[:260])
         data = r.json()
-        job_id = data.get("job_id") or data.get("task_id")
-        if not job_id:
-            # Some compatible services return an audio URL immediately.
-            audio_url = data.get("audio_url") or data.get("url")
-            if audio_url:
-                return {"ok": True, "audio_generated": True, "audio_url": audio_url, "title": body.title}
-            raise RuntimeError("Müzik sunucusu görev kimliği veya ses bağlantısı döndürmedi.")
-        # Poll the asynchronous generation task for a limited time.
-        import time as _time
-        deadline = _time.time() + 105
-        while _time.time() < deadline:
-            _time.sleep(3)
-            if "/v1/music/generate" in r.url or "job_id" in data:
-                status_r = requests.get(MUSIC_API_URL + f"/v1/jobs/{job_id}", headers=headers, timeout=20)
-            else:
-                status_r = requests.post(MUSIC_API_URL + "/query_result", json={"task_id_list": [job_id]}, headers=headers, timeout=20)
-            if status_r.status_code == 404:
-                status_r = requests.get(MUSIC_API_URL + f"/v1/jobs/{job_id}", headers=headers, timeout=20)
-            status_r.raise_for_status()
-            status_data = status_r.json()
-            if isinstance(status_data.get("data"), list) and status_data["data"]:
-                status_data = status_data["data"][0]
-            result = status_data.get("result") or {}
-            if isinstance(result, str):
-                try: result = json.loads(result)
-                except Exception: result = {"raw_result": result}
-            audio_url = status_data.get("audio_url") or status_data.get("url") or (result.get("audio_url") if isinstance(result, dict) else None)
-            if not audio_url and isinstance(result, dict):
-                audio_url = result.get("url") or result.get("audio") or result.get("file_url")
-                if not audio_url and isinstance(result.get("files"), list) and result["files"]:
-                    audio_url = result["files"][0].get("url") or result["files"][0].get("file")
-            status = str(status_data.get("status", "")).lower()
-            if audio_url and status in ("succeeded", "success", "completed", "1", "done", ""):
-                if audio_url.startswith("/"):
-                    audio_url = MUSIC_API_URL + audio_url
-                return {"ok": True, "audio_generated": True, "audio_url": audio_url, "title": body.title}
-            if status in ("failed", "error", "2"):
-                raise RuntimeError(str(status_data.get("error") or "Müzik modeli üretimi başarısız oldu.")[:220])
-        raise HTTPException(504, "Şarkı üretimi zaman aşımına uğradı. Model sunucusu çalışıyor mu kontrol et ve yeniden dene.")
+        jobs = data.get("jobs") or []
+        if not jobs or not jobs[0].get("id"):
+            raise HTTPException(502, "eroq API görev kimliği döndürmedi; API yanıtı beklenen biçimde değil.")
+        return {
+            "ok": True,
+            "audio_generated": False,
+            "generation_id": jobs[0]["id"],
+            "status_url": "/api/studio/song/status/" + str(jobs[0]["id"]),
+            "title": data.get("title") or body.title,
+            "seconds": seconds,
+            "credits_spent": (data.get("usage") or {}).get("credits_spent"),
+            "credits_remaining": (data.get("usage") or {}).get("credits_remaining"),
+            "status": data.get("status") or "processing",
+        }
     except HTTPException:
         raise
     except requests.RequestException as exc:
-        raise HTTPException(502, "Müzik motoruna bağlanılamadı: " + str(exc)[:220])
+        raise HTTPException(502, "eroq müzik API'sine bağlanılamadı: " + str(exc)[:220])
     except Exception as exc:
-        raise HTTPException(502, "Vokalli şarkı üretilemedi: " + str(exc)[:220])
+        raise HTTPException(502, "Şarkı üretimi başlatılamadı: " + str(exc)[:220])
+
+@app.get("/api/studio/song/status/{generation_id}")
+def vocal_song_status(generation_id: str, request: Request):
+    """Poll eroq for a completed MP3; this status request does not spend credits."""
+    require_song_pro(request)
+    if not EROQ_API_KEY:
+        raise HTTPException(503, "Şarkı motoru yapılandırılmadı. Render Environment bölümüne EROQ_API_KEY ekle.")
+    # Provider IDs are UUID-like; reject path fragments before making an outbound request.
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", generation_id):
+        raise HTTPException(400, "Geçersiz şarkı görev kimliği.")
+    headers = {"Authorization": "Bearer " + EROQ_API_KEY}
+    try:
+        r = requests.get(EROQ_API_BASE + "/music/generations/" + generation_id, headers=headers, timeout=25)
+        if r.status_code >= 400:
+            try:
+                err = r.json()
+                detail = err.get("detail") or err.get("message") or (err.get("error") or {}).get("message")
+            except Exception:
+                detail = r.text[:250]
+            raise HTTPException(502, "Şarkı durumu alınamadı: " + str(detail or r.status_code)[:220])
+        data = r.json()
+        status = str(data.get("status", "processing")).lower()
+        if status in ("succeeded", "success", "completed", "done"):
+            result_data = data.get("data") or []
+            if isinstance(result_data, dict):
+                result_data = [result_data]
+            audio_url = None
+            if result_data and isinstance(result_data[0], dict):
+                audio_url = result_data[0].get("url") or result_data[0].get("audio_url")
+            audio_url = audio_url or data.get("audio_url") or data.get("url")
+            if not audio_url:
+                raise HTTPException(502, "Şarkı tamamlandı ama API ses bağlantısı döndürmedi.")
+            return {"ok": True, "status": "succeeded", "audio_generated": True, "audio_url": audio_url, "title": data.get("title") or "Tekden AI şarkısı", "seconds": (result_data[0].get("seconds") if result_data and isinstance(result_data[0], dict) else data.get("seconds"))}
+        if status in ("failed", "error", "cancelled"):
+            err = data.get("error") or {}
+            msg = err.get("message") if isinstance(err, dict) else str(err)
+            raise HTTPException(502, "Şarkı üretilemedi: " + str(msg or "Müzik motoru hata verdi.")[:220])
+        return {"ok": True, "status": status or "processing", "audio_generated": False, "title": data.get("title") or "Tekden AI şarkısı"}
+    except HTTPException:
+        raise
+    except requests.RequestException as exc:
+        raise HTTPException(502, "Şarkı durumu kontrol edilemedi: " + str(exc)[:220])
 
 @app.post("/api/image")
 def image(body: ImageBody):
@@ -1633,7 +1658,8 @@ let authMode='login';$('authSubmit').onclick=()=>auth('login');$('registerBtn').
 async function auth(mode){authMode=mode;const username=$('authUser').value.trim(),password=$('authPass').value;try{const d=await api('/api/'+mode,{method:'POST',body:JSON.stringify({username,password})});user=d.user;showArchived=false;closeModal();renderUser();newChat();loadChats()}catch(e){$('authError').textContent=e.message}}
 function openSongStudio(){if(!user){showModal();$('authError').textContent='Vokalli şarkı üretimi yalnızca Pro üyelerine açık. Önce Pro hesabına giriş yap.';return}if(user.plan!=='pro'){ $('plansBack').style.display='flex'; return }const b=$('songStudioBack');if(b)b.style.display='flex'}
 function closeSongStudio(){const b=$('songStudioBack');if(b)b.style.display='none'}
-async function generateVocalSong(){const title=$('songTitle').value.trim()||'Tekden AI şarkısı';const style=$('songStyle').value.trim();const lyrics=$('songLyrics').value.trim();const btn=$('generateVocalSongBtn');const status=$('songStudioStatus');const player=$('songAudioPlayer');const download=$('songAudioDownload');if(!style||lyrics.length<5){status.textContent='Lütfen müzik tarzını ve şarkı sözlerini gir.';return}btn.disabled=true;btn.textContent='⏳ Şarkı üretiliyor…';status.textContent='Tekden AI vokal motoruna bağlanıyor. Üretim biraz sürebilir…';player.style.display='none';download.style.display='none';try{const d=await api('/api/studio/song/generate',{method:'POST',body:JSON.stringify({title,style,lyrics,language:'tr',duration:90})});if(!d.audio_url)throw new Error('Ses dosyası bağlantısı alınamadı.');player.src=d.audio_url;player.style.display='block';download.href=d.audio_url;download.style.display='inline-block';download.style.marginTop='10px';status.textContent='Şarkı hazır! Buradan dinleyebilir veya indirebilirsin.';player.load()}catch(e){status.textContent=e.message}finally{btn.disabled=false;btn.textContent='🎵 Vokalli şarkı üret'}}
+async function waitForVocalSong(generationId,statusEl,player,download){const deadline=Date.now()+12*60*1000;while(Date.now()<deadline){await new Promise(r=>setTimeout(r,5000));const s=await api('/api/studio/song/status/'+encodeURIComponent(generationId));if(s.status==='succeeded'&&s.audio_url){player.src=s.audio_url;player.style.display='block';download.href=s.audio_url;download.style.display='inline-block';download.style.marginTop='10px';statusEl.textContent='Şarkı hazır! Buradan dinleyebilir veya indirebilirsin.';player.load();return}statusEl.textContent='Vokalli şarkı oluşturuluyor… Durum: '+(s.status||'processing')+'. Biraz sürebilir.'}throw new Error('Şarkı üretimi 12 dakika içinde tamamlanmadı. Daha sonra tekrar durum kontrolü yapabilir veya eroq panelini kontrol edebilirsin.')}
+async function generateVocalSong(){const title=$('songTitle').value.trim()||'Tekden AI şarkısı';const style=$('songStyle').value.trim();const lyrics=$('songLyrics').value.trim();const btn=$('generateVocalSongBtn');const status=$('songStudioStatus');const player=$('songAudioPlayer');const download=$('songAudioDownload');if(!style||lyrics.length<5){status.textContent='Lütfen müzik tarzını ve şarkı sözlerini gir.';return}btn.disabled=true;btn.textContent='⏳ Şarkı üretiliyor…';status.textContent='eroq müzik motoruna istek gönderiliyor. 90 saniyelik tek üretim yaklaşık 9 kredi kullanır.';player.style.display='none';download.style.display='none';try{const d=await api('/api/studio/song/generate',{method:'POST',body:JSON.stringify({title,style,lyrics,language:'tr',duration:90})});if(!d.generation_id)throw new Error('Müzik servisi görev kimliği döndürmedi.');if(d.credits_remaining!==null&&d.credits_remaining!==undefined)status.textContent='Üretim başladı. Kalan eroq kredisi: '+d.credits_remaining+'.';await waitForVocalSong(d.generation_id,status,player,download)}catch(e){status.textContent=e.message}finally{btn.disabled=false;btn.textContent='🎵 Vokalli şarkı üret'}}
 $('songStudioBack')?.addEventListener('click',e=>{if(e.target===$('songStudioBack'))closeSongStudio()});
 document.querySelectorAll('.suggestion').forEach(b=>b.onclick=()=>{const kind=b.dataset.kind; if(kind==='image')$('prompt').value='Görsel oluştur: ';else if(kind==='file')$('fileInput').click();else if(kind==='web'){$('prompt').value='Güncel bilgileri araştır ve kaynak göster: ';forceSearch=true;$('searchBtn').style.borderColor='var(--accent)'}else if(kind==='app')$('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';else if(kind==='game')$('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: '; else if(b.textContent.includes('Kedinin'))$('prompt').value='Kedinin gerçekçi bir görselini oluştur';else if(b.textContent.includes('2.5D'))$('prompt').value='2.5D platform oyunu tasarla';else if(b.textContent.includes('VEX'))$('prompt').value='VEX Push Back kurallarını açıkla';else $('prompt').value='Bana bu konuyu anlaşılır örneklerle açıkla';$('prompt').focus()});
 $('activeChatsBtn').onclick=()=>{showArchived=false;$('activeChatsBtn').style.background='#e4f1ff';$('archivedChatsBtn').style.background='';loadChats()};$('archivedChatsBtn').onclick=()=>{if(!user){showModal();$('authError').textContent='Arşiv için giriş yapmalısın.';return}showArchived=true;$('archivedChatsBtn').style.background='#e4f1ff';$('activeChatsBtn').style.background='';loadChats()};$('profileBtn').onclick=()=>{if(user)$('profileBack').style.display='flex';else showModal()};$('profilePlansBtn').onclick=()=>{$('profileBack').style.display='none';renderUser();$('plansBack').style.display='flex'};$('closeProfile').onclick=()=>$('profileBack').style.display='none';$('profileBack').onclick=e=>{if(e.target===$('profileBack'))$('profileBack').style.display='none'};$('profileArchiveBtn').onclick=()=>{$('profileBack').style.display='none';if(!user){showModal();return}showArchived=true;$('archivedChatsBtn').style.background='#e4f1ff';$('activeChatsBtn').style.background='';loadChats()};$('profileLoginBtn').onclick=()=>{$('profileBack').style.display='none';if(!user)showModal();else alert('Hesabın açık: '+user.username)};$('profileLogoutBtn').onclick=async()=>{try{await api('/api/logout',{method:'POST'})}catch{}user=null;chatId=null;guestHistory=[];$('messages').innerHTML='';$('profileBack').style.display='none';newChat();renderUser();$('history').innerHTML=''};
@@ -1651,15 +1677,16 @@ def pro_studio():
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top left,#eaf4ff 0,transparent 42%),#f8fbff;color:#122744;font:15px/1.5 Inter,system-ui,sans-serif}button,textarea{font:inherit}button{cursor:pointer;border:0;border-radius:12px;padding:11px 15px;background:#0878f9;color:white;font-weight:750}button:disabled{opacity:.55;cursor:wait}.secondary{background:#fff;color:#24466e;border:1px solid #d7e6f8}.shell{max-width:1250px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.brand{font-weight:900;font-size:22px}.brand span{color:#0878f9}.pill{background:#efe6ff;color:#6834bd;padding:5px 10px;border-radius:99px;font-size:12px;font-weight:850}.hero{padding:35px 0 24px}.hero h1{font-size:clamp(30px,4vw,48px);letter-spacing:-1.4px;margin:0 0 8px}.hero p{color:#607590;max-width:700px;margin:0}.grid{display:grid;grid-template-columns:minmax(280px,370px) minmax(0,1fr);gap:18px;align-items:start}.card{background:#fff;border:1px solid #dce9f8;border-radius:20px;padding:20px;box-shadow:0 12px 34px #254c7c0b}.card h2{margin:0 0 5px;font-size:18px}.muted{color:#607590;font-size:13px}.presets{display:flex;gap:7px;flex-wrap:wrap;margin:15px 0}.presets button{font-size:12px;padding:8px 10px}.textarea{width:100%;min-height:190px;resize:vertical;border:1px solid #d6e5f8;border-radius:13px;padding:13px;outline:none}.textarea:focus{border-color:#76b7ff;box-shadow:0 0 0 3px #e3f1ff}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.status{min-height:22px;color:#526784;font-size:13px;margin-top:10px}.preview{min-height:530px;border:1px dashed #bdd5f0;border-radius:15px;background:linear-gradient(135deg,#f5f9ff,#fff);display:grid;place-items:center;overflow:hidden}.preview iframe{width:100%;height:650px;border:0;background:#07111f}.empty{text-align:center;padding:30px;color:#69809b}.empty .icon{font-size:42px}.smallnote{font-size:12px;color:#7386a0;margin-top:10px}@media(max-width:850px){.shell{padding:14px}.grid{grid-template-columns:1fr}.preview{min-height:350px}.preview iframe{height:65vh}}
 .garage-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}.garage-item{border:1px solid #355b79;border-radius:12px;padding:10px;background:#0b1b2d;color:#eaf6ff;text-align:left;cursor:pointer}.garage-item:disabled{opacity:.45;cursor:not-allowed}.garage-item strong{display:block;margin-bottom:4px}.toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:3;background:#061423ed;border:1px solid #4de8ff;border-radius:999px;padding:8px 13px;color:#fff;pointer-events:none;white-space:nowrap}.badge-row{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}.mini-badge{background:#172c43;border:1px solid #375675;border-radius:8px;padding:6px 8px;font-size:12px}
 </style></head><body><div class="shell"><header class="top"><div class="brand">Tekden <span>AI</span> <span class="pill">✦ PRO STÜDYO</span></div><div style="display:flex;gap:8px"><button class="secondary" onclick="location.href='/'">← Sohbete dön</button></div></header>
-<section class="hero"><h1>Fikrini <span style="color:#0878f9">oyuna veya şarkıya</span> dönüştür.</h1><p>Pro Stüdyo oyun tasarlamanı ve yapılandırılmış müzik motoruyla vokalli şarkı üretmeni sağlar. Üretim Tekden AI arayüzünde gerçekleşir; ses motoru MUSIC_API_URL üzerinden bağlanır.</p></section><div class="actions" style="margin:0 0 18px"><button id="gameMode">🎮 Oyun stüdyosu</button><button class="secondary" id="songMode">🎵 Şarkı stüdyosu</button></div>
-<section id="songPanel" class="card" style="display:none;margin-bottom:18px"><h2>🎵 Şarkı oluştur</h2><p class="muted">Bu araç yalnızca Pro üyelerine açıktır. Şarkı sözlerini ve tarzını gir; MUSIC_API_URL yapılandırıldığında vokalli ses dosyası Tekden AI ekranında oynatılır.</p><div class="presets"><button class="secondary" data-song="Motivasyon veren modern pop şarkısı, Türkçe, umutlu ve enerjik, 110 BPM.">✨ Pop</button><button class="secondary" data-song="Sinematik epik film müziği için söz ve aranjman taslağı; güçlü koro hissi, Türkçe.">🎬 Epik</button><button class="secondary" data-song="Sakin akustik gitar eşlikli, dostluk ve umut üzerine duygusal Türkçe şarkı.">🎸 Akustik</button><button class="secondary" data-song="Neşeli çocuk şarkısı; kolay nakarat, pozitif mesaj ve basit akorlar.">🌈 Neşeli</button></div><input id="songPrompt" class="textarea" placeholder="Şarkı adı / konusu" style="width:100%;margin:8px 0;padding:12px"><input id="songStylePro" class="textarea" value="Turkish arabesk, emotional male-female duet, bağlama, piano, expressive vocals" style="width:100%;margin:8px 0;padding:12px"><textarea id="songLyricsPro" class="textarea" placeholder="Şarkı sözleri" style="width:100%;margin:8px 0;padding:12px"></textarea><div class="actions"><button id="makeSong">🎵 Vokalli şarkı üret</button></div><audio id="proSongAudio" controls style="display:none;width:100%;margin-top:12px"></audio><a id="proSongDownload" style="display:none" download="tekden-ai-sarki.mp3">Şarkıyı indir ↓</a><div id="songResult" style="white-space:pre-wrap;overflow-wrap:anywhere"></div><div id="songStatus" class="status">Pro üyelerine özel · Ses motoru MUSIC_API_URL ile yapılandırılmalıdır.</div></section><div id="gamePanel" class="grid"><section class="card"><h2>🎮 Oyun tasarım briefi</h2><div class="muted">Ne kadar ayrıntılı tarif edersen oyun hedefin o kadar net olur.</div><div class="presets"><button class="secondary" data-p="3D hissiyatlı neon araba yarışı; trafik, çarpışma, nitro, puan ve seviye sistemi olsun.">🏎️ Yarış</button><button class="secondary" data-p="Animasyonlu 2.5D orman platform oyunu; zıplama, düşmanlar, altın toplama ve 3 bölüm olsun.">🌲 Platform</button><button class="secondary" data-p="Dalga dalga gelen düşmanlara karşı savunma oyunu; hareket, atış, can, güçlendirmeler ve boss olsun.">⚔️ Aksiyon</button><button class="secondary" data-p="Bulmacalı keşif oyunu; etkileşimli nesneler, envanter, ipuçları ve kazanma koşulu olsun.">🧩 Bulmaca</button></div><textarea id="prompt" class="textarea" placeholder="Örnek: Gün batımındaki İstanbul'da geçen, üçüncü şahıs kameralı bir araba oyunu. Trafik, drift, nitro, görevler, para ve garaj sistemi olsun..."></textarea><div class="actions"><button id="generate">✦ Oyunu oluştur</button><button class="secondary" id="clear">Temizle</button></div><div id="status" class="status">Hazır · Pro oyun üretimi</div><div class="smallnote">Üretim, yapılandırılmış Pro modelinin kullanılabilirliğine ve servis limitlerine bağlıdır. Üretilen oyunu çalıştırıp kontrol etmen önerilir.</div></section>
+<section class="hero"><h1>Fikrini <span style="color:#0878f9">oyuna veya şarkıya</span> dönüştür.</h1><p>Pro Stüdyo oyun tasarlamanı ve yapılandırılmış müzik motoruyla vokalli şarkı üretmeni sağlar. Üretim Tekden AI arayüzünde gerçekleşir; ses motoru eroq Music API üzerinden bağlanır (Render Environment: EROQ_API_KEY).</p></section><div class="actions" style="margin:0 0 18px"><button id="gameMode">🎮 Oyun stüdyosu</button><button class="secondary" id="songMode">🎵 Şarkı stüdyosu</button></div>
+<section id="songPanel" class="card" style="display:none;margin-bottom:18px"><h2>🎵 Şarkı oluştur</h2><p class="muted">Bu araç yalnızca Pro üyelerine açıktır. Şarkı sözlerini ve tarzını gir; EROQ_API_KEY yapılandırıldığında vokalli ses dosyası Tekden AI ekranında oynatılır. 90 saniyelik tek üretim yaklaşık 9 kredi kullanır.</p><div class="presets"><button class="secondary" data-song="Motivasyon veren modern pop şarkısı, Türkçe, umutlu ve enerjik, 110 BPM.">✨ Pop</button><button class="secondary" data-song="Sinematik epik film müziği için söz ve aranjman taslağı; güçlü koro hissi, Türkçe.">🎬 Epik</button><button class="secondary" data-song="Sakin akustik gitar eşlikli, dostluk ve umut üzerine duygusal Türkçe şarkı.">🎸 Akustik</button><button class="secondary" data-song="Neşeli çocuk şarkısı; kolay nakarat, pozitif mesaj ve basit akorlar.">🌈 Neşeli</button></div><input id="songPrompt" class="textarea" placeholder="Şarkı adı / konusu" style="width:100%;margin:8px 0;padding:12px"><input id="songStylePro" class="textarea" value="Turkish arabesk, emotional male-female duet, bağlama, piano, expressive vocals" style="width:100%;margin:8px 0;padding:12px"><textarea id="songLyricsPro" class="textarea" placeholder="Şarkı sözleri" style="width:100%;margin:8px 0;padding:12px"></textarea><div class="actions"><button id="makeSong">🎵 Vokalli şarkı üret</button></div><audio id="proSongAudio" controls style="display:none;width:100%;margin-top:12px"></audio><a id="proSongDownload" style="display:none" download="tekden-ai-sarki.mp3">Şarkıyı indir ↓</a><div id="songResult" style="white-space:pre-wrap;overflow-wrap:anywhere"></div><div id="songStatus" class="status">Pro üyelerine özel · eroq API anahtarı EROQ_API_KEY ortam değişkeninde saklanmalıdır.</div></section><div id="gamePanel" class="grid"><section class="card"><h2>🎮 Oyun tasarım briefi</h2><div class="muted">Ne kadar ayrıntılı tarif edersen oyun hedefin o kadar net olur.</div><div class="presets"><button class="secondary" data-p="3D hissiyatlı neon araba yarışı; trafik, çarpışma, nitro, puan ve seviye sistemi olsun.">🏎️ Yarış</button><button class="secondary" data-p="Animasyonlu 2.5D orman platform oyunu; zıplama, düşmanlar, altın toplama ve 3 bölüm olsun.">🌲 Platform</button><button class="secondary" data-p="Dalga dalga gelen düşmanlara karşı savunma oyunu; hareket, atış, can, güçlendirmeler ve boss olsun.">⚔️ Aksiyon</button><button class="secondary" data-p="Bulmacalı keşif oyunu; etkileşimli nesneler, envanter, ipuçları ve kazanma koşulu olsun.">🧩 Bulmaca</button></div><textarea id="prompt" class="textarea" placeholder="Örnek: Gün batımındaki İstanbul'da geçen, üçüncü şahıs kameralı bir araba oyunu. Trafik, drift, nitro, görevler, para ve garaj sistemi olsun..."></textarea><div class="actions"><button id="generate">✦ Oyunu oluştur</button><button class="secondary" id="clear">Temizle</button></div><div id="status" class="status">Hazır · Pro oyun üretimi</div><div class="smallnote">Üretim, yapılandırılmış Pro modelinin kullanılabilirliğine ve servis limitlerine bağlıdır. Üretilen oyunu çalıştırıp kontrol etmen önerilir.</div></section>
 <section class="card"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px"><div><h2>Oyun önizlemesi</h2><div class="muted">Oyun hazır olduğunda burada oynayabilirsin.</div></div><div id="tools" style="display:none;gap:8px"><button class="secondary" id="fullscreen">⛶ Tam ekran</button><button class="secondary" id="download">↓ HTML indir</button></div></div><div id="preview" class="preview"><div class="empty"><div class="icon">✧</div><b>Yeni bir oyun tasarla</b><p class="muted">Oluşturduğun oyun bu alanda açılacak.</p></div></div></section></div></div>
 <script>
 const $=id=>document.getElementById(id);let currentHtml='';let frame=null;
 $('gameMode').onclick=()=>{$('gamePanel').style.display='grid';$('songPanel').style.display='none';$('gameMode').className='';$('songMode').className='secondary'};
 $('songMode').onclick=()=>{$('gamePanel').style.display='none';$('songPanel').style.display='block';$('songMode').className='';$('gameMode').className='secondary'};
 document.querySelectorAll('[data-song]').forEach(b=>b.onclick=()=>{$('songPrompt').value=b.dataset.song;$('songPrompt').focus()});
-$('makeSong').onclick=async()=>{const title=$('songPrompt').value.trim()||'Tekden AI şarkısı';const style=$('songStylePro').value.trim();const lyrics=$('songLyricsPro').value.trim();const b=$('makeSong');if(lyrics.length<5){$('songStatus').textContent='Önce şarkı sözlerini gir.';return}b.disabled=true;b.textContent='⏳ Şarkı üretiliyor…';$('songStatus').textContent='Tekden AI vokal motoruna bağlanıyor…';try{const d=await api('/api/studio/song/generate',{method:'POST',body:JSON.stringify({title,style,lyrics,language:'tr',duration:90})});$('proSongAudio').src=d.audio_url;$('proSongAudio').style.display='block';$('proSongDownload').href=d.audio_url;$('proSongDownload').style.display='inline-block';$('songStatus').textContent='Vokalli şarkı hazır.';}catch(e){$('songStatus').textContent=e.message}finally{b.disabled=false;b.textContent='🎵 Vokalli şarkı üret'}};
+async function waitForVocalSong(generationId,statusEl,player,download){const deadline=Date.now()+12*60*1000;while(Date.now()<deadline){await new Promise(r=>setTimeout(r,5000));const s=await api('/api/studio/song/status/'+encodeURIComponent(generationId));if(s.status==='succeeded'&&s.audio_url){player.src=s.audio_url;player.style.display='block';download.href=s.audio_url;download.style.display='inline-block';download.style.marginTop='10px';statusEl.textContent='Şarkı hazır! Buradan dinleyebilir veya indirebilirsin.';player.load();return}statusEl.textContent='Vokalli şarkı oluşturuluyor… Durum: '+(s.status||'processing')+'. Biraz sürebilir.'}throw new Error('Şarkı üretimi 12 dakika içinde tamamlanmadı. eroq panelini kontrol et.')}
+$('makeSong').onclick=async()=>{const title=$('songPrompt').value.trim()||'Tekden AI şarkısı';const style=$('songStylePro').value.trim();const lyrics=$('songLyricsPro').value.trim();const b=$('makeSong');if(lyrics.length<5){$('songStatus').textContent='Önce şarkı sözlerini gir.';return}b.disabled=true;b.textContent='⏳ Şarkı üretiliyor…';$('songStatus').textContent='eroq müzik motoruna istek gönderiliyor. 90 saniyelik tek üretim yaklaşık 9 kredi kullanır.';$('proSongAudio').style.display='none';$('proSongDownload').style.display='none';try{const d=await api('/api/studio/song/generate',{method:'POST',body:JSON.stringify({title,style,lyrics,language:'tr',duration:90})});if(!d.generation_id)throw new Error('Müzik servisi görev kimliği döndürmedi.');if(d.credits_remaining!==null&&d.credits_remaining!==undefined)$('songStatus').textContent='Üretim başladı. Kalan eroq kredisi: '+d.credits_remaining+'.';await waitForVocalSong(d.generation_id,$('songStatus'),$('proSongAudio'),$('proSongDownload'))}catch(e){$('songStatus').textContent=e.message}finally{b.disabled=false;b.textContent='🎵 Vokalli şarkı üret'}};
 async function api(url,opts={}){const r=await fetch(url,{...opts,credentials:'same-origin',headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.detail||'İstek başarısız oldu.');return d}
 async function check(){try{const d=await api('/api/me');if(!d.user){location.href='/?login=1';return}if(d.user.plan!=='pro'){document.body.innerHTML=`<main style="max-width:700px;margin:12vh auto;padding:24px;font:16px system-ui"><h1>Bu alan Pro üyelerine özel</h1><p>Pro üyeliğinle giriş yaparak bu stüdyoyu kullanabilirsin.</p><button onclick="location.href='/'">Ana sayfaya dön</button></main>`;return}}catch(e){location.href='/?login=1'}}
 document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{$('prompt').value=b.dataset.p;$('prompt').focus()});$('clear').onclick=()=>{$('prompt').value='';$('prompt').focus()};
