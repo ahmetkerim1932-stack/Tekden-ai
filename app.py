@@ -1078,7 +1078,7 @@ def improve_image_prompt(prompt: str) -> str:
     )
 
 
-CAR_RACING_GAME_# ----------------------- New user productivity APIs -----------------------
+# ----------------------- New user productivity APIs -----------------------
 class NoteBody(BaseModel):
     title: str = Field(min_length=1, max_length=120)
     content: str = Field(min_length=1, max_length=12000)
