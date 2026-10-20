@@ -28,6 +28,7 @@ EROQ_API_BASE = "https://eroq.ai/v1"
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
 STRIPE_PRICE_ID_PRO = os.getenv("STRIPE_PRICE_ID_PRO", "").strip()
+STRIPE_PRICE_ID_PLUS = os.getenv("STRIPE_PRICE_ID_PLUS", "").strip()
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
 PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "").strip().rstrip("/")
 COOKIE_NAME = "tekden_session"
@@ -162,43 +163,43 @@ def init_db():
 # Product capability catalogue used by the plan UI and future billing screens.
 # Keep feature claims conditional on the external providers actually being configured.
 PLAN_FEATURES = {
-    "free": {
-        "title": "Free",
-        "features": [
-            "Standart sohbet ve günlük sorular",
-            "Tarayıcı destekliyorsa dikte ve sesli yanıt",
-            "Temel görsel oluşturma aracı (sağlayıcı kullanılabilirliğine bağlı)",
-            "Neon Highway hazır arcade oyunu",
-            "Tarayıcıda misafir sohbet geçmişi",
-        ],
-    },
-    "pro": {
-        "title": "Tekden AI Pro",
-        "features": [
-            "OLLAMA_PRO_MODEL yapılandırılmışsa daha güçlü model",
-            "Daha kapsamlı web araştırması ve kaynaklı yanıtlar",
-            "Özel tariften oynanabilir HTML oyun üretimi",
-            "Oyun HTML dosyasını indirme ve tam ekran oynama",
-            "Daha uzun analiz ve çok adımlı proje desteği",
-            "Öncelikli Pro arayüzü ve Pro Stüdyo erişimi",
-        ],
-        "disclaimer": "Özellikler sunucu, model ve harici sağlayıcı yapılandırmasına bağlıdır; sınırsız kullanım vaat edilmez.",
-    },
+    "free": {"title": "Free", "features": [
+        "Standart sohbet ve günlük sorular", "Tarayıcı destekliyorsa dikte ve sesli yanıt",
+        "Temel görsel oluşturma aracı (sağlayıcı kullanılabilirliğine bağlı)",
+        "Hazır araç kütüphanesinin Free araçları", "Tarayıcıda misafir sohbet geçmişi"
+    ]},
+    "pro": {"title": "Tekden AI Pro", "features": [
+        "Pro model erişimi yapılandırılmışsa gelişmiş model", "Daha kapsamlı web araştırması",
+        "Özel tariften oynanabilir HTML oyun üretimi", "Vokalli şarkı stüdyosu yapılandırılmışsa erişim",
+        "Uzun analiz ve çok adımlı proje desteği", "Pro araç kütüphanesi"
+    ], "disclaimer": "Özellikler sunucu, model ve harici sağlayıcı yapılandırmasına bağlıdır."},
+    "plus": {"title": "Tekden AI Plus", "price_try_month": 400, "features": [
+        "Pro özelliklerine ek Plus iş akışları", "150 özel Plus çalışma şablonu",
+        "Proje planlama ve gereksinim matrisi", "Belge ve toplantı iş akışları",
+        "İçerik takvimi ve kampanya planları", "Ürün ve kullanıcı araştırması şablonları",
+        "Yazılım kalite kontrol ve yayın öncesi kontrol listeleri",
+        "Kişisel çalışma alanı araçları", "Gelişmiş çıktı biçimlendirme şablonları",
+        "Plus araçları yalnızca aktif Plus aboneliği doğrulandığında kullanılabilir"
+    ], "disclaimer": "400 TL/ay fiyatı taslaktır; satın alma Stripe fiyatı ve webhook ile doğrulanmadan etkin olmaz."}
 }
 
 def plan_feature_summary(plan: str) -> dict:
-    """Return a defensive copy of the visible feature list for a plan."""
-    key = "pro" if str(plan or "free").lower() == "pro" else "free"
+    key = normalize_plan_name(plan)
     source = PLAN_FEATURES[key]
-    return {**source, "features": list(source["features"]) }
+    return {**source, "features": list(source["features"])}
 
 def normalize_plan_name(plan: str | None) -> str:
-    """Normalize plan labels without granting or changing entitlements."""
-    return "pro" if str(plan or "").strip().lower() == "pro" else "free"
+    value = str(plan or "free").strip().lower()
+    return value if value in ("free", "pro", "plus") else "free"
+
+def user_has_pro_access(user: dict | None) -> bool:
+    return bool(user and normalize_plan_name(user.get("plan")) in ("pro", "plus"))
+
+def user_has_plus_access(user: dict | None) -> bool:
+    return bool(user and normalize_plan_name(user.get("plan")) == "plus")
 
 def user_can_generate_custom_game(user: dict | None) -> bool:
-    """Centralized UI-level predicate; API authorization remains authoritative."""
-    return bool(user and normalize_plan_name(user.get("plan")) == "pro")
+    return user_has_pro_access(user)
 
 def safe_game_title(prompt: str, default: str = "Tekden AI oyunu") -> str:
     """Build a short UI title from a user prompt without trusting markup."""
@@ -494,6 +495,7 @@ def product_features():
         "plans": {
             "free": plan_feature_summary("free"),
             "pro": plan_feature_summary("pro"),
+            "plus": plan_feature_summary("plus"),
         },
         "capabilities": {
             "chat": bool(OLLAMA_API_KEY),
@@ -502,6 +504,7 @@ def product_features():
             "image_generation": True,
             "custom_game_generation": bool(OLLAMA_API_KEY),
             "billing_configured": bool(STRIPE_SECRET_KEY and STRIPE_PRICE_ID_PRO),
+            "plus_billing_configured": bool(STRIPE_SECRET_KEY and STRIPE_PRICE_ID_PLUS),
             "account_preferences": bool(DATABASE_URL),
         },
         "notice": "Kullanılabilirlik harici sağlayıcılara, sunucu yapılandırmasına ve kullanım limitlerine bağlıdır.",
@@ -716,6 +719,7 @@ def system_status():
         "web_search": "configured" if TAVILY_API_KEY else "fallback_or_unavailable",
         "image_provider": "configured" if POLLINATIONS_API_KEY or HF_TOKEN else "provider_dependent",
         "billing": "configured" if STRIPE_SECRET_KEY and STRIPE_PRICE_ID_PRO else "not_configured",
+        "plus_billing": "configured" if STRIPE_SECRET_KEY and STRIPE_PRICE_ID_PLUS else "not_configured",
         "pro_model_name": OLLAMA_PRO_MODEL if OLLAMA_API_KEY else None,
         "secrets_exposed": False,
     }
@@ -887,31 +891,42 @@ def save_analysis(body: SaveAnalysisBody, request: Request):
     return {"saved":True,"chat_id":chat_id}
 
 @app.post("/api/billing/checkout")
-def billing_checkout(request: Request):
+async def billing_checkout(request: Request):
     user = current_user(request)
     if not user:
-        raise HTTPException(401, "Pro üyeliği satın almak için önce giriş yap.")
-    if user.get("plan") == "pro":
-        raise HTTPException(409, "Tekden AI Pro üyeliğin zaten aktif. Yeniden satın alman gerekmiyor.")
-    if not STRIPE_SECRET_KEY or not STRIPE_PRICE_ID_PRO:
-        raise HTTPException(503, "Ödeme henüz etkinleştirilmedi. Stripe hesabı, aylık fiyat ürünü ve Render ortam değişkenleri yapılandırılmalı.")
+        raise HTTPException(401, "Abonelik satın almak için önce giriş yap.")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    target = normalize_plan_name(payload.get("plan", "pro"))
+    if target == "free":
+        raise HTTPException(400, "Free plan satın alınamaz.")
+    current = normalize_plan_name(user.get("plan"))
+    if current == target:
+        raise HTTPException(409, f"{target.title()} üyeliğin zaten aktif.")
+    price_id = STRIPE_PRICE_ID_PLUS if target == "plus" else STRIPE_PRICE_ID_PRO
+    if not STRIPE_SECRET_KEY or not price_id:
+        raise HTTPException(503, f"{target.title()} ödemesi yapılandırılmamış. Stripe fiyat kimliğini Render ortam değişkenine ekle.")
     base = PUBLIC_APP_URL or str(request.base_url).rstrip("/")
     try:
         r = requests.post("https://api.stripe.com/v1/checkout/sessions",
             auth=(STRIPE_SECRET_KEY, ""), timeout=25,
-            data={"mode":"subscription", "success_url":base+"/?payment=success",
+            data={"mode":"subscription", "success_url":base+"/?payment=success&plan="+target,
                   "cancel_url":base+"/?payment=cancelled", "client_reference_id":str(user["id"]),
-                  "line_items[0][price]":STRIPE_PRICE_ID_PRO, "line_items[0][quantity]":"1",
-                  "metadata[user_id]":str(user["id"]), "subscription_data[metadata][user_id]":str(user["id"]),
+                  "line_items[0][price]":price_id, "line_items[0][quantity]":"1",
+                  "metadata[user_id]":str(user["id"]), "metadata[plan]":target,
+                  "subscription_data[metadata][user_id]":str(user["id"]),
+                  "subscription_data[metadata][plan]":target,
                   "allow_promotion_codes":"true"})
         if not r.ok:
-            raise HTTPException(502, "Ödeme sağlayıcısı oturum oluşturamadı. Stripe fiyat kimliği ve hesap ayarlarını kontrol et.")
+            raise HTTPException(502, "Stripe Checkout oturumu oluşturamadı. Price ID ve Stripe hesabını kontrol et.")
         data=r.json()
         if not data.get("url"):
-            raise HTTPException(502, "Ödeme sağlayıcısı yönlendirme adresi döndürmedi.")
-        return {"url":data["url"]}
+            raise HTTPException(502, "Stripe ödeme bağlantısı döndürmedi.")
+        return {"url":data["url"], "plan":target}
     except requests.RequestException:
-        raise HTTPException(502, "Ödeme sağlayıcısına bağlanılamadı.")
+        raise HTTPException(502, "Stripe servisine bağlanılamadı.")
 
 @app.post("/api/billing/webhook")
 async def billing_webhook(request: Request):
@@ -938,17 +953,22 @@ async def billing_webhook(request: Request):
         event=json.loads(raw.decode("utf-8")); typ=event.get("type",""); obj=event.get("data",{}).get("object",{})
         uid=(obj.get("metadata") or {}).get("user_id") or obj.get("client_reference_id")
         if typ == "checkout.session.completed" and uid and obj.get("mode")=="subscription":
+            target = normalize_plan_name((obj.get("metadata") or {}).get("plan", "pro"))
+            if target not in ("pro", "plus"):
+                target = "pro"
             with db() as conn:
-                conn.execute("UPDATE users SET plan='pro', stripe_customer_id=%s, stripe_subscription_id=%s WHERE id=%s",
-                             (obj.get("customer"), obj.get("subscription"), int(uid)))
+                conn.execute("UPDATE users SET plan=%s, stripe_customer_id=%s, stripe_subscription_id=%s WHERE id=%s",
+                             (target, obj.get("customer"), obj.get("subscription"), int(uid)))
         elif typ in ("customer.subscription.updated", "customer.subscription.deleted", "customer.subscription.paused", "customer.subscription.resumed"):
             subid=obj.get("id")
             if subid:
                 status=obj.get("status", "")
                 active = status in ("active", "trialing") and typ != "customer.subscription.deleted"
+                meta_plan = normalize_plan_name((obj.get("metadata") or {}).get("plan", "pro"))
+                desired_plan = meta_plan if active and meta_plan in ("pro", "plus") else "free"
                 with db() as conn:
                     conn.execute("UPDATE users SET plan=%s, stripe_subscription_id=%s WHERE stripe_subscription_id=%s",
-                                 ("pro" if active else "free", subid if active else None, subid))
+                                 (desired_plan, subid if active else None, subid))
         return {"received":True}
     except (ValueError, TypeError, KeyError):
         raise HTTPException(400, "Webhook olayı okunamadı.")
@@ -980,7 +1000,7 @@ def chat(body: ChatBody, request: Request):
     use_search = body.force_search or should_search(user_message)
     query = user_message.replace("/search ", "", 1)
     sources = (pro_web_search(query) if plan == "pro" else web_search(query)) if use_search else []
-    if plan == "pro":
+    if plan in ("pro", "plus"):
         plan_rules = """Kullanıcının planı Tekden AI Pro. Üst düzey, kişiye özel bir çalışma ortağı gibi davran: isteğin amacını koru, önceki sohbet bağlamını etkin kullan, belirsizlikleri gerektiğinde sor, karmaşık işleri aşamalara böl ve uygulanabilir, tamamlanmış sonuç üret. Web kaynakları mevcutsa çoklu kaynağı karşılaştır, tarihleri kontrol et ve iddiaları kaynaklarla destekle. Kod, tasarım, araştırma ve planlama taleplerinde yalnızca genel tavsiye verme; mümkün olduğunda doğrudan kullanılabilir bir çıktı sun. Dosya/görsel içeriğine sadık kal. Doğal, akıcı Türkçe kullan; gereksiz sembol ve biçimlendirme yapma. Kullanıcı kısa yanıt isterse kısa tut. Gerçekte çalıştırılmamış işlemleri yaptığını iddia etme. Pro modeli kullanılamazsa temel modele geçiş olabilir; bunu gerekiyorsa açıkça belirt."""
     else:
         plan_rules = """Kullanıcının planı Tekden AI Free. Doğru ve anlaşılır yanıt ver; basit soruları gereksiz uzatma. Karmaşık görevlerde temel açıklama ve ilk adımları sun. Kullanıcıyı yanıltma veya kaliteyi bilerek düşürme; gerçekten mevcut olmayan araçları ya da sınırsız kullanımı vaat etme."""
@@ -1040,7 +1060,7 @@ Yazım ve anlatım kuralları:
             history.reverse()
             msgs.extend({"role": x["role"], "content": x["content"]} for x in history)
             msgs.append({"role":"user","content":user_message})
-            if plan == "pro":
+            if plan in ("pro", "plus"):
                 try:
                     answer = call_ollama(msgs, OLLAMA_PRO_MODEL)
                 except RuntimeError:
@@ -1215,6 +1235,8 @@ HTML = r"""<!doctype html>
 .garage-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}.garage-item{border:1px solid #355b79;border-radius:12px;padding:10px;background:#0b1b2d;color:#eaf6ff;text-align:left;cursor:pointer}.garage-item:disabled{opacity:.45;cursor:not-allowed}.garage-item strong{display:block;margin-bottom:4px}.toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:3;background:#061423ed;border:1px solid #4de8ff;border-radius:999px;padding:8px 13px;color:#fff;pointer-events:none;white-space:nowrap}.badge-row{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}.mini-badge{background:#172c43;border:1px solid #375675;border-radius:8px;padding:6px 8px;font-size:12px}
 
 /* Tekden AI productivity pack */
+/* Hide the bottom feedback/footer elements as requested; feedback API remains available internally. */
+.site-feedback,.feedback-footer,#feedbackFooter,.bottom-feedback,[data-section="feedback"]{display:none!important;}
 #tdQuickDock{position:fixed;right:18px;bottom:18px;z-index:1000;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;max-width:min(520px,calc(100vw - 24px))}
 #tdQuickDock button{box-shadow:0 8px 28px #0a39741f}
 #tdToolsBack{position:fixed;inset:0;background:#07162a9c;z-index:3000;display:none;align-items:center;justify-content:center;padding:16px}
@@ -1401,13 +1423,3284 @@ $('tdExportGuest').onclick=()=>{const data=JSON.stringify({exported_at:new Date(
 $('tdClearGuest').onclick=()=>{if(!confirm('Bu tarayıcıdaki misafir sohbet geçmişi temizlensin mi? Bu işlem hesap sohbetlerini silmez.'))return;guestHistory=[];saveGuestHistory();$('messages').innerHTML='';newChat();tdToast('Misafir geçmişi temizlendi.')};
 $('tdSubmitFeature').onclick=async()=>{const title=$('tdFeatureTitle').value.trim(),details=$('tdFeatureDetails').value.trim();if(title.length<4){$('tdFeatureStatus').textContent='Başlığı en az 4 karakter yaz.';return}try{await api('/api/feature-requests',{method:'POST',body:JSON.stringify({title,details})});$('tdFeatureStatus').textContent='Önerin kaydedildi. Teşekkürler!';$('tdFeatureTitle').value='';$('tdFeatureDetails').value=''}catch(e){$('tdFeatureStatus').textContent=e.message}};
 $('tdShortcuts').onclick=()=>alert('Klavye kısayolları:\nCtrl/⌘ + K: Araç kutusu\nCtrl/⌘ + Enter: Mesaj gönder\nCtrl/⌘ + Shift + N: Yeni sohbet\nEsc: Açık paneli kapat\nEnter: Mesaj gönder\nShift + Enter: Yeni satır');
-$('tdFeedback').onclick=()=>{const text=prompt('Tekden AI hakkında geri bildirimin:');if(!text||text.trim().length<8)return;api('/api/feedback',{method:'POST',body:JSON.stringify({category:'suggestion',message:text,page:location.pathname})}).then(()=>alert('Geri bildirimin alındı.')).catch(e=>alert(e.message))};
 // Attach practical controls to each assistant answer: copy, bookmark, positive/negative rating and save as note.
 const tdOriginalBubble=bubble;bubble=function(role,content,sources=[]){const node=tdOriginalBubble(role,content,sources);if(role==='assistant'){tdLastAssistant=String(content||'');const tools=document.createElement('div');tools.className='tdBubbleTools';const copy=document.createElement('button');copy.className='secondary';copy.textContent='Kopyala';copy.onclick=async()=>{try{await navigator.clipboard.writeText(String(content));tdToast('Yanıt kopyalandı.')}catch{const ta=document.createElement('textarea');ta.value=String(content);document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();tdToast('Yanıt kopyalandı.')}};const save=document.createElement('button');save.className='secondary';save.textContent='🔖 Kaydet';save.onclick=async()=>{if(!user){alert('Yanıtı hesabında saklamak için giriş yap.');return}const title=(String(content).split('\n').find(x=>x.trim())||'Kaydedilen yanıt').slice(0,150);try{await api('/api/bookmarks',{method:'POST',body:JSON.stringify({title,content:String(content),chat_id:chatId||null})});tdToast('Yanıt kaydedildi.');tdLoadBookmarks()}catch(e){alert(e.message)}};const good=document.createElement('button');good.className='td-response-rating';good.textContent='👍 Faydalı';good.onclick=()=>api('/api/response-rating',{method:'POST',body:JSON.stringify({rating:1,context:location.pathname})}).then(()=>tdToast('Geri bildirimin için teşekkürler.')).catch(()=>tdToast('Puan kaydedilemedi.'));const bad=document.createElement('button');bad.className='td-response-rating';bad.textContent='👎 Geliştir';bad.onclick=()=>api('/api/response-rating',{method:'POST',body:JSON.stringify({rating:-1,context:location.pathname})}).then(()=>tdToast('Geri bildirimin için teşekkürler.')).catch(()=>tdToast('Puan kaydedilemedi.'));const note=document.createElement('button');note.className='secondary';note.textContent='📝 Nota dönüştür';note.onclick=()=>{tdOpenTools();$('tdNoteTitle').value=(String(content).split('\n').find(x=>x.trim())||'Yanıt notu').slice(0,120);$('tdNoteContent').value=String(content).slice(0,12000)};tools.append(copy,save,good,bad,note);node.appendChild(tools)}return node};
 // Keyboard-first workflow and safe modal close handling.
 document.addEventListener('keydown',e=>{const mod=e.ctrlKey||e.metaKey;if(mod&&e.key.toLowerCase()==='k'){e.preventDefault();tdBack.style.display==='flex'?tdCloseTools():tdOpenTools()}if(mod&&e.key==='Enter'){e.preventDefault();if($('prompt').value.trim())send()}if(mod&&e.shiftKey&&e.key.toLowerCase()==='n'){e.preventDefault();newChat()}if(e.key==='Escape'){tdCloseTools()}});
 // Drag-and-drop files onto the chat area, with the same 12 MB safety limit as the picker.
 const tdDropTarget=$('messages');if(tdDropTarget){tdDropTarget.addEventListener('dragover',e=>{e.preventDefault();tdDropTarget.style.outline='2px dashed var(--accent)'});tdDropTarget.addEventListener('dragleave',()=>tdDropTarget.style.outline='');tdDropTarget.addEventListener('drop',e=>{e.preventDefault();tdDropTarget.style.outline='';const f=e.dataTransfer.files?.[0];if(!f)return;if(f.size>12*1024*1024){alert('Dosya en fazla 12 MB olabilir.');return}const allowed=/^(image\/|application\/pdf|text\/|application\/vnd\.openxmlformats-officedocument\.wordprocessingml\.document)/.test(f.type)||/\.(pdf|txt|md|csv|json|docx)$/i.test(f.name);if(!allowed){alert('Desteklenmeyen dosya türü. PDF, TXT, MD, CSV, JSON, DOCX veya görsel seç.');return}$('fileInput').files=e.dataTransfer.files;$('fileInput').dispatchEvent(new Event('change'));$('prompt').focus()})}
+// Tekden AI 175-tool library UI: local prompt workflows that work with the existing chat composer.
+const td175Modal=document.createElement('div');
+td175Modal.id='td175Modal';
+td175Modal.style.cssText='position:fixed;inset:0;z-index:5000;background:#07162acc;display:none;align-items:center;justify-content:center;padding:12px';
+td175Modal.innerHTML=`<section style="width:min(1050px,100%);max-height:92vh;overflow:auto;background:var(--panel,#fff);color:var(--text,#172b46);border:1px solid var(--line,#d8e6f6);border-radius:18px;padding:18px;box-shadow:0 24px 90px #0005"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0">✦ 325 çalışma aracı</h2><p style="margin:4px 0;color:var(--muted,#60738b)">Bir şablon seç; içeriği sohbet kutusuna aktar ve Tekden AI'a gönder.</p></div><button id="td175Close" class="secondary">Kapat ✕</button></div><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;margin:12px 0"><input id="td175Search" placeholder="Ara: ders, kod, proje…" style="padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text)"><select id="td175Category" style="padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text)"><option value="">Tüm kategoriler</option></select><select id="td175Tier" style="padding:10px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text)"><option value="">Tüm paket etiketleri</option><option>Free</option><option>Pro</option><option>Plus</option></select><span id="td175Count" style="align-self:center;color:var(--muted)"></span></div><div id="td175Results" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:9px"></div><p style="font-size:12px;color:var(--muted)">Free/Pro/Plus etiketleri önerilen kullanım segmentini belirtir; ödeme ve plan yetkileri mevcut sunucu yapılandırmasına göre ayrıca uygulanmalıdır.</p></section>`;
+document.body.appendChild(td175Modal);
+const td175Style=document.createElement('style');
+td175Style.textContent='#td175Results button{white-space:normal;text-align:left;padding:12px;border:1px solid var(--line,#d8e6f6);border-radius:12px;background:var(--panel2,#f5f9ff);color:var(--text,#172b46);cursor:pointer}#td175Results button:hover{border-color:var(--accent,#0878f9);transform:translateY(-1px)}#td175Results small{display:block;color:var(--muted,#62748b);margin-top:5px;line-height:1.4}';document.head.appendChild(td175Style);
+const td175FeatureLibrary = [
+  {
+    id: 1,
+    category: "Öğrenme",
+    title: "Ders konusunu seviyeme göre anlat",
+    tier: "Free",
+    description: "Bir konuyu temel kavramlardan başlayıp örnekler, mini test ve özetle öğret.",
+    prompt: "Bir konuyu temel kavramlardan başlayıp örnekler, mini test ve özetle öğret. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme ders konusunu seviyeme göre anlat",
+    enabled: true,
+  },
+  {
+    id: 2,
+    category: "Öğrenme",
+    title: "Sınava hazırlık planı",
+    tier: "Free",
+    description: "Sınav tarihime ve konularıma göre günlük çalışma planı, tekrar ve deneme aşamaları oluştur.",
+    prompt: "Sınav tarihime ve konularıma göre günlük çalışma planı, tekrar ve deneme aşamaları oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme sınava hazırlık planı",
+    enabled: true,
+  },
+  {
+    id: 3,
+    category: "Öğrenme",
+    title: "Konu anlatım kartları",
+    tier: "Pro",
+    description: "Verdiğim materyalden kısa soru-cevap kartları ve hatırlama ipuçları üret.",
+    prompt: "Verdiğim materyalden kısa soru-cevap kartları ve hatırlama ipuçları üret. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme konu anlatım kartları",
+    enabled: true,
+  },
+  {
+    id: 4,
+    category: "Öğrenme",
+    title: "Sokratik öğretmen",
+    tier: "Free",
+    description: "Yanıtı hemen verme; küçük yönlendirici sorularla kendim bulmama yardım et.",
+    prompt: "Yanıtı hemen verme; küçük yönlendirici sorularla kendim bulmama yardım et. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme sokratik öğretmen",
+    enabled: true,
+  },
+  {
+    id: 5,
+    category: "Öğrenme",
+    title: "Yanlışlarımı analiz et",
+    tier: "Plus",
+    description: "Çözümlerimdeki hataları sınıflandır, nedenlerini açıkla ve benzer alıştırmalar üret.",
+    prompt: "Çözümlerimdeki hataları sınıflandır, nedenlerini açıkla ve benzer alıştırmalar üret. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme yanlışlarımı analiz et",
+    enabled: true,
+  },
+  {
+    id: 6,
+    category: "Öğrenme",
+    title: "Matematik adım adım",
+    tier: "Pro",
+    description: "Problemi ara işlemleri ve kontrol yöntemiyle adım adım çöz; sonucu doğrula.",
+    prompt: "Problemi ara işlemleri ve kontrol yöntemiyle adım adım çöz; sonucu doğrula. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme matematik adım adım",
+    enabled: true,
+  },
+  {
+    id: 7,
+    category: "Öğrenme",
+    title: "Fen deney raporu taslağı",
+    tier: "Free",
+    description: "Deney amacı, hipotez, değişkenler, yöntem, gözlem ve sonuç başlıklarıyla rapor taslağı hazırla.",
+    prompt: "Deney amacı, hipotez, değişkenler, yöntem, gözlem ve sonuç başlıklarıyla rapor taslağı hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme fen deney raporu taslağı",
+    enabled: true,
+  },
+  {
+    id: 8,
+    category: "Öğrenme",
+    title: "Dil bilgisi alıştırması",
+    tier: "Free",
+    description: "Seviyeme uygun dil bilgisi soruları üret; cevap anahtarını ayrı ver.",
+    prompt: "Seviyeme uygun dil bilgisi soruları üret; cevap anahtarını ayrı ver. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme dil bilgisi alıştırması",
+    enabled: true,
+  },
+  {
+    id: 9,
+    category: "Öğrenme",
+    title: "Kelime öğrenme seti",
+    tier: "Pro",
+    description: "Verdiğim kelimeler için anlam, örnek cümle, eş anlam ve kısa test hazırla.",
+    prompt: "Verdiğim kelimeler için anlam, örnek cümle, eş anlam ve kısa test hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme kelime öğrenme seti",
+    enabled: true,
+  },
+  {
+    id: 10,
+    category: "Öğrenme",
+    title: "Tarih zaman çizelgesi",
+    tier: "Plus",
+    description: "Konu olaylarını kronolojik sıraya koy; neden-sonuç ilişkilerini belirt.",
+    prompt: "Konu olaylarını kronolojik sıraya koy; neden-sonuç ilişkilerini belirt. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme tarih zaman çizelgesi",
+    enabled: true,
+  },
+  {
+    id: 11,
+    category: "Öğrenme",
+    title: "Edebî tür karşılaştırması",
+    tier: "Free",
+    description: "İki edebî türü amaç, yapı, dil ve örnek özellikler bakımından karşılaştır.",
+    prompt: "İki edebî türü amaç, yapı, dil ve örnek özellikler bakımından karşılaştır. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme edebî tür karşılaştırması",
+    enabled: true,
+  },
+  {
+    id: 12,
+    category: "Öğrenme",
+    title: "Sunum konuşma provası",
+    tier: "Pro",
+    description: "Sunumumu dinleyici soruları, süre ve anlaşılabilirlik açısından prova ettir.",
+    prompt: "Sunumumu dinleyici soruları, süre ve anlaşılabilirlik açısından prova ettir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme sunum konuşma provası",
+    enabled: true,
+  },
+  {
+    id: 13,
+    category: "Öğrenme",
+    title: "Okuma anlama testi",
+    tier: "Free",
+    description: "Metnimden farklı zorluklarda anlama, çıkarım ve kelime soruları hazırla.",
+    prompt: "Metnimden farklı zorluklarda anlama, çıkarım ve kelime soruları hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme okuma anlama testi",
+    enabled: true,
+  },
+  {
+    id: 14,
+    category: "Öğrenme",
+    title: "Kişisel sözlük",
+    tier: "Free",
+    description: "Metindeki önemli terimleri sade tanım ve örneklerle sözlük hâline getir.",
+    prompt: "Metindeki önemli terimleri sade tanım ve örneklerle sözlük hâline getir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme kişisel sözlük",
+    enabled: true,
+  },
+  {
+    id: 15,
+    category: "Öğrenme",
+    title: "Haftalık tekrar sistemi",
+    tier: "Plus",
+    description: "Öğrendiğim konular için aralıklı tekrar takvimi ve kısa kontrol noktaları tasarla.",
+    prompt: "Öğrendiğim konular için aralıklı tekrar takvimi ve kısa kontrol noktaları tasarla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "öğrenme haftalık tekrar sistemi",
+    enabled: true,
+  },
+  {
+    id: 16,
+    category: "Yazı",
+    title: "E-posta taslağı",
+    tier: "Free",
+    description: "Amacıma ve alıcıya uygun, net konu satırlı bir e-posta taslağı hazırla.",
+    prompt: "Amacıma ve alıcıya uygun, net konu satırlı bir e-posta taslağı hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı e-posta taslağı",
+    enabled: true,
+  },
+  {
+    id: 17,
+    category: "Yazı",
+    title: "Metin sadeleştirici",
+    tier: "Free",
+    description: "Metni anlamını koruyarak daha sade, kısa ve akıcı hâle getir.",
+    prompt: "Metni anlamını koruyarak daha sade, kısa ve akıcı hâle getir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı metin sadeleştirici",
+    enabled: true,
+  },
+  {
+    id: 18,
+    category: "Yazı",
+    title: "Yazım denetimi",
+    tier: "Pro",
+    description: "Yazım, noktalama ve anlatım bozukluklarını işaretle; düzeltmeleri açıkla.",
+    prompt: "Yazım, noktalama ve anlatım bozukluklarını işaretle; düzeltmeleri açıkla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı yazım denetimi",
+    enabled: true,
+  },
+  {
+    id: 19,
+    category: "Yazı",
+    title: "Farklı tonlarda yaz",
+    tier: "Free",
+    description: "Metni resmî, samimi ve ikna edici tonlarda ayrı ayrı yeniden yaz.",
+    prompt: "Metni resmî, samimi ve ikna edici tonlarda ayrı ayrı yeniden yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı farklı tonlarda yaz",
+    enabled: true,
+  },
+  {
+    id: 20,
+    category: "Yazı",
+    title: "Blog yazısı planı",
+    tier: "Plus",
+    description: "Hedef kitle, ana fikir, ara başlıklar ve sonuç içeren özgün yazı taslağı oluştur.",
+    prompt: "Hedef kitle, ana fikir, ara başlıklar ve sonuç içeren özgün yazı taslağı oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı blog yazısı planı",
+    enabled: true,
+  },
+  {
+    id: 21,
+    category: "Yazı",
+    title: "Hikâye iskeleti",
+    tier: "Pro",
+    description: "Karakter, hedef, çatışma, dönüm noktası ve finalden oluşan hikâye planı hazırla.",
+    prompt: "Karakter, hedef, çatışma, dönüm noktası ve finalden oluşan hikâye planı hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı hikâye iskeleti",
+    enabled: true,
+  },
+  {
+    id: 22,
+    category: "Yazı",
+    title: "Karakter profili",
+    tier: "Free",
+    description: "Karakterin motivasyonu, güçlü yönü, kusuru, geçmişi ve gelişim çizgisini oluştur.",
+    prompt: "Karakterin motivasyonu, güçlü yönü, kusuru, geçmişi ve gelişim çizgisini oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı karakter profili",
+    enabled: true,
+  },
+  {
+    id: 23,
+    category: "Yazı",
+    title: "Başlık üreticisi",
+    tier: "Free",
+    description: "İçeriğim için merak uyandıran ama yanıltıcı olmayan 15 başlık öner.",
+    prompt: "İçeriğim için merak uyandıran ama yanıltıcı olmayan 15 başlık öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı başlık üreticisi",
+    enabled: true,
+  },
+  {
+    id: 24,
+    category: "Yazı",
+    title: "Özet çıkarıcı",
+    tier: "Pro",
+    description: "Metni ana fikir, destekleyici noktalar ve sonuç olarak üç seviyede özetle.",
+    prompt: "Metni ana fikir, destekleyici noktalar ve sonuç olarak üç seviyede özetle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı özet çıkarıcı",
+    enabled: true,
+  },
+  {
+    id: 25,
+    category: "Yazı",
+    title: "Metin karşılaştırıcı",
+    tier: "Plus",
+    description: "İki metnin ortak yönlerini, farklılıklarını, tonunu ve eksiklerini karşılaştır.",
+    prompt: "İki metnin ortak yönlerini, farklılıklarını, tonunu ve eksiklerini karşılaştır. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı metin karşılaştırıcı",
+    enabled: true,
+  },
+  {
+    id: 26,
+    category: "Yazı",
+    title: "İkna metni oluştur",
+    tier: "Free",
+    description: "Hedef kitleyi ve kanıtlanabilir faydaları dikkate alan dürüst bir ikna metni yaz.",
+    prompt: "Hedef kitleyi ve kanıtlanabilir faydaları dikkate alan dürüst bir ikna metni yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı i̇kna metni oluştur",
+    enabled: true,
+  },
+  {
+    id: 27,
+    category: "Yazı",
+    title: "Sosyal medya gönderisi",
+    tier: "Pro",
+    description: "Platforma uygun kısa gönderi, alternatif açılış ve erişilebilir açıklama üret.",
+    prompt: "Platforma uygun kısa gönderi, alternatif açılış ve erişilebilir açıklama üret. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı sosyal medya gönderisi",
+    enabled: true,
+  },
+  {
+    id: 28,
+    category: "Yazı",
+    title: "Video senaryo taslağı",
+    tier: "Free",
+    description: "Giriş, sahneler, anlatıcı metni ve kapanış içeren video senaryosu hazırla.",
+    prompt: "Giriş, sahneler, anlatıcı metni ve kapanış içeren video senaryosu hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı video senaryo taslağı",
+    enabled: true,
+  },
+  {
+    id: 29,
+    category: "Yazı",
+    title: "Basın duyurusu",
+    tier: "Free",
+    description: "Kim, ne, nerede, ne zaman, neden ve nasıl sorularını yanıtlayan duyuru hazırla.",
+    prompt: "Kim, ne, nerede, ne zaman, neden ve nasıl sorularını yanıtlayan duyuru hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı basın duyurusu",
+    enabled: true,
+  },
+  {
+    id: 30,
+    category: "Yazı",
+    title: "Toplantı tutanağı",
+    tier: "Plus",
+    description: "Notları kararlar, sorumlular, son tarihler ve açık sorular biçiminde düzenle.",
+    prompt: "Notları kararlar, sorumlular, son tarihler ve açık sorular biçiminde düzenle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yazı toplantı tutanağı",
+    enabled: true,
+  },
+  {
+    id: 31,
+    category: "Kodlama",
+    title: "Kod incelemesi",
+    tier: "Free",
+    description: "Kodu hata, güvenlik, performans ve okunabilirlik açısından incele; öncelikli düzeltmeleri sırala.",
+    prompt: "Kodu hata, güvenlik, performans ve okunabilirlik açısından incele; öncelikli düzeltmeleri sırala. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama kod incelemesi",
+    enabled: true,
+  },
+  {
+    id: 32,
+    category: "Kodlama",
+    title: "Hata ayıklama planı",
+    tier: "Free",
+    description: "Hata mesajını olası nedenler, doğrulama adımları ve en küçük düzeltme şeklinde analiz et.",
+    prompt: "Hata mesajını olası nedenler, doğrulama adımları ve en küçük düzeltme şeklinde analiz et. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama hata ayıklama planı",
+    enabled: true,
+  },
+  {
+    id: 33,
+    category: "Kodlama",
+    title: "API tasarımcısı",
+    tier: "Pro",
+    description: "Uç noktalar, istek/yanıt şemaları, hata kodları ve kimlik doğrulama öner.",
+    prompt: "Uç noktalar, istek/yanıt şemaları, hata kodları ve kimlik doğrulama öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama api tasarımcısı",
+    enabled: true,
+  },
+  {
+    id: 34,
+    category: "Kodlama",
+    title: "Veritabanı şeması",
+    tier: "Free",
+    description: "Varlıklar, ilişkiler, indeksler ve geçiş planı içeren güvenli şema taslağı oluştur.",
+    prompt: "Varlıklar, ilişkiler, indeksler ve geçiş planı içeren güvenli şema taslağı oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama veritabanı şeması",
+    enabled: true,
+  },
+  {
+    id: 35,
+    category: "Kodlama",
+    title: "Test senaryosu üret",
+    tier: "Plus",
+    description: "Normal, sınır, hata ve yetki senaryoları için test listesi hazırla.",
+    prompt: "Normal, sınır, hata ve yetki senaryoları için test listesi hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama test senaryosu üret",
+    enabled: true,
+  },
+  {
+    id: 36,
+    category: "Kodlama",
+    title: "Birim test taslağı",
+    tier: "Pro",
+    description: "Verdiğim fonksiyon için bağımlılıkları izole eden birim testler yaz.",
+    prompt: "Verdiğim fonksiyon için bağımlılıkları izole eden birim testler yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama birim test taslağı",
+    enabled: true,
+  },
+  {
+    id: 37,
+    category: "Kodlama",
+    title: "Performans incelemesi",
+    tier: "Free",
+    description: "Darboğaz ihtimallerini belirle; ölçüm yöntemi ve düşük riskli optimizasyon öner.",
+    prompt: "Darboğaz ihtimallerini belirle; ölçüm yöntemi ve düşük riskli optimizasyon öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama performans incelemesi",
+    enabled: true,
+  },
+  {
+    id: 38,
+    category: "Kodlama",
+    title: "Güvenli kod kontrolü",
+    tier: "Free",
+    description: "Girdi doğrulama, yetki, sırlar, hata mesajları ve veri sızıntısı risklerini denetle.",
+    prompt: "Girdi doğrulama, yetki, sırlar, hata mesajları ve veri sızıntısı risklerini denetle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama güvenli kod kontrolü",
+    enabled: true,
+  },
+  {
+    id: 39,
+    category: "Kodlama",
+    title: "README oluşturucu",
+    tier: "Pro",
+    description: "Proje kurulum, yapılandırma, kullanım, test ve dağıtım adımlarını README olarak yaz.",
+    prompt: "Proje kurulum, yapılandırma, kullanım, test ve dağıtım adımlarını README olarak yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama readme oluşturucu",
+    enabled: true,
+  },
+  {
+    id: 40,
+    category: "Kodlama",
+    title: "Git commit mesajı",
+    tier: "Plus",
+    description: "Değişiklik özetinden kısa, anlamlı ve standart biçimli commit mesajı üret.",
+    prompt: "Değişiklik özetinden kısa, anlamlı ve standart biçimli commit mesajı üret. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama git commit mesajı",
+    enabled: true,
+  },
+  {
+    id: 41,
+    category: "Kodlama",
+    title: "SQL sorgu açıklayıcı",
+    tier: "Free",
+    description: "SQL sorgusunu bölüm bölüm açıkla ve indeks/performans risklerini belirt.",
+    prompt: "SQL sorgusunu bölüm bölüm açıkla ve indeks/performans risklerini belirt. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama sql sorgu açıklayıcı",
+    enabled: true,
+  },
+  {
+    id: 42,
+    category: "Kodlama",
+    title: "Regex yardımcısı",
+    tier: "Pro",
+    description: "İhtiyacıma uygun regex üret; eşleşen ve eşleşmeyen örneklerle açıkla.",
+    prompt: "İhtiyacıma uygun regex üret; eşleşen ve eşleşmeyen örneklerle açıkla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama regex yardımcısı",
+    enabled: true,
+  },
+  {
+    id: 43,
+    category: "Kodlama",
+    title: "JSON doğrulama",
+    tier: "Free",
+    description: "JSON yapısını kontrol et, hataları göster ve geçerli sürümünü oluştur.",
+    prompt: "JSON yapısını kontrol et, hataları göster ve geçerli sürümünü oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama json doğrulama",
+    enabled: true,
+  },
+  {
+    id: 44,
+    category: "Kodlama",
+    title: "HTML erişilebilirlik",
+    tier: "Free",
+    description: "HTML arayüzünü semantik etiket, klavye ve ekran okuyucu açısından denetle.",
+    prompt: "HTML arayüzünü semantik etiket, klavye ve ekran okuyucu açısından denetle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama html erişilebilirlik",
+    enabled: true,
+  },
+  {
+    id: 45,
+    category: "Kodlama",
+    title: "CSS düzenleme",
+    tier: "Plus",
+    description: "CSS sorununu en az yan etkiyle çöz; mobil ve masaüstü davranışını açıkla.",
+    prompt: "CSS sorununu en az yan etkiyle çöz; mobil ve masaüstü davranışını açıkla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama css düzenleme",
+    enabled: true,
+  },
+  {
+    id: 46,
+    category: "Kodlama",
+    title: "Refaktör planı",
+    tier: "Free",
+    description: "Davranışı koruyarak kodu küçük ve test edilebilir adımlarla sadeleştir.",
+    prompt: "Davranışı koruyarak kodu küçük ve test edilebilir adımlarla sadeleştir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama refaktör planı",
+    enabled: true,
+  },
+  {
+    id: 47,
+    category: "Kodlama",
+    title: "Mimari karar kaydı",
+    tier: "Free",
+    description: "Seçenekler, karar, gerekçeler, riskler ve geri dönüş planı içeren ADR yaz.",
+    prompt: "Seçenekler, karar, gerekçeler, riskler ve geri dönüş planı içeren ADR yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama mimari karar kaydı",
+    enabled: true,
+  },
+  {
+    id: 48,
+    category: "Kodlama",
+    title: "Sürüm notları",
+    tier: "Pro",
+    description: "Değişiklikleri yeni özellik, düzeltme ve uyumluluk başlıklarıyla sürüm notuna dönüştür.",
+    prompt: "Değişiklikleri yeni özellik, düzeltme ve uyumluluk başlıklarıyla sürüm notuna dönüştür. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama sürüm notları",
+    enabled: true,
+  },
+  {
+    id: 49,
+    category: "Kodlama",
+    title: "CLI komut tasarımı",
+    tier: "Free",
+    description: "Kullanıcı dostu komut satırı aracı için seçenek, yardım ve hata davranışları tasarla.",
+    prompt: "Kullanıcı dostu komut satırı aracı için seçenek, yardım ve hata davranışları tasarla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama cli komut tasarımı",
+    enabled: true,
+  },
+  {
+    id: 50,
+    category: "Kodlama",
+    title: "Webhook güvenliği",
+    tier: "Plus",
+    description: "Webhook doğrulama, tekrar gönderim, idempotency ve loglama planı oluştur.",
+    prompt: "Webhook doğrulama, tekrar gönderim, idempotency ve loglama planı oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "kodlama webhook güvenliği",
+    enabled: true,
+  },
+  {
+    id: 51,
+    category: "Araştırma",
+    title: "Kaynaklı araştırma planı",
+    tier: "Pro",
+    description: "Araştırma sorusunu alt sorulara böl; güvenilir kaynak türleri ve doğrulama ölçütleri öner.",
+    prompt: "Araştırma sorusunu alt sorulara böl; güvenilir kaynak türleri ve doğrulama ölçütleri öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma kaynaklı araştırma planı",
+    enabled: true,
+  },
+  {
+    id: 52,
+    category: "Araştırma",
+    title: "İddia doğrulama tablosu",
+    tier: "Free",
+    description: "İddiaları kanıt, kaynak, tarih ve güven düzeyi alanlarıyla kontrol tablosuna dönüştür.",
+    prompt: "İddiaları kanıt, kaynak, tarih ve güven düzeyi alanlarıyla kontrol tablosuna dönüştür. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma i̇ddia doğrulama tablosu",
+    enabled: true,
+  },
+  {
+    id: 53,
+    category: "Araştırma",
+    title: "Kaynak kalitesi denetimi",
+    tier: "Free",
+    description: "Kaynağın yazarı, tarihi, yöntemi, çıkar çatışması ve birincil kaynak niteliğini değerlendir.",
+    prompt: "Kaynağın yazarı, tarihi, yöntemi, çıkar çatışması ve birincil kaynak niteliğini değerlendir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma kaynak kalitesi denetimi",
+    enabled: true,
+  },
+  {
+    id: 54,
+    category: "Araştırma",
+    title: "Literatür taraması taslağı",
+    tier: "Pro",
+    description: "Konuyu temalara ayır; benzerlikleri, çelişkileri ve araştırma boşluklarını çıkar.",
+    prompt: "Konuyu temalara ayır; benzerlikleri, çelişkileri ve araştırma boşluklarını çıkar. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma literatür taraması taslağı",
+    enabled: true,
+  },
+  {
+    id: 55,
+    category: "Araştırma",
+    title: "Karşılaştırmalı ürün analizi",
+    tier: "Plus",
+    description: "Ürünleri ölçüt, kanıt, avantaj, sınırlama ve uygun kullanıcı açısından karşılaştır.",
+    prompt: "Ürünleri ölçüt, kanıt, avantaj, sınırlama ve uygun kullanıcı açısından karşılaştır. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma karşılaştırmalı ürün analizi",
+    enabled: true,
+  },
+  {
+    id: 56,
+    category: "Araştırma",
+    title: "Pazar araştırması soruları",
+    tier: "Free",
+    description: "Hedef kitleyi anlamaya yönelik tarafsız anket ve görüşme soruları tasarla.",
+    prompt: "Hedef kitleyi anlamaya yönelik tarafsız anket ve görüşme soruları tasarla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma pazar araştırması soruları",
+    enabled: true,
+  },
+  {
+    id: 57,
+    category: "Araştırma",
+    title: "Rakip analizi çerçevesi",
+    tier: "Pro",
+    description: "Rakipleri ürün, kullanıcı deneyimi, fiyatlandırma ve farklılaşma bakımından inceleme planı kur.",
+    prompt: "Rakipleri ürün, kullanıcı deneyimi, fiyatlandırma ve farklılaşma bakımından inceleme planı kur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma rakip analizi çerçevesi",
+    enabled: true,
+  },
+  {
+    id: 58,
+    category: "Araştırma",
+    title: "Veri kümesi sözlüğü",
+    tier: "Free",
+    description: "Veri sütunlarını tanımla; tür, birim, eksik değer ve olası kalite sorunlarını listele.",
+    prompt: "Veri sütunlarını tanımla; tür, birim, eksik değer ve olası kalite sorunlarını listele. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma veri kümesi sözlüğü",
+    enabled: true,
+  },
+  {
+    id: 59,
+    category: "Araştırma",
+    title: "Anket sonuçlarını yorumla",
+    tier: "Free",
+    description: "Paylaşılan sonuçları örneklem ve sınırlılıkları belirterek temkinli yorumla.",
+    prompt: "Paylaşılan sonuçları örneklem ve sınırlılıkları belirterek temkinli yorumla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma anket sonuçlarını yorumla",
+    enabled: true,
+  },
+  {
+    id: 60,
+    category: "Araştırma",
+    title: "Hipotez test planı",
+    tier: "Plus",
+    description: "Hipotez, ölçülebilir değişken, veri ihtiyacı ve yanlışlanma koşullarını tanımla.",
+    prompt: "Hipotez, ölçülebilir değişken, veri ihtiyacı ve yanlışlanma koşullarını tanımla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma hipotez test planı",
+    enabled: true,
+  },
+  {
+    id: 61,
+    category: "Araştırma",
+    title: "Teknik doküman özeti",
+    tier: "Free",
+    description: "Teknik dokümanı amaç, mimari, gereksinimler, riskler ve kararlar şeklinde özetle.",
+    prompt: "Teknik dokümanı amaç, mimari, gereksinimler, riskler ve kararlar şeklinde özetle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma teknik doküman özeti",
+    enabled: true,
+  },
+  {
+    id: 62,
+    category: "Araştırma",
+    title: "Kaynakça düzenleme",
+    tier: "Free",
+    description: "Verilen kaynak bilgilerini seçilen atıf biçimine göre tutarlı biçimde düzenle.",
+    prompt: "Verilen kaynak bilgilerini seçilen atıf biçimine göre tutarlı biçimde düzenle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma kaynakça düzenleme",
+    enabled: true,
+  },
+  {
+    id: 63,
+    category: "Araştırma",
+    title: "Bilgi boşluğu tespiti",
+    tier: "Pro",
+    description: "Elimdeki bilginin hangi soruları yanıtlamadığını ve hangi ek kanıta ihtiyaç olduğunu belirle.",
+    prompt: "Elimdeki bilginin hangi soruları yanıtlamadığını ve hangi ek kanıta ihtiyaç olduğunu belirle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma bilgi boşluğu tespiti",
+    enabled: true,
+  },
+  {
+    id: 64,
+    category: "Araştırma",
+    title: "Senaryo analizi",
+    tier: "Free",
+    description: "En iyi, temel ve kötü senaryoları varsayımlarıyla birlikte kur; hassasiyetleri belirt.",
+    prompt: "En iyi, temel ve kötü senaryoları varsayımlarıyla birlikte kur; hassasiyetleri belirt. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma senaryo analizi",
+    enabled: true,
+  },
+  {
+    id: 65,
+    category: "Araştırma",
+    title: "Risk matrisi",
+    tier: "Plus",
+    description: "Riskleri olasılık, etki, erken uyarı ve azaltma planıyla matrise yerleştir.",
+    prompt: "Riskleri olasılık, etki, erken uyarı ve azaltma planıyla matrise yerleştir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "araştırma risk matrisi",
+    enabled: true,
+  },
+  {
+    id: 66,
+    category: "İş ve proje",
+    title: "Proje yol haritası",
+    tier: "Pro",
+    description: "Hedefleri kilometre taşlarına, bağımlılıklara, sahiplerine ve kabul ölçütlerine böl.",
+    prompt: "Hedefleri kilometre taşlarına, bağımlılıklara, sahiplerine ve kabul ölçütlerine böl. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje proje yol haritası",
+    enabled: true,
+  },
+  {
+    id: 67,
+    category: "İş ve proje",
+    title: "Görev önceliklendirici",
+    tier: "Free",
+    description: "Görevleri etki, aciliyet, efor ve bağımlılıklara göre sıralayıp gerekçelendir.",
+    prompt: "Görevleri etki, aciliyet, efor ve bağımlılıklara göre sıralayıp gerekçelendir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje görev önceliklendirici",
+    enabled: true,
+  },
+  {
+    id: 68,
+    category: "İş ve proje",
+    title: "Haftalık plan",
+    tier: "Free",
+    description: "Zaman kısıtları ve önceliklere göre gerçekçi bir haftalık çalışma planı oluştur.",
+    prompt: "Zaman kısıtları ve önceliklere göre gerçekçi bir haftalık çalışma planı oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje haftalık plan",
+    enabled: true,
+  },
+  {
+    id: 69,
+    category: "İş ve proje",
+    title: "Toplantı gündemi",
+    tier: "Pro",
+    description: "Amaç, süre, karar beklenen konular ve hazırlık materyalleri içeren gündem yaz.",
+    prompt: "Amaç, süre, karar beklenen konular ve hazırlık materyalleri içeren gündem yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje toplantı gündemi",
+    enabled: true,
+  },
+  {
+    id: 70,
+    category: "İş ve proje",
+    title: "Karar günlüğü",
+    tier: "Plus",
+    description: "Kararları tarih, seçenekler, gerekçe, sorumlu ve yeniden değerlendirme tarihiyle düzenle.",
+    prompt: "Kararları tarih, seçenekler, gerekçe, sorumlu ve yeniden değerlendirme tarihiyle düzenle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje karar günlüğü",
+    enabled: true,
+  },
+  {
+    id: 71,
+    category: "İş ve proje",
+    title: "İş akışı iyileştirme",
+    tier: "Free",
+    description: "Mevcut iş akışındaki tekrarları, beklemeleri ve otomasyon fırsatlarını belirle.",
+    prompt: "Mevcut iş akışındaki tekrarları, beklemeleri ve otomasyon fırsatlarını belirle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje i̇ş akışı iyileştirme",
+    enabled: true,
+  },
+  {
+    id: 72,
+    category: "İş ve proje",
+    title: "SOP hazırlayıcı",
+    tier: "Pro",
+    description: "Tekrarlanan işi rol, ön koşul, adımlar, kontrol noktaları ve hata çözümüyle dokümante et.",
+    prompt: "Tekrarlanan işi rol, ön koşul, adımlar, kontrol noktaları ve hata çözümüyle dokümante et. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje sop hazırlayıcı",
+    enabled: true,
+  },
+  {
+    id: 73,
+    category: "İş ve proje",
+    title: "Kabul kriterleri yaz",
+    tier: "Free",
+    description: "Özellik talebini test edilebilir kabul kriterlerine ve istisnalara dönüştür.",
+    prompt: "Özellik talebini test edilebilir kabul kriterlerine ve istisnalara dönüştür. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje kabul kriterleri yaz",
+    enabled: true,
+  },
+  {
+    id: 74,
+    category: "İş ve proje",
+    title: "Kullanıcı hikâyesi",
+    tier: "Free",
+    description: "Kullanıcı, ihtiyaç ve fayda formatında hikâye ve kabul koşulları yaz.",
+    prompt: "Kullanıcı, ihtiyaç ve fayda formatında hikâye ve kabul koşulları yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje kullanıcı hikâyesi",
+    enabled: true,
+  },
+  {
+    id: 75,
+    category: "İş ve proje",
+    title: "Sprint planlama",
+    tier: "Plus",
+    description: "Takım kapasitesi ve önceliklere göre sprint hedefi, görevler ve riskler oluştur.",
+    prompt: "Takım kapasitesi ve önceliklere göre sprint hedefi, görevler ve riskler oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje sprint planlama",
+    enabled: true,
+  },
+  {
+    id: 76,
+    category: "İş ve proje",
+    title: "Retrospektif kolaylaştırıcı",
+    tier: "Free",
+    description: "Neyi sürdürmeli, bırakmalı ve denemeli sorularıyla uygulanabilir retrospektif hazırla.",
+    prompt: "Neyi sürdürmeli, bırakmalı ve denemeli sorularıyla uygulanabilir retrospektif hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje retrospektif kolaylaştırıcı",
+    enabled: true,
+  },
+  {
+    id: 77,
+    category: "İş ve proje",
+    title: "Müşteri görüşmesi",
+    tier: "Free",
+    description: "Müşteri ihtiyacını yönlendirmeden keşfeden soru akışı oluştur.",
+    prompt: "Müşteri ihtiyacını yönlendirmeden keşfeden soru akışı oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje müşteri görüşmesi",
+    enabled: true,
+  },
+  {
+    id: 78,
+    category: "İş ve proje",
+    title: "Destek yanıtı taslağı",
+    tier: "Pro",
+    description: "Müşteri sorununa empatik, net ve çözüm adımları içeren yanıt yaz.",
+    prompt: "Müşteri sorununa empatik, net ve çözüm adımları içeren yanıt yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje destek yanıtı taslağı",
+    enabled: true,
+  },
+  {
+    id: 79,
+    category: "İş ve proje",
+    title: "Teklif taslağı",
+    tier: "Free",
+    description: "Kapsam, teslimatlar, varsayımlar, zaman planı ve kapsam dışı maddeleri içeren teklif oluştur.",
+    prompt: "Kapsam, teslimatlar, varsayımlar, zaman planı ve kapsam dışı maddeleri içeren teklif oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje teklif taslağı",
+    enabled: true,
+  },
+  {
+    id: 80,
+    category: "İş ve proje",
+    title: "İş gereksinimi belgesi",
+    tier: "Plus",
+    description: "Amaç, kullanıcılar, kapsam, gereksinimler, ölçütler ve riskleri dokümante et.",
+    prompt: "Amaç, kullanıcılar, kapsam, gereksinimler, ölçütler ve riskleri dokümante et. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje i̇ş gereksinimi belgesi",
+    enabled: true,
+  },
+  {
+    id: 81,
+    category: "İş ve proje",
+    title: "İş sürekliliği planı",
+    tier: "Pro",
+    description: "Önemli sistemler, kurtarma öncelikleri, sorumlular ve iletişim planı taslağı oluştur.",
+    prompt: "Önemli sistemler, kurtarma öncelikleri, sorumlular ve iletişim planı taslağı oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje i̇ş sürekliliği planı",
+    enabled: true,
+  },
+  {
+    id: 82,
+    category: "İş ve proje",
+    title: "KPI tasarımcısı",
+    tier: "Free",
+    description: "Hedefe bağlı ölçülebilir göstergeler, formül, veri kaynağı ve takip sıklığı öner.",
+    prompt: "Hedefe bağlı ölçülebilir göstergeler, formül, veri kaynağı ve takip sıklığı öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje kpi tasarımcısı",
+    enabled: true,
+  },
+  {
+    id: 83,
+    category: "İş ve proje",
+    title: "Ürün lansman kontrol listesi",
+    tier: "Free",
+    description: "Lansman öncesi ürün, destek, dokümantasyon, iletişim ve geri dönüş kontrolleri hazırla.",
+    prompt: "Lansman öncesi ürün, destek, dokümantasyon, iletişim ve geri dönüş kontrolleri hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje ürün lansman kontrol listesi",
+    enabled: true,
+  },
+  {
+    id: 84,
+    category: "İş ve proje",
+    title: "Değişiklik etki analizi",
+    tier: "Pro",
+    description: "Bir değişikliğin kullanıcı, sistem, maliyet, takvim ve güvenlik etkilerini çıkar.",
+    prompt: "Bir değişikliğin kullanıcı, sistem, maliyet, takvim ve güvenlik etkilerini çıkar. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje değişiklik etki analizi",
+    enabled: true,
+  },
+  {
+    id: 85,
+    category: "İş ve proje",
+    title: "Süreç haritası",
+    tier: "Plus",
+    description: "Süreci adım, karar, sorumlu ve girdiler/çıktılar olarak haritala.",
+    prompt: "Süreci adım, karar, sorumlu ve girdiler/çıktılar olarak haritala. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇ş ve proje süreç haritası",
+    enabled: true,
+  },
+  {
+    id: 86,
+    category: "Tasarım",
+    title: "Arayüz değerlendirmesi",
+    tier: "Free",
+    description: "Arayüzü hiyerarşi, okunabilirlik, tutarlılık, mobil kullanım ve erişilebilirlik açısından incele.",
+    prompt: "Arayüzü hiyerarşi, okunabilirlik, tutarlılık, mobil kullanım ve erişilebilirlik açısından incele. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım arayüz değerlendirmesi",
+    enabled: true,
+  },
+  {
+    id: 87,
+    category: "Tasarım",
+    title: "Renk paleti önerisi",
+    tier: "Pro",
+    description: "Marka kişiliğine göre ana, yardımcı, vurgu ve nötr renkler öner; kontrastı gözet.",
+    prompt: "Marka kişiliğine göre ana, yardımcı, vurgu ve nötr renkler öner; kontrastı gözet. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım renk paleti önerisi",
+    enabled: true,
+  },
+  {
+    id: 88,
+    category: "Tasarım",
+    title: "Tasarım sistemi taslağı",
+    tier: "Free",
+    description: "Renk, tipografi, boşluk, bileşen ve etkileşim kuralları içeren tasarım sistemi oluştur.",
+    prompt: "Renk, tipografi, boşluk, bileşen ve etkileşim kuralları içeren tasarım sistemi oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım tasarım sistemi taslağı",
+    enabled: true,
+  },
+  {
+    id: 89,
+    category: "Tasarım",
+    title: "Kullanıcı akışı",
+    tier: "Free",
+    description: "Kullanıcının hedefinden sonuca kadar ekranlar, kararlar ve hata durumlarını çizelgele.",
+    prompt: "Kullanıcının hedefinden sonuca kadar ekranlar, kararlar ve hata durumlarını çizelgele. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım kullanıcı akışı",
+    enabled: true,
+  },
+  {
+    id: 90,
+    category: "Tasarım",
+    title: "Erişilebilirlik kontrolü",
+    tier: "Plus",
+    description: "Klavye odağı, kontrast, etiketler, hata mesajları ve alternatif metinleri denetle.",
+    prompt: "Klavye odağı, kontrast, etiketler, hata mesajları ve alternatif metinleri denetle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım erişilebilirlik kontrolü",
+    enabled: true,
+  },
+  {
+    id: 91,
+    category: "Tasarım",
+    title: "Mobil düzen kontrolü",
+    tier: "Free",
+    description: "Dar ekranlarda taşma, hedef boyutu, metin uzunluğu ve gezinme sorunlarını tespit et.",
+    prompt: "Dar ekranlarda taşma, hedef boyutu, metin uzunluğu ve gezinme sorunlarını tespit et. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım mobil düzen kontrolü",
+    enabled: true,
+  },
+  {
+    id: 92,
+    category: "Tasarım",
+    title: "Mikro metin yazarı",
+    tier: "Free",
+    description: "Buton, boş durum, hata ve başarı mesajları için kısa, tutarlı mikro metin üret.",
+    prompt: "Buton, boş durum, hata ve başarı mesajları için kısa, tutarlı mikro metin üret. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım mikro metin yazarı",
+    enabled: true,
+  },
+  {
+    id: 93,
+    category: "Tasarım",
+    title: "Kullanıcı testi senaryosu",
+    tier: "Pro",
+    description: "Kullanıcıyı yönlendirmeyen görevler, gözlem soruları ve başarı ölçütleri hazırla.",
+    prompt: "Kullanıcıyı yönlendirmeyen görevler, gözlem soruları ve başarı ölçütleri hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım kullanıcı testi senaryosu",
+    enabled: true,
+  },
+  {
+    id: 94,
+    category: "Tasarım",
+    title: "Marka ses rehberi",
+    tier: "Free",
+    description: "Marka tonu, kelime tercihleri, kaçınılacak ifadeler ve örnek mesajlar tanımla.",
+    prompt: "Marka tonu, kelime tercihleri, kaçınılacak ifadeler ve örnek mesajlar tanımla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım marka ses rehberi",
+    enabled: true,
+  },
+  {
+    id: 95,
+    category: "Tasarım",
+    title: "Landing page planı",
+    tier: "Plus",
+    description: "Değer önerisi, kanıt, özellikler, sık sorulan sorular ve çağrı eylemini düzenle.",
+    prompt: "Değer önerisi, kanıt, özellikler, sık sorulan sorular ve çağrı eylemini düzenle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım landing page planı",
+    enabled: true,
+  },
+  {
+    id: 96,
+    category: "Tasarım",
+    title: "Boş durum tasarımı",
+    tier: "Pro",
+    description: "İçerik bulunmayan ekranlar için açıklama, ilk adım ve yardımcı bağlantı metni oluştur.",
+    prompt: "İçerik bulunmayan ekranlar için açıklama, ilk adım ve yardımcı bağlantı metni oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım boş durum tasarımı",
+    enabled: true,
+  },
+  {
+    id: 97,
+    category: "Tasarım",
+    title: "Hata durumları tasarımı",
+    tier: "Free",
+    description: "Hataları kullanıcıya anlaşılır anlatan ve güvenli toparlanma sağlayan mesajlar yaz.",
+    prompt: "Hataları kullanıcıya anlaşılır anlatan ve güvenli toparlanma sağlayan mesajlar yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım hata durumları tasarımı",
+    enabled: true,
+  },
+  {
+    id: 98,
+    category: "Tasarım",
+    title: "İçerik hiyerarşisi",
+    tier: "Free",
+    description: "İçeriği kullanıcı önceliğine göre başlık, alt başlık, açıklama ve eylemlere ayır.",
+    prompt: "İçeriği kullanıcı önceliğine göre başlık, alt başlık, açıklama ve eylemlere ayır. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım i̇çerik hiyerarşisi",
+    enabled: true,
+  },
+  {
+    id: 99,
+    category: "Tasarım",
+    title: "İkon kullanım rehberi",
+    tier: "Pro",
+    description: "İkonların anlam, boyut, hizalama ve metin etiketi kurallarını tanımla.",
+    prompt: "İkonların anlam, boyut, hizalama ve metin etiketi kurallarını tanımla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım i̇kon kullanım rehberi",
+    enabled: true,
+  },
+  {
+    id: 100,
+    category: "Tasarım",
+    title: "Tasarım eleştirisi",
+    tier: "Plus",
+    description: "Tasarım kararlarını gözlem, kullanıcı etkisi ve uygulanabilir önerilerle değerlendir.",
+    prompt: "Tasarım kararlarını gözlem, kullanıcı etkisi ve uygulanabilir önerilerle değerlendir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "tasarım tasarım eleştirisi",
+    enabled: true,
+  },
+  {
+    id: 101,
+    category: "Yaratıcılık",
+    title: "Beyin fırtınası",
+    tier: "Free",
+    description: "Kısıtlarıma göre birbirinden farklı fikirler üret ve uygulanabilirliğe göre grupla.",
+    prompt: "Kısıtlarıma göre birbirinden farklı fikirler üret ve uygulanabilirliğe göre grupla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık beyin fırtınası",
+    enabled: true,
+  },
+  {
+    id: 102,
+    category: "Yaratıcılık",
+    title: "Alternatif konseptler",
+    tier: "Pro",
+    description: "Aynı amaç için minimalist, cesur ve deneysel üç ayrı konsept geliştir.",
+    prompt: "Aynı amaç için minimalist, cesur ve deneysel üç ayrı konsept geliştir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık alternatif konseptler",
+    enabled: true,
+  },
+  {
+    id: 103,
+    category: "Yaratıcılık",
+    title: "Özgün karakter üret",
+    tier: "Free",
+    description: "Karakterin görünüşünü, motivasyonunu, çatışmasını ve ayırt edici özelliğini tasarla.",
+    prompt: "Karakterin görünüşünü, motivasyonunu, çatışmasını ve ayırt edici özelliğini tasarla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık özgün karakter üret",
+    enabled: true,
+  },
+  {
+    id: 104,
+    category: "Yaratıcılık",
+    title: "Dünya kurma",
+    tier: "Free",
+    description: "Kurgusal dünyanın kuralları, coğrafyası, kültürü ve çatışmalarını tutarlı biçimde oluştur.",
+    prompt: "Kurgusal dünyanın kuralları, coğrafyası, kültürü ve çatışmalarını tutarlı biçimde oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık dünya kurma",
+    enabled: true,
+  },
+  {
+    id: 105,
+    category: "Yaratıcılık",
+    title: "Şarkı fikri geliştir",
+    tier: "Plus",
+    description: "Tür, tema, duygu, yapı ve özgün söz fikri öner; var olan şarkıları taklit etme.",
+    prompt: "Tür, tema, duygu, yapı ve özgün söz fikri öner; var olan şarkıları taklit etme. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık şarkı fikri geliştir",
+    enabled: true,
+  },
+  {
+    id: 106,
+    category: "Yaratıcılık",
+    title: "Podcast bölüm planı",
+    tier: "Free",
+    description: "Açılış, konu blokları, geçişler, sorular ve kapanış içeren bölüm planı yaz.",
+    prompt: "Açılış, konu blokları, geçişler, sorular ve kapanış içeren bölüm planı yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık podcast bölüm planı",
+    enabled: true,
+  },
+  {
+    id: 107,
+    category: "Yaratıcılık",
+    title: "Reklam konsepti",
+    tier: "Free",
+    description: "Hedef kitle ve gerçek faydayı merkeze alan farklı reklam konseptleri oluştur.",
+    prompt: "Hedef kitle ve gerçek faydayı merkeze alan farklı reklam konseptleri oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık reklam konsepti",
+    enabled: true,
+  },
+  {
+    id: 108,
+    category: "Yaratıcılık",
+    title: "İsim bulucu",
+    tier: "Pro",
+    description: "Proje için telaffuzu kolay, anlamı açıklanabilir isimler ve seçim ölçütleri öner.",
+    prompt: "Proje için telaffuzu kolay, anlamı açıklanabilir isimler ve seçim ölçütleri öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık i̇sim bulucu",
+    enabled: true,
+  },
+  {
+    id: 109,
+    category: "Yaratıcılık",
+    title: "Etkinlik konsepti",
+    tier: "Free",
+    description: "Hedef, katılımcı, akış, ihtiyaç listesi ve erişilebilirlik detaylarıyla etkinlik tasarla.",
+    prompt: "Hedef, katılımcı, akış, ihtiyaç listesi ve erişilebilirlik detaylarıyla etkinlik tasarla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık etkinlik konsepti",
+    enabled: true,
+  },
+  {
+    id: 110,
+    category: "Yaratıcılık",
+    title: "Oyun mekaniği fikirleri",
+    tier: "Plus",
+    description: "Özgün oyun döngüsü, hedefler, zorluk artışı ve ödül sistemleri öner.",
+    prompt: "Özgün oyun döngüsü, hedefler, zorluk artışı ve ödül sistemleri öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık oyun mekaniği fikirleri",
+    enabled: true,
+  },
+  {
+    id: 111,
+    category: "Yaratıcılık",
+    title: "Hikâye sahnesi",
+    tier: "Pro",
+    description: "Sahnenin amacı, gerilimi, karakter eylemleri ve geçişini özgün şekilde yaz.",
+    prompt: "Sahnenin amacı, gerilimi, karakter eylemleri ve geçişini özgün şekilde yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık hikâye sahnesi",
+    enabled: true,
+  },
+  {
+    id: 112,
+    category: "Yaratıcılık",
+    title: "Görsel üretim promptu",
+    tier: "Free",
+    description: "Konu, kompozisyon, ışık, malzeme, kamera ve istenmeyen öğeleri içeren net prompt hazırla.",
+    prompt: "Konu, kompozisyon, ışık, malzeme, kamera ve istenmeyen öğeleri içeren net prompt hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık görsel üretim promptu",
+    enabled: true,
+  },
+  {
+    id: 113,
+    category: "Yaratıcılık",
+    title: "Storyboard planı",
+    tier: "Free",
+    description: "Sahneleri kare numarası, görsel eylem, kamera, ses ve süreyle sırala.",
+    prompt: "Sahneleri kare numarası, görsel eylem, kamera, ses ve süreyle sırala. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık storyboard planı",
+    enabled: true,
+  },
+  {
+    id: 114,
+    category: "Yaratıcılık",
+    title: "İçerik takvimi",
+    tier: "Pro",
+    description: "Kanal ve hedefe göre sürdürülebilir konu, format ve yayın takvimi oluştur.",
+    prompt: "Kanal ve hedefe göre sürdürülebilir konu, format ve yayın takvimi oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık i̇çerik takvimi",
+    enabled: true,
+  },
+  {
+    id: 115,
+    category: "Yaratıcılık",
+    title: "Marka sloganları",
+    tier: "Plus",
+    description: "Markanın gerçek değerini yansıtan kısa sloganlar üret ve tonlarını karşılaştır.",
+    prompt: "Markanın gerçek değerini yansıtan kısa sloganlar üret ve tonlarını karşılaştır. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık marka sloganları",
+    enabled: true,
+  },
+  {
+    id: 116,
+    category: "Yaratıcılık",
+    title: "İsimlendirme sistemi",
+    tier: "Free",
+    description: "Özellik, sürüm ve içerik adları için tutarlı isimlendirme kuralları geliştir.",
+    prompt: "Özellik, sürüm ve içerik adları için tutarlı isimlendirme kuralları geliştir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "yaratıcılık i̇simlendirme sistemi",
+    enabled: true,
+  },
+  {
+    id: 117,
+    category: "Verimlilik",
+    title: "Günlük planlayıcı",
+    tier: "Pro",
+    description: "Bugünkü görevleri süre, enerji ve önceliğe göre gerçekçi sıraya koy.",
+    prompt: "Bugünkü görevleri süre, enerji ve önceliğe göre gerçekçi sıraya koy. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik günlük planlayıcı",
+    enabled: true,
+  },
+  {
+    id: 118,
+    category: "Verimlilik",
+    title: "Odak oturumu",
+    tier: "Free",
+    description: "Bir görevi küçük odak bloklarına böl; dikkat dağıtıcılar için önlem öner.",
+    prompt: "Bir görevi küçük odak bloklarına böl; dikkat dağıtıcılar için önlem öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik odak oturumu",
+    enabled: true,
+  },
+  {
+    id: 119,
+    category: "Verimlilik",
+    title: "Karar matrisi",
+    tier: "Free",
+    description: "Seçenekleri ağırlıklı ölçütlerle karşılaştır; varsayımları ve belirsizliği belirt.",
+    prompt: "Seçenekleri ağırlıklı ölçütlerle karşılaştır; varsayımları ve belirsizliği belirt. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik karar matrisi",
+    enabled: true,
+  },
+  {
+    id: 120,
+    category: "Verimlilik",
+    title: "E-posta yanıt kuyruğu",
+    tier: "Plus",
+    description: "Mesajları aciliyet ve gerekli eyleme göre sınıflandır; yanıt taslakları hazırla.",
+    prompt: "Mesajları aciliyet ve gerekli eyleme göre sınıflandır; yanıt taslakları hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik e-posta yanıt kuyruğu",
+    enabled: true,
+  },
+  {
+    id: 121,
+    category: "Verimlilik",
+    title: "Bilgi düzenleyici",
+    tier: "Free",
+    description: "Dağınık notları temalara, kararlara, görevlere ve açık sorulara ayır.",
+    prompt: "Dağınık notları temalara, kararlara, görevlere ve açık sorulara ayır. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik bilgi düzenleyici",
+    enabled: true,
+  },
+  {
+    id: 122,
+    category: "Verimlilik",
+    title: "Tekrarlı görev otomasyonu",
+    tier: "Free",
+    description: "Tekrarlanan işi tetikleyici, adımlar, hata durumu ve güvenlik kontrolüyle tarif et.",
+    prompt: "Tekrarlanan işi tetikleyici, adımlar, hata durumu ve güvenlik kontrolüyle tarif et. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik tekrarlı görev otomasyonu",
+    enabled: true,
+  },
+  {
+    id: 123,
+    category: "Verimlilik",
+    title: "Kişisel hedef planı",
+    tier: "Pro",
+    description: "Hedefi ölçülebilir ara adımlara ve haftalık gözden geçirme sorularına dönüştür.",
+    prompt: "Hedefi ölçülebilir ara adımlara ve haftalık gözden geçirme sorularına dönüştür. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik kişisel hedef planı",
+    enabled: true,
+  },
+  {
+    id: 124,
+    category: "Verimlilik",
+    title: "Alışkanlık gözden geçirme",
+    tier: "Free",
+    description: "Bir alışkanlığı sürdürülebilirlik, tetikleyici ve çevresel destek açısından değerlendir.",
+    prompt: "Bir alışkanlığı sürdürülebilirlik, tetikleyici ve çevresel destek açısından değerlendir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik alışkanlık gözden geçirme",
+    enabled: true,
+  },
+  {
+    id: 125,
+    category: "Verimlilik",
+    title: "Dosya adlandırma planı",
+    tier: "Plus",
+    description: "Dosyalar için tarih, proje, sürüm ve içerik içeren tutarlı adlandırma standardı öner.",
+    prompt: "Dosyalar için tarih, proje, sürüm ve içerik içeren tutarlı adlandırma standardı öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik dosya adlandırma planı",
+    enabled: true,
+  },
+  {
+    id: 126,
+    category: "Verimlilik",
+    title: "Notlardan görev çıkar",
+    tier: "Pro",
+    description: "Metindeki eylemleri sorumlu, son tarih, bağımlılık ve durum alanlarına ayır.",
+    prompt: "Metindeki eylemleri sorumlu, son tarih, bağımlılık ve durum alanlarına ayır. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik notlardan görev çıkar",
+    enabled: true,
+  },
+  {
+    id: 127,
+    category: "Verimlilik",
+    title: "Haftalık değerlendirme",
+    tier: "Free",
+    description: "Tamamlanan işler, engeller, öğrenimler ve gelecek hafta önceliklerini özetle.",
+    prompt: "Tamamlanan işler, engeller, öğrenimler ve gelecek hafta önceliklerini özetle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik haftalık değerlendirme",
+    enabled: true,
+  },
+  {
+    id: 128,
+    category: "Verimlilik",
+    title: "Bilgi tabanı makalesi",
+    tier: "Free",
+    description: "Tekrarlanan soruya adım adım çözüm ve sorun giderme içeren bilgi tabanı yazısı hazırla.",
+    prompt: "Tekrarlanan soruya adım adım çözüm ve sorun giderme içeren bilgi tabanı yazısı hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik bilgi tabanı makalesi",
+    enabled: true,
+  },
+  {
+    id: 129,
+    category: "Verimlilik",
+    title: "Kontrol listesi üret",
+    tier: "Pro",
+    description: "Bir işi atlanabilir adımlara böl ve son kontrol maddeleri ekle.",
+    prompt: "Bir işi atlanabilir adımlara böl ve son kontrol maddeleri ekle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik kontrol listesi üret",
+    enabled: true,
+  },
+  {
+    id: 130,
+    category: "Verimlilik",
+    title: "Kişisel çalışma protokolü",
+    tier: "Plus",
+    description: "Çalışma hedefi, bildirim sınırları, mola ve gün sonu kapanış rutini tasarla.",
+    prompt: "Çalışma hedefi, bildirim sınırları, mola ve gün sonu kapanış rutini tasarla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik kişisel çalışma protokolü",
+    enabled: true,
+  },
+  {
+    id: 131,
+    category: "Verimlilik",
+    title: "Süre tahmini",
+    tier: "Free",
+    description: "Görevi parçalara böl, süre aralıkları ve tahmini etkileyen belirsizlikleri açıkla.",
+    prompt: "Görevi parçalara böl, süre aralıkları ve tahmini etkileyen belirsizlikleri açıkla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik süre tahmini",
+    enabled: true,
+  },
+  {
+    id: 132,
+    category: "Verimlilik",
+    title: "Öncelik çatışması çöz",
+    tier: "Pro",
+    description: "Çakışan işleri etki, son tarih ve maliyet üzerinden değerlendir; seçenekler sun.",
+    prompt: "Çakışan işleri etki, son tarih ve maliyet üzerinden değerlendir; seçenekler sun. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik öncelik çatışması çöz",
+    enabled: true,
+  },
+  {
+    id: 133,
+    category: "Verimlilik",
+    title: "Öğrenme günlüğü",
+    tier: "Free",
+    description: "Bugünkü öğrenmeyi ana fikir, kanıt, soru ve bir sonraki deneme olarak kaydet.",
+    prompt: "Bugünkü öğrenmeyi ana fikir, kanıt, soru ve bir sonraki deneme olarak kaydet. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik öğrenme günlüğü",
+    enabled: true,
+  },
+  {
+    id: 134,
+    category: "Verimlilik",
+    title: "Araştırma notu düzenle",
+    tier: "Free",
+    description: "Kaynak notlarını bulgu, alıntı, yorum ve doğrulanması gereken nokta olarak ayır.",
+    prompt: "Kaynak notlarını bulgu, alıntı, yorum ve doğrulanması gereken nokta olarak ayır. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik araştırma notu düzenle",
+    enabled: true,
+  },
+  {
+    id: 135,
+    category: "Verimlilik",
+    title: "Kişisel dashboard gereksinimi",
+    tier: "Plus",
+    description: "Takip etmek istediğim hedefler için gösterge, veri kaynağı ve güncelleme sıklığı tasarla.",
+    prompt: "Takip etmek istediğim hedefler için gösterge, veri kaynağı ve güncelleme sıklığı tasarla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik kişisel dashboard gereksinimi",
+    enabled: true,
+  },
+  {
+    id: 136,
+    category: "Verimlilik",
+    title: "Gün sonu kapanışı",
+    tier: "Free",
+    description: "Açık işleri toparlayan, yarına hazırlık yapan ve gerçekçi kapanış rutini oluştur.",
+    prompt: "Açık işleri toparlayan, yarına hazırlık yapan ve gerçekçi kapanış rutini oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "verimlilik gün sonu kapanışı",
+    enabled: true,
+  },
+  {
+    id: 137,
+    category: "Veri ve analiz",
+    title: "CSV analiz planı",
+    tier: "Free",
+    description: "Veri yapısı, eksik değerler, dağılımlar ve olası ilişki analizleri için plan çıkar.",
+    prompt: "Veri yapısı, eksik değerler, dağılımlar ve olası ilişki analizleri için plan çıkar. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "veri ve analiz csv analiz planı",
+    enabled: true,
+  },
+  {
+    id: 138,
+    category: "Veri ve analiz",
+    title: "Grafik seçici",
+    tier: "Pro",
+    description: "Veri türü ve soruya göre uygun grafik türünü ve yanlış yorum risklerini öner.",
+    prompt: "Veri türü ve soruya göre uygun grafik türünü ve yanlış yorum risklerini öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "veri ve analiz grafik seçici",
+    enabled: true,
+  },
+  {
+    id: 139,
+    category: "Veri ve analiz",
+    title: "Veri kalite kontrolü",
+    tier: "Free",
+    description: "Eksik, yinelenen, aykırı ve tutarsız kayıtlar için kontrol kuralları yaz.",
+    prompt: "Eksik, yinelenen, aykırı ve tutarsız kayıtlar için kontrol kuralları yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "veri ve analiz veri kalite kontrolü",
+    enabled: true,
+  },
+  {
+    id: 140,
+    category: "Veri ve analiz",
+    title: "İstatistik sonucu açıklama",
+    tier: "Plus",
+    description: "Verilen istatistikleri birim, örneklem, belirsizlik ve sınırlılıklarla sadeleştir.",
+    prompt: "Verilen istatistikleri birim, örneklem, belirsizlik ve sınırlılıklarla sadeleştir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "veri ve analiz i̇statistik sonucu açıklama",
+    enabled: true,
+  },
+  {
+    id: 141,
+    category: "Veri ve analiz",
+    title: "Deney sonuçları raporu",
+    tier: "Pro",
+    description: "Yöntem, ölçümler, bulgular, belirsizlik ve sonraki adımları raporlaştır.",
+    prompt: "Yöntem, ölçümler, bulgular, belirsizlik ve sonraki adımları raporlaştır. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "veri ve analiz deney sonuçları raporu",
+    enabled: true,
+  },
+  {
+    id: 142,
+    category: "Veri ve analiz",
+    title: "Gösterge paneli tasarımı",
+    tier: "Free",
+    description: "Kullanıcı sorularına göre KPI kartları, filtreler, grafikler ve uyarı alanları tasarla.",
+    prompt: "Kullanıcı sorularına göre KPI kartları, filtreler, grafikler ve uyarı alanları tasarla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "veri ve analiz gösterge paneli tasarımı",
+    enabled: true,
+  },
+  {
+    id: 143,
+    category: "Veri ve analiz",
+    title: "Tahmin varsayımları",
+    tier: "Free",
+    description: "Tahmin modelinin girdileri, varsayımları, hata kaynakları ve doğrulama planını belirle.",
+    prompt: "Tahmin modelinin girdileri, varsayımları, hata kaynakları ve doğrulama planını belirle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "veri ve analiz tahmin varsayımları",
+    enabled: true,
+  },
+  {
+    id: 144,
+    category: "Veri ve analiz",
+    title: "Anomali inceleme",
+    tier: "Pro",
+    description: "Olağandışı değerler için olası nedenleri ve doğrulama adımlarını sırala.",
+    prompt: "Olağandışı değerler için olası nedenleri ve doğrulama adımlarını sırala. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "veri ve analiz anomali inceleme",
+    enabled: true,
+  },
+  {
+    id: 145,
+    category: "Veri ve analiz",
+    title: "A/B testi planı",
+    tier: "Plus",
+    description: "Hipotez, varyantlar, ölçüt, örneklem ihtiyacı ve durdurma kuralları tasarla.",
+    prompt: "Hipotez, varyantlar, ölçüt, örneklem ihtiyacı ve durdurma kuralları tasarla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "veri ve analiz a/b testi planı",
+    enabled: true,
+  },
+  {
+    id: 146,
+    category: "Veri ve analiz",
+    title: "Rapor yönetici özeti",
+    tier: "Free",
+    description: "Uzun raporu bulgu, etki, risk ve önerilen eylemler şeklinde özetle.",
+    prompt: "Uzun raporu bulgu, etki, risk ve önerilen eylemler şeklinde özetle. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "veri ve analiz rapor yönetici özeti",
+    enabled: true,
+  },
+  {
+    id: 147,
+    category: "İletişim",
+    title: "Zor konuşma hazırlığı",
+    tier: "Pro",
+    description: "Amacımı, somut gözlemleri, soruları ve yapıcı sınırları içeren konuşma planı hazırla.",
+    prompt: "Amacımı, somut gözlemleri, soruları ve yapıcı sınırları içeren konuşma planı hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇letişim zor konuşma hazırlığı",
+    enabled: true,
+  },
+  {
+    id: 148,
+    category: "İletişim",
+    title: "Geri bildirim cümleleri",
+    tier: "Free",
+    description: "Davranışa odaklanan, somut ve saygılı geri bildirim seçenekleri yaz.",
+    prompt: "Davranışa odaklanan, somut ve saygılı geri bildirim seçenekleri yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇letişim geri bildirim cümleleri",
+    enabled: true,
+  },
+  {
+    id: 149,
+    category: "İletişim",
+    title: "Müzakere hazırlığı",
+    tier: "Free",
+    description: "Hedef, alternatifler, taviz alanları ve sorulacak sorular için hazırlık planı oluştur.",
+    prompt: "Hedef, alternatifler, taviz alanları ve sorulacak sorular için hazırlık planı oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇letişim müzakere hazırlığı",
+    enabled: true,
+  },
+  {
+    id: 150,
+    category: "İletişim",
+    title: "Sunum slayt iskeleti",
+    tier: "Plus",
+    description: "Her slayt için tek ana mesaj, kanıt ve konuşmacı notu öner.",
+    prompt: "Her slayt için tek ana mesaj, kanıt ve konuşmacı notu öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇letişim sunum slayt iskeleti",
+    enabled: true,
+  },
+  {
+    id: 151,
+    category: "İletişim",
+    title: "Soru-cevap hazırlığı",
+    tier: "Free",
+    description: "Sunum veya proje için zor soruları ve kanıta dayalı yanıt taslaklarını hazırla.",
+    prompt: "Sunum veya proje için zor soruları ve kanıta dayalı yanıt taslaklarını hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇letişim soru-cevap hazırlığı",
+    enabled: true,
+  },
+  {
+    id: 152,
+    category: "İletişim",
+    title: "Karmaşık konuyu sadeleştir",
+    tier: "Free",
+    description: "Konuyu teknik olmayan kitleye benzetmeler ve sınırlarıyla açıkla.",
+    prompt: "Konuyu teknik olmayan kitleye benzetmeler ve sınırlarıyla açıkla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇letişim karmaşık konuyu sadeleştir",
+    enabled: true,
+  },
+  {
+    id: 153,
+    category: "İletişim",
+    title: "Çok dilli çeviri kontrolü",
+    tier: "Pro",
+    description: "Çeviride anlam, ton, kültürel uygunluk ve terim tutarlılığını incele.",
+    prompt: "Çeviride anlam, ton, kültürel uygunluk ve terim tutarlılığını incele. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇letişim çok dilli çeviri kontrolü",
+    enabled: true,
+  },
+  {
+    id: 154,
+    category: "İletişim",
+    title: "Müşteri e-postası tonu",
+    tier: "Free",
+    description: "E-postayı empatik ve profesyonel hâle getir; vaatleri doğrulanabilir tut.",
+    prompt: "E-postayı empatik ve profesyonel hâle getir; vaatleri doğrulanabilir tut. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇letişim müşteri e-postası tonu",
+    enabled: true,
+  },
+  {
+    id: 155,
+    category: "İletişim",
+    title: "Kısa biyografi",
+    tier: "Plus",
+    description: "Amaca uygun, gerçek bilgilere bağlı kısa ve uzun biyografi seçenekleri oluştur.",
+    prompt: "Amaca uygun, gerçek bilgilere bağlı kısa ve uzun biyografi seçenekleri oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇letişim kısa biyografi",
+    enabled: true,
+  },
+  {
+    id: 156,
+    category: "İletişim",
+    title: "Soru listesi hazırlayıcı",
+    tier: "Pro",
+    description: "Görüşme veya toplantı hedefime ulaşmak için öncelikli sorular üret.",
+    prompt: "Görüşme veya toplantı hedefime ulaşmak için öncelikli sorular üret. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "i̇letişim soru listesi hazırlayıcı",
+    enabled: true,
+  },
+  {
+    id: 157,
+    category: "Güvenlik ve kalite",
+    title: "Gizlilik kontrol listesi",
+    tier: "Free",
+    description: "Toplanan verileri, amaçları, saklama süresini ve kullanıcı kontrolünü gözden geçir.",
+    prompt: "Toplanan verileri, amaçları, saklama süresini ve kullanıcı kontrolünü gözden geçir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "güvenlik ve kalite gizlilik kontrol listesi",
+    enabled: true,
+  },
+  {
+    id: 158,
+    category: "Güvenlik ve kalite",
+    title: "Tehdit modellemesi",
+    tier: "Free",
+    description: "Varlıklar, güven sınırları, tehdit aktörleri ve azaltıcı kontrolleri listele.",
+    prompt: "Varlıklar, güven sınırları, tehdit aktörleri ve azaltıcı kontrolleri listele. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "güvenlik ve kalite tehdit modellemesi",
+    enabled: true,
+  },
+  {
+    id: 159,
+    category: "Güvenlik ve kalite",
+    title: "Yedekleme stratejisi",
+    tier: "Pro",
+    description: "Kurtarma hedefleri, yedek sıklığı, saklama ve geri yükleme test planı öner.",
+    prompt: "Kurtarma hedefleri, yedek sıklığı, saklama ve geri yükleme test planı öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "güvenlik ve kalite yedekleme stratejisi",
+    enabled: true,
+  },
+  {
+    id: 160,
+    category: "Güvenlik ve kalite",
+    title: "Olay sonrası inceleme",
+    tier: "Plus",
+    description: "Suçlayıcı olmayan olay raporu, zaman çizelgesi, kök neden ve takip görevleri hazırla.",
+    prompt: "Suçlayıcı olmayan olay raporu, zaman çizelgesi, kök neden ve takip görevleri hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "güvenlik ve kalite olay sonrası inceleme",
+    enabled: true,
+  },
+  {
+    id: 161,
+    category: "Güvenlik ve kalite",
+    title: "Kullanıcı yetkisi denetimi",
+    tier: "Free",
+    description: "Rol ve izinleri en az ayrıcalık ilkesine göre gözden geçir.",
+    prompt: "Rol ve izinleri en az ayrıcalık ilkesine göre gözden geçir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "güvenlik ve kalite kullanıcı yetkisi denetimi",
+    enabled: true,
+  },
+  {
+    id: 162,
+    category: "Güvenlik ve kalite",
+    title: "Dağıtım kontrol listesi",
+    tier: "Pro",
+    description: "Test, yapılandırma, gizli anahtarlar, sağlık kontrolü ve geri alma adımlarını listele.",
+    prompt: "Test, yapılandırma, gizli anahtarlar, sağlık kontrolü ve geri alma adımlarını listele. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "güvenlik ve kalite dağıtım kontrol listesi",
+    enabled: true,
+  },
+  {
+    id: 163,
+    category: "Güvenlik ve kalite",
+    title: "Bağımlılık risk özeti",
+    tier: "Free",
+    description: "Bağımlılık listesinden güncelleme, lisans ve bakım risklerini araştırmak için kontrol planı çıkar.",
+    prompt: "Bağımlılık listesinden güncelleme, lisans ve bakım risklerini araştırmak için kontrol planı çıkar. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "güvenlik ve kalite bağımlılık risk özeti",
+    enabled: true,
+  },
+  {
+    id: 164,
+    category: "Güvenlik ve kalite",
+    title: "Hata mesajı güvenliği",
+    tier: "Free",
+    description: "Hata mesajlarının sır veya kişisel veri sızdırıp sızdırmadığını incele.",
+    prompt: "Hata mesajlarının sır veya kişisel veri sızdırıp sızdırmadığını incele. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "güvenlik ve kalite hata mesajı güvenliği",
+    enabled: true,
+  },
+  {
+    id: 165,
+    category: "Güvenlik ve kalite",
+    title: "Kurtarma tatbikatı",
+    tier: "Plus",
+    description: "Hizmet kesintisi için senaryo, sorumlular, adımlar ve başarı ölçütleri hazırla.",
+    prompt: "Hizmet kesintisi için senaryo, sorumlular, adımlar ve başarı ölçütleri hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "güvenlik ve kalite kurtarma tatbikatı",
+    enabled: true,
+  },
+  {
+    id: 166,
+    category: "Güvenlik ve kalite",
+    title: "Kalite kapısı tasarımı",
+    tier: "Free",
+    description: "Yayına çıkış için test, erişilebilirlik, performans ve güvenlik kabul eşikleri öner.",
+    prompt: "Yayına çıkış için test, erişilebilirlik, performans ve güvenlik kabul eşikleri öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "güvenlik ve kalite kalite kapısı tasarımı",
+    enabled: true,
+  },
+  {
+    id: 167,
+    category: "Ürün geliştirme",
+    title: "Kullanıcı persona taslağı",
+    tier: "Free",
+    description: "Verilen araştırma bulgularından varsayımları açıkça işaretleyerek kullanıcı profilleri oluştur.",
+    prompt: "Verilen araştırma bulgularından varsayımları açıkça işaretleyerek kullanıcı profilleri oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "ürün geliştirme kullanıcı persona taslağı",
+    enabled: true,
+  },
+  {
+    id: 168,
+    category: "Ürün geliştirme",
+    title: "İhtiyaçtan özelliğe",
+    tier: "Pro",
+    description: "Kullanıcı sorununu problem tanımı, kanıt, çözüm seçenekleri ve ölçülebilir sonuçlara çevir.",
+    prompt: "Kullanıcı sorununu problem tanımı, kanıt, çözüm seçenekleri ve ölçülebilir sonuçlara çevir. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "ürün geliştirme i̇htiyaçtan özelliğe",
+    enabled: true,
+  },
+  {
+    id: 169,
+    category: "Ürün geliştirme",
+    title: "Özellik önceliklendirme",
+    tier: "Free",
+    description: "Özellikleri kullanıcı etkisi, maliyet, risk ve stratejik uyum üzerinden sırala.",
+    prompt: "Özellikleri kullanıcı etkisi, maliyet, risk ve stratejik uyum üzerinden sırala. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "ürün geliştirme özellik önceliklendirme",
+    enabled: true,
+  },
+  {
+    id: 170,
+    category: "Ürün geliştirme",
+    title: "Kullanıcı geri bildirim sentezi",
+    tier: "Plus",
+    description: "Geri bildirimleri temalara ayır; tekrar eden sorun ve kanıt gücünü belirt.",
+    prompt: "Geri bildirimleri temalara ayır; tekrar eden sorun ve kanıt gücünü belirt. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "ürün geliştirme kullanıcı geri bildirim sentezi",
+    enabled: true,
+  },
+  {
+    id: 171,
+    category: "Ürün geliştirme",
+    title: "Ürün gereksinim belgesi",
+    tier: "Pro",
+    description: "Amaç, kapsam, kullanıcı hikâyeleri, analitik olaylar ve kabul koşulları yaz.",
+    prompt: "Amaç, kapsam, kullanıcı hikâyeleri, analitik olaylar ve kabul koşulları yaz. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "ürün geliştirme ürün gereksinim belgesi",
+    enabled: true,
+  },
+  {
+    id: 172,
+    category: "Ürün geliştirme",
+    title: "Deney tasarımı",
+    tier: "Free",
+    description: "Ürün varsayımını düşük maliyetli bir deneyle doğrulama planı oluştur.",
+    prompt: "Ürün varsayımını düşük maliyetli bir deneyle doğrulama planı oluştur. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "ürün geliştirme deney tasarımı",
+    enabled: true,
+  },
+  {
+    id: 173,
+    category: "Ürün geliştirme",
+    title: "Aktivasyon akışı",
+    tier: "Free",
+    description: "Yeni kullanıcının ilk değer anına ulaşmasını sağlayan adımları tasarla.",
+    prompt: "Yeni kullanıcının ilk değer anına ulaşmasını sağlayan adımları tasarla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "ürün geliştirme aktivasyon akışı",
+    enabled: true,
+  },
+  {
+    id: 174,
+    category: "Ürün geliştirme",
+    title: "Elde tutma fikirleri",
+    tier: "Pro",
+    description: "Kullanıcıya gerçek değer sunan geri dönüş sebepleri ve ölçüm yöntemleri öner.",
+    prompt: "Kullanıcıya gerçek değer sunan geri dönüş sebepleri ve ölçüm yöntemleri öner. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "ürün geliştirme elde tutma fikirleri",
+    enabled: true,
+  },
+  {
+    id: 175,
+    category: "Ürün geliştirme",
+    title: "Ürün içi yardım metni",
+    tier: "Plus",
+    description: "Kısa açıklamalar, ilk kullanım adımları ve bağlamsal yardım metinleri hazırla.",
+    prompt: "Kısa açıklamalar, ilk kullanım adımları ve bağlamsal yardım metinleri hazırla. İsteğimi dikkatle yorumla; gerekli bilgi eksikse varsayımını belirt, çıktıyı doğrudan kullanılabilir biçimde düzenle ve sonuna kısa kalite kontrol listesi ekle.",
+    keywords: "ürün geliştirme ürün içi yardım metni",
+    enabled: true,
+  },,
+  {
+    "id": 177,
+    "category": "Proje Yönetimi",
+    "title": "Plus 001 · Proje kapsamı ve kabul kriterleri",
+    "tier": "Plus",
+    "description": "Proje kapsamı ve kabul kriterleri: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #1: Proje kapsamı ve kabul kriterleri. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "proje yönetimi proje kapsamı ve kabul kriterleri plus premium",
+    "enabled": true
+  },
+  {
+    "id": 178,
+    "category": "Yazılım",
+    "title": "Plus 002 · Kod inceleme ve risk taraması",
+    "tier": "Plus",
+    "description": "Kod inceleme ve risk taraması: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #2: Kod inceleme ve risk taraması. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazılım kod inceleme ve risk taraması plus premium",
+    "enabled": true
+  },
+  {
+    "id": 179,
+    "category": "İçerik",
+    "title": "Plus 003 · İçerik serisi ve yayın takvimi",
+    "tier": "Plus",
+    "description": "İçerik serisi ve yayın takvimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #3: İçerik serisi ve yayın takvimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇çerik i̇çerik serisi ve yayın takvimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 180,
+    "category": "İş Analizi",
+    "title": "Plus 004 · Kullanıcı ihtiyacı analizi",
+    "tier": "Plus",
+    "description": "Kullanıcı ihtiyacı analizi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #4: Kullanıcı ihtiyacı analizi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇ş analizi kullanıcı ihtiyacı analizi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 181,
+    "category": "Eğitim",
+    "title": "Plus 005 · Kişisel öğrenme sistemi",
+    "tier": "Plus",
+    "description": "Kişisel öğrenme sistemi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #5: Kişisel öğrenme sistemi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "eğitim kişisel öğrenme sistemi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 182,
+    "category": "Araştırma",
+    "title": "Plus 006 · Kaynak değerlendirme planı",
+    "tier": "Plus",
+    "description": "Kaynak değerlendirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #6: Kaynak değerlendirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "araştırma kaynak değerlendirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 183,
+    "category": "Veri",
+    "title": "Plus 007 · Veri kalite kontrolü",
+    "tier": "Plus",
+    "description": "Veri kalite kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #7: Veri kalite kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "veri veri kalite kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 184,
+    "category": "Tasarım",
+    "title": "Plus 008 · Erişilebilirlik ve tasarım denetimi",
+    "tier": "Plus",
+    "description": "Erişilebilirlik ve tasarım denetimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #8: Erişilebilirlik ve tasarım denetimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "tasarım erişilebilirlik ve tasarım denetimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 185,
+    "category": "Ürün",
+    "title": "Plus 009 · Ürün gereksinim dokümanı",
+    "tier": "Plus",
+    "description": "Ürün gereksinim dokümanı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #9: Ürün gereksinim dokümanı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "ürün ürün gereksinim dokümanı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 186,
+    "category": "Pazarlama",
+    "title": "Plus 010 · Kampanya deney planı",
+    "tier": "Plus",
+    "description": "Kampanya deney planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #10: Kampanya deney planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "pazarlama kampanya deney planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 187,
+    "category": "Yazı",
+    "title": "Plus 011 · Editoryal kalite kontrol",
+    "tier": "Plus",
+    "description": "Editoryal kalite kontrol: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #11: Editoryal kalite kontrol. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazı editoryal kalite kontrol plus premium",
+    "enabled": true
+  },
+  {
+    "id": 188,
+    "category": "Operasyon",
+    "title": "Plus 012 · Süreç iyileştirme planı",
+    "tier": "Plus",
+    "description": "Süreç iyileştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #12: Süreç iyileştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "operasyon süreç iyileştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 189,
+    "category": "Kariyer",
+    "title": "Plus 013 · Portföy geliştirme planı",
+    "tier": "Plus",
+    "description": "Portföy geliştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #13: Portföy geliştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "kariyer portföy geliştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 190,
+    "category": "Güvenlik",
+    "title": "Plus 014 · Gizlilik risk kontrolü",
+    "tier": "Plus",
+    "description": "Gizlilik risk kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #14: Gizlilik risk kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "güvenlik gizlilik risk kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 191,
+    "category": "Sunum",
+    "title": "Plus 015 · Yönetici özeti ve karar notu",
+    "tier": "Plus",
+    "description": "Yönetici özeti ve karar notu: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #15: Yönetici özeti ve karar notu. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "sunum yönetici özeti ve karar notu plus premium",
+    "enabled": true
+  },
+  {
+    "id": 192,
+    "category": "Proje Yönetimi",
+    "title": "Plus 016 · Proje kapsamı ve kabul kriterleri",
+    "tier": "Plus",
+    "description": "Proje kapsamı ve kabul kriterleri: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #16: Proje kapsamı ve kabul kriterleri. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "proje yönetimi proje kapsamı ve kabul kriterleri plus premium",
+    "enabled": true
+  },
+  {
+    "id": 193,
+    "category": "Yazılım",
+    "title": "Plus 017 · Kod inceleme ve risk taraması",
+    "tier": "Plus",
+    "description": "Kod inceleme ve risk taraması: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #17: Kod inceleme ve risk taraması. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazılım kod inceleme ve risk taraması plus premium",
+    "enabled": true
+  },
+  {
+    "id": 194,
+    "category": "İçerik",
+    "title": "Plus 018 · İçerik serisi ve yayın takvimi",
+    "tier": "Plus",
+    "description": "İçerik serisi ve yayın takvimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #18: İçerik serisi ve yayın takvimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇çerik i̇çerik serisi ve yayın takvimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 195,
+    "category": "İş Analizi",
+    "title": "Plus 019 · Kullanıcı ihtiyacı analizi",
+    "tier": "Plus",
+    "description": "Kullanıcı ihtiyacı analizi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #19: Kullanıcı ihtiyacı analizi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇ş analizi kullanıcı ihtiyacı analizi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 196,
+    "category": "Eğitim",
+    "title": "Plus 020 · Kişisel öğrenme sistemi",
+    "tier": "Plus",
+    "description": "Kişisel öğrenme sistemi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #20: Kişisel öğrenme sistemi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "eğitim kişisel öğrenme sistemi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 197,
+    "category": "Araştırma",
+    "title": "Plus 021 · Kaynak değerlendirme planı",
+    "tier": "Plus",
+    "description": "Kaynak değerlendirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #21: Kaynak değerlendirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "araştırma kaynak değerlendirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 198,
+    "category": "Veri",
+    "title": "Plus 022 · Veri kalite kontrolü",
+    "tier": "Plus",
+    "description": "Veri kalite kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #22: Veri kalite kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "veri veri kalite kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 199,
+    "category": "Tasarım",
+    "title": "Plus 023 · Erişilebilirlik ve tasarım denetimi",
+    "tier": "Plus",
+    "description": "Erişilebilirlik ve tasarım denetimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #23: Erişilebilirlik ve tasarım denetimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "tasarım erişilebilirlik ve tasarım denetimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 200,
+    "category": "Ürün",
+    "title": "Plus 024 · Ürün gereksinim dokümanı",
+    "tier": "Plus",
+    "description": "Ürün gereksinim dokümanı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #24: Ürün gereksinim dokümanı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "ürün ürün gereksinim dokümanı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 201,
+    "category": "Pazarlama",
+    "title": "Plus 025 · Kampanya deney planı",
+    "tier": "Plus",
+    "description": "Kampanya deney planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #25: Kampanya deney planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "pazarlama kampanya deney planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 202,
+    "category": "Yazı",
+    "title": "Plus 026 · Editoryal kalite kontrol",
+    "tier": "Plus",
+    "description": "Editoryal kalite kontrol: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #26: Editoryal kalite kontrol. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazı editoryal kalite kontrol plus premium",
+    "enabled": true
+  },
+  {
+    "id": 203,
+    "category": "Operasyon",
+    "title": "Plus 027 · Süreç iyileştirme planı",
+    "tier": "Plus",
+    "description": "Süreç iyileştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #27: Süreç iyileştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "operasyon süreç iyileştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 204,
+    "category": "Kariyer",
+    "title": "Plus 028 · Portföy geliştirme planı",
+    "tier": "Plus",
+    "description": "Portföy geliştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #28: Portföy geliştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "kariyer portföy geliştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 205,
+    "category": "Güvenlik",
+    "title": "Plus 029 · Gizlilik risk kontrolü",
+    "tier": "Plus",
+    "description": "Gizlilik risk kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #29: Gizlilik risk kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "güvenlik gizlilik risk kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 206,
+    "category": "Sunum",
+    "title": "Plus 030 · Yönetici özeti ve karar notu",
+    "tier": "Plus",
+    "description": "Yönetici özeti ve karar notu: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #30: Yönetici özeti ve karar notu. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "sunum yönetici özeti ve karar notu plus premium",
+    "enabled": true
+  },
+  {
+    "id": 207,
+    "category": "Proje Yönetimi",
+    "title": "Plus 031 · Proje kapsamı ve kabul kriterleri",
+    "tier": "Plus",
+    "description": "Proje kapsamı ve kabul kriterleri: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #31: Proje kapsamı ve kabul kriterleri. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "proje yönetimi proje kapsamı ve kabul kriterleri plus premium",
+    "enabled": true
+  },
+  {
+    "id": 208,
+    "category": "Yazılım",
+    "title": "Plus 032 · Kod inceleme ve risk taraması",
+    "tier": "Plus",
+    "description": "Kod inceleme ve risk taraması: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #32: Kod inceleme ve risk taraması. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazılım kod inceleme ve risk taraması plus premium",
+    "enabled": true
+  },
+  {
+    "id": 209,
+    "category": "İçerik",
+    "title": "Plus 033 · İçerik serisi ve yayın takvimi",
+    "tier": "Plus",
+    "description": "İçerik serisi ve yayın takvimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #33: İçerik serisi ve yayın takvimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇çerik i̇çerik serisi ve yayın takvimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 210,
+    "category": "İş Analizi",
+    "title": "Plus 034 · Kullanıcı ihtiyacı analizi",
+    "tier": "Plus",
+    "description": "Kullanıcı ihtiyacı analizi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #34: Kullanıcı ihtiyacı analizi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇ş analizi kullanıcı ihtiyacı analizi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 211,
+    "category": "Eğitim",
+    "title": "Plus 035 · Kişisel öğrenme sistemi",
+    "tier": "Plus",
+    "description": "Kişisel öğrenme sistemi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #35: Kişisel öğrenme sistemi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "eğitim kişisel öğrenme sistemi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 212,
+    "category": "Araştırma",
+    "title": "Plus 036 · Kaynak değerlendirme planı",
+    "tier": "Plus",
+    "description": "Kaynak değerlendirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #36: Kaynak değerlendirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "araştırma kaynak değerlendirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 213,
+    "category": "Veri",
+    "title": "Plus 037 · Veri kalite kontrolü",
+    "tier": "Plus",
+    "description": "Veri kalite kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #37: Veri kalite kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "veri veri kalite kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 214,
+    "category": "Tasarım",
+    "title": "Plus 038 · Erişilebilirlik ve tasarım denetimi",
+    "tier": "Plus",
+    "description": "Erişilebilirlik ve tasarım denetimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #38: Erişilebilirlik ve tasarım denetimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "tasarım erişilebilirlik ve tasarım denetimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 215,
+    "category": "Ürün",
+    "title": "Plus 039 · Ürün gereksinim dokümanı",
+    "tier": "Plus",
+    "description": "Ürün gereksinim dokümanı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #39: Ürün gereksinim dokümanı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "ürün ürün gereksinim dokümanı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 216,
+    "category": "Pazarlama",
+    "title": "Plus 040 · Kampanya deney planı",
+    "tier": "Plus",
+    "description": "Kampanya deney planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #40: Kampanya deney planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "pazarlama kampanya deney planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 217,
+    "category": "Yazı",
+    "title": "Plus 041 · Editoryal kalite kontrol",
+    "tier": "Plus",
+    "description": "Editoryal kalite kontrol: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #41: Editoryal kalite kontrol. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazı editoryal kalite kontrol plus premium",
+    "enabled": true
+  },
+  {
+    "id": 218,
+    "category": "Operasyon",
+    "title": "Plus 042 · Süreç iyileştirme planı",
+    "tier": "Plus",
+    "description": "Süreç iyileştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #42: Süreç iyileştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "operasyon süreç iyileştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 219,
+    "category": "Kariyer",
+    "title": "Plus 043 · Portföy geliştirme planı",
+    "tier": "Plus",
+    "description": "Portföy geliştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #43: Portföy geliştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "kariyer portföy geliştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 220,
+    "category": "Güvenlik",
+    "title": "Plus 044 · Gizlilik risk kontrolü",
+    "tier": "Plus",
+    "description": "Gizlilik risk kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #44: Gizlilik risk kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "güvenlik gizlilik risk kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 221,
+    "category": "Sunum",
+    "title": "Plus 045 · Yönetici özeti ve karar notu",
+    "tier": "Plus",
+    "description": "Yönetici özeti ve karar notu: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #45: Yönetici özeti ve karar notu. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "sunum yönetici özeti ve karar notu plus premium",
+    "enabled": true
+  },
+  {
+    "id": 222,
+    "category": "Proje Yönetimi",
+    "title": "Plus 046 · Proje kapsamı ve kabul kriterleri",
+    "tier": "Plus",
+    "description": "Proje kapsamı ve kabul kriterleri: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #46: Proje kapsamı ve kabul kriterleri. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "proje yönetimi proje kapsamı ve kabul kriterleri plus premium",
+    "enabled": true
+  },
+  {
+    "id": 223,
+    "category": "Yazılım",
+    "title": "Plus 047 · Kod inceleme ve risk taraması",
+    "tier": "Plus",
+    "description": "Kod inceleme ve risk taraması: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #47: Kod inceleme ve risk taraması. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazılım kod inceleme ve risk taraması plus premium",
+    "enabled": true
+  },
+  {
+    "id": 224,
+    "category": "İçerik",
+    "title": "Plus 048 · İçerik serisi ve yayın takvimi",
+    "tier": "Plus",
+    "description": "İçerik serisi ve yayın takvimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #48: İçerik serisi ve yayın takvimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇çerik i̇çerik serisi ve yayın takvimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 225,
+    "category": "İş Analizi",
+    "title": "Plus 049 · Kullanıcı ihtiyacı analizi",
+    "tier": "Plus",
+    "description": "Kullanıcı ihtiyacı analizi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #49: Kullanıcı ihtiyacı analizi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇ş analizi kullanıcı ihtiyacı analizi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 226,
+    "category": "Eğitim",
+    "title": "Plus 050 · Kişisel öğrenme sistemi",
+    "tier": "Plus",
+    "description": "Kişisel öğrenme sistemi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #50: Kişisel öğrenme sistemi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "eğitim kişisel öğrenme sistemi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 227,
+    "category": "Araştırma",
+    "title": "Plus 051 · Kaynak değerlendirme planı",
+    "tier": "Plus",
+    "description": "Kaynak değerlendirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #51: Kaynak değerlendirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "araştırma kaynak değerlendirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 228,
+    "category": "Veri",
+    "title": "Plus 052 · Veri kalite kontrolü",
+    "tier": "Plus",
+    "description": "Veri kalite kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #52: Veri kalite kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "veri veri kalite kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 229,
+    "category": "Tasarım",
+    "title": "Plus 053 · Erişilebilirlik ve tasarım denetimi",
+    "tier": "Plus",
+    "description": "Erişilebilirlik ve tasarım denetimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #53: Erişilebilirlik ve tasarım denetimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "tasarım erişilebilirlik ve tasarım denetimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 230,
+    "category": "Ürün",
+    "title": "Plus 054 · Ürün gereksinim dokümanı",
+    "tier": "Plus",
+    "description": "Ürün gereksinim dokümanı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #54: Ürün gereksinim dokümanı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "ürün ürün gereksinim dokümanı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 231,
+    "category": "Pazarlama",
+    "title": "Plus 055 · Kampanya deney planı",
+    "tier": "Plus",
+    "description": "Kampanya deney planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #55: Kampanya deney planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "pazarlama kampanya deney planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 232,
+    "category": "Yazı",
+    "title": "Plus 056 · Editoryal kalite kontrol",
+    "tier": "Plus",
+    "description": "Editoryal kalite kontrol: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #56: Editoryal kalite kontrol. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazı editoryal kalite kontrol plus premium",
+    "enabled": true
+  },
+  {
+    "id": 233,
+    "category": "Operasyon",
+    "title": "Plus 057 · Süreç iyileştirme planı",
+    "tier": "Plus",
+    "description": "Süreç iyileştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #57: Süreç iyileştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "operasyon süreç iyileştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 234,
+    "category": "Kariyer",
+    "title": "Plus 058 · Portföy geliştirme planı",
+    "tier": "Plus",
+    "description": "Portföy geliştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #58: Portföy geliştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "kariyer portföy geliştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 235,
+    "category": "Güvenlik",
+    "title": "Plus 059 · Gizlilik risk kontrolü",
+    "tier": "Plus",
+    "description": "Gizlilik risk kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #59: Gizlilik risk kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "güvenlik gizlilik risk kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 236,
+    "category": "Sunum",
+    "title": "Plus 060 · Yönetici özeti ve karar notu",
+    "tier": "Plus",
+    "description": "Yönetici özeti ve karar notu: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #60: Yönetici özeti ve karar notu. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "sunum yönetici özeti ve karar notu plus premium",
+    "enabled": true
+  },
+  {
+    "id": 237,
+    "category": "Proje Yönetimi",
+    "title": "Plus 061 · Proje kapsamı ve kabul kriterleri",
+    "tier": "Plus",
+    "description": "Proje kapsamı ve kabul kriterleri: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #61: Proje kapsamı ve kabul kriterleri. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "proje yönetimi proje kapsamı ve kabul kriterleri plus premium",
+    "enabled": true
+  },
+  {
+    "id": 238,
+    "category": "Yazılım",
+    "title": "Plus 062 · Kod inceleme ve risk taraması",
+    "tier": "Plus",
+    "description": "Kod inceleme ve risk taraması: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #62: Kod inceleme ve risk taraması. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazılım kod inceleme ve risk taraması plus premium",
+    "enabled": true
+  },
+  {
+    "id": 239,
+    "category": "İçerik",
+    "title": "Plus 063 · İçerik serisi ve yayın takvimi",
+    "tier": "Plus",
+    "description": "İçerik serisi ve yayın takvimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #63: İçerik serisi ve yayın takvimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇çerik i̇çerik serisi ve yayın takvimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 240,
+    "category": "İş Analizi",
+    "title": "Plus 064 · Kullanıcı ihtiyacı analizi",
+    "tier": "Plus",
+    "description": "Kullanıcı ihtiyacı analizi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #64: Kullanıcı ihtiyacı analizi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇ş analizi kullanıcı ihtiyacı analizi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 241,
+    "category": "Eğitim",
+    "title": "Plus 065 · Kişisel öğrenme sistemi",
+    "tier": "Plus",
+    "description": "Kişisel öğrenme sistemi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #65: Kişisel öğrenme sistemi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "eğitim kişisel öğrenme sistemi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 242,
+    "category": "Araştırma",
+    "title": "Plus 066 · Kaynak değerlendirme planı",
+    "tier": "Plus",
+    "description": "Kaynak değerlendirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #66: Kaynak değerlendirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "araştırma kaynak değerlendirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 243,
+    "category": "Veri",
+    "title": "Plus 067 · Veri kalite kontrolü",
+    "tier": "Plus",
+    "description": "Veri kalite kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #67: Veri kalite kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "veri veri kalite kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 244,
+    "category": "Tasarım",
+    "title": "Plus 068 · Erişilebilirlik ve tasarım denetimi",
+    "tier": "Plus",
+    "description": "Erişilebilirlik ve tasarım denetimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #68: Erişilebilirlik ve tasarım denetimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "tasarım erişilebilirlik ve tasarım denetimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 245,
+    "category": "Ürün",
+    "title": "Plus 069 · Ürün gereksinim dokümanı",
+    "tier": "Plus",
+    "description": "Ürün gereksinim dokümanı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #69: Ürün gereksinim dokümanı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "ürün ürün gereksinim dokümanı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 246,
+    "category": "Pazarlama",
+    "title": "Plus 070 · Kampanya deney planı",
+    "tier": "Plus",
+    "description": "Kampanya deney planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #70: Kampanya deney planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "pazarlama kampanya deney planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 247,
+    "category": "Yazı",
+    "title": "Plus 071 · Editoryal kalite kontrol",
+    "tier": "Plus",
+    "description": "Editoryal kalite kontrol: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #71: Editoryal kalite kontrol. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazı editoryal kalite kontrol plus premium",
+    "enabled": true
+  },
+  {
+    "id": 248,
+    "category": "Operasyon",
+    "title": "Plus 072 · Süreç iyileştirme planı",
+    "tier": "Plus",
+    "description": "Süreç iyileştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #72: Süreç iyileştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "operasyon süreç iyileştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 249,
+    "category": "Kariyer",
+    "title": "Plus 073 · Portföy geliştirme planı",
+    "tier": "Plus",
+    "description": "Portföy geliştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #73: Portföy geliştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "kariyer portföy geliştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 250,
+    "category": "Güvenlik",
+    "title": "Plus 074 · Gizlilik risk kontrolü",
+    "tier": "Plus",
+    "description": "Gizlilik risk kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #74: Gizlilik risk kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "güvenlik gizlilik risk kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 251,
+    "category": "Sunum",
+    "title": "Plus 075 · Yönetici özeti ve karar notu",
+    "tier": "Plus",
+    "description": "Yönetici özeti ve karar notu: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #75: Yönetici özeti ve karar notu. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "sunum yönetici özeti ve karar notu plus premium",
+    "enabled": true
+  },
+  {
+    "id": 252,
+    "category": "Proje Yönetimi",
+    "title": "Plus 076 · Proje kapsamı ve kabul kriterleri",
+    "tier": "Plus",
+    "description": "Proje kapsamı ve kabul kriterleri: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #76: Proje kapsamı ve kabul kriterleri. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "proje yönetimi proje kapsamı ve kabul kriterleri plus premium",
+    "enabled": true
+  },
+  {
+    "id": 253,
+    "category": "Yazılım",
+    "title": "Plus 077 · Kod inceleme ve risk taraması",
+    "tier": "Plus",
+    "description": "Kod inceleme ve risk taraması: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #77: Kod inceleme ve risk taraması. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazılım kod inceleme ve risk taraması plus premium",
+    "enabled": true
+  },
+  {
+    "id": 254,
+    "category": "İçerik",
+    "title": "Plus 078 · İçerik serisi ve yayın takvimi",
+    "tier": "Plus",
+    "description": "İçerik serisi ve yayın takvimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #78: İçerik serisi ve yayın takvimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇çerik i̇çerik serisi ve yayın takvimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 255,
+    "category": "İş Analizi",
+    "title": "Plus 079 · Kullanıcı ihtiyacı analizi",
+    "tier": "Plus",
+    "description": "Kullanıcı ihtiyacı analizi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #79: Kullanıcı ihtiyacı analizi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇ş analizi kullanıcı ihtiyacı analizi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 256,
+    "category": "Eğitim",
+    "title": "Plus 080 · Kişisel öğrenme sistemi",
+    "tier": "Plus",
+    "description": "Kişisel öğrenme sistemi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #80: Kişisel öğrenme sistemi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "eğitim kişisel öğrenme sistemi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 257,
+    "category": "Araştırma",
+    "title": "Plus 081 · Kaynak değerlendirme planı",
+    "tier": "Plus",
+    "description": "Kaynak değerlendirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #81: Kaynak değerlendirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "araştırma kaynak değerlendirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 258,
+    "category": "Veri",
+    "title": "Plus 082 · Veri kalite kontrolü",
+    "tier": "Plus",
+    "description": "Veri kalite kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #82: Veri kalite kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "veri veri kalite kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 259,
+    "category": "Tasarım",
+    "title": "Plus 083 · Erişilebilirlik ve tasarım denetimi",
+    "tier": "Plus",
+    "description": "Erişilebilirlik ve tasarım denetimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #83: Erişilebilirlik ve tasarım denetimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "tasarım erişilebilirlik ve tasarım denetimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 260,
+    "category": "Ürün",
+    "title": "Plus 084 · Ürün gereksinim dokümanı",
+    "tier": "Plus",
+    "description": "Ürün gereksinim dokümanı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #84: Ürün gereksinim dokümanı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "ürün ürün gereksinim dokümanı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 261,
+    "category": "Pazarlama",
+    "title": "Plus 085 · Kampanya deney planı",
+    "tier": "Plus",
+    "description": "Kampanya deney planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #85: Kampanya deney planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "pazarlama kampanya deney planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 262,
+    "category": "Yazı",
+    "title": "Plus 086 · Editoryal kalite kontrol",
+    "tier": "Plus",
+    "description": "Editoryal kalite kontrol: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #86: Editoryal kalite kontrol. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazı editoryal kalite kontrol plus premium",
+    "enabled": true
+  },
+  {
+    "id": 263,
+    "category": "Operasyon",
+    "title": "Plus 087 · Süreç iyileştirme planı",
+    "tier": "Plus",
+    "description": "Süreç iyileştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #87: Süreç iyileştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "operasyon süreç iyileştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 264,
+    "category": "Kariyer",
+    "title": "Plus 088 · Portföy geliştirme planı",
+    "tier": "Plus",
+    "description": "Portföy geliştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #88: Portföy geliştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "kariyer portföy geliştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 265,
+    "category": "Güvenlik",
+    "title": "Plus 089 · Gizlilik risk kontrolü",
+    "tier": "Plus",
+    "description": "Gizlilik risk kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #89: Gizlilik risk kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "güvenlik gizlilik risk kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 266,
+    "category": "Sunum",
+    "title": "Plus 090 · Yönetici özeti ve karar notu",
+    "tier": "Plus",
+    "description": "Yönetici özeti ve karar notu: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #90: Yönetici özeti ve karar notu. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "sunum yönetici özeti ve karar notu plus premium",
+    "enabled": true
+  },
+  {
+    "id": 267,
+    "category": "Proje Yönetimi",
+    "title": "Plus 091 · Proje kapsamı ve kabul kriterleri",
+    "tier": "Plus",
+    "description": "Proje kapsamı ve kabul kriterleri: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #91: Proje kapsamı ve kabul kriterleri. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "proje yönetimi proje kapsamı ve kabul kriterleri plus premium",
+    "enabled": true
+  },
+  {
+    "id": 268,
+    "category": "Yazılım",
+    "title": "Plus 092 · Kod inceleme ve risk taraması",
+    "tier": "Plus",
+    "description": "Kod inceleme ve risk taraması: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #92: Kod inceleme ve risk taraması. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazılım kod inceleme ve risk taraması plus premium",
+    "enabled": true
+  },
+  {
+    "id": 269,
+    "category": "İçerik",
+    "title": "Plus 093 · İçerik serisi ve yayın takvimi",
+    "tier": "Plus",
+    "description": "İçerik serisi ve yayın takvimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #93: İçerik serisi ve yayın takvimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇çerik i̇çerik serisi ve yayın takvimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 270,
+    "category": "İş Analizi",
+    "title": "Plus 094 · Kullanıcı ihtiyacı analizi",
+    "tier": "Plus",
+    "description": "Kullanıcı ihtiyacı analizi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #94: Kullanıcı ihtiyacı analizi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇ş analizi kullanıcı ihtiyacı analizi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 271,
+    "category": "Eğitim",
+    "title": "Plus 095 · Kişisel öğrenme sistemi",
+    "tier": "Plus",
+    "description": "Kişisel öğrenme sistemi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #95: Kişisel öğrenme sistemi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "eğitim kişisel öğrenme sistemi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 272,
+    "category": "Araştırma",
+    "title": "Plus 096 · Kaynak değerlendirme planı",
+    "tier": "Plus",
+    "description": "Kaynak değerlendirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #96: Kaynak değerlendirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "araştırma kaynak değerlendirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 273,
+    "category": "Veri",
+    "title": "Plus 097 · Veri kalite kontrolü",
+    "tier": "Plus",
+    "description": "Veri kalite kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #97: Veri kalite kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "veri veri kalite kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 274,
+    "category": "Tasarım",
+    "title": "Plus 098 · Erişilebilirlik ve tasarım denetimi",
+    "tier": "Plus",
+    "description": "Erişilebilirlik ve tasarım denetimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #98: Erişilebilirlik ve tasarım denetimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "tasarım erişilebilirlik ve tasarım denetimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 275,
+    "category": "Ürün",
+    "title": "Plus 099 · Ürün gereksinim dokümanı",
+    "tier": "Plus",
+    "description": "Ürün gereksinim dokümanı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #99: Ürün gereksinim dokümanı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "ürün ürün gereksinim dokümanı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 276,
+    "category": "Pazarlama",
+    "title": "Plus 100 · Kampanya deney planı",
+    "tier": "Plus",
+    "description": "Kampanya deney planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #100: Kampanya deney planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "pazarlama kampanya deney planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 277,
+    "category": "Yazı",
+    "title": "Plus 101 · Editoryal kalite kontrol",
+    "tier": "Plus",
+    "description": "Editoryal kalite kontrol: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #101: Editoryal kalite kontrol. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazı editoryal kalite kontrol plus premium",
+    "enabled": true
+  },
+  {
+    "id": 278,
+    "category": "Operasyon",
+    "title": "Plus 102 · Süreç iyileştirme planı",
+    "tier": "Plus",
+    "description": "Süreç iyileştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #102: Süreç iyileştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "operasyon süreç iyileştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 279,
+    "category": "Kariyer",
+    "title": "Plus 103 · Portföy geliştirme planı",
+    "tier": "Plus",
+    "description": "Portföy geliştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #103: Portföy geliştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "kariyer portföy geliştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 280,
+    "category": "Güvenlik",
+    "title": "Plus 104 · Gizlilik risk kontrolü",
+    "tier": "Plus",
+    "description": "Gizlilik risk kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #104: Gizlilik risk kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "güvenlik gizlilik risk kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 281,
+    "category": "Sunum",
+    "title": "Plus 105 · Yönetici özeti ve karar notu",
+    "tier": "Plus",
+    "description": "Yönetici özeti ve karar notu: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #105: Yönetici özeti ve karar notu. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "sunum yönetici özeti ve karar notu plus premium",
+    "enabled": true
+  },
+  {
+    "id": 282,
+    "category": "Proje Yönetimi",
+    "title": "Plus 106 · Proje kapsamı ve kabul kriterleri",
+    "tier": "Plus",
+    "description": "Proje kapsamı ve kabul kriterleri: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #106: Proje kapsamı ve kabul kriterleri. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "proje yönetimi proje kapsamı ve kabul kriterleri plus premium",
+    "enabled": true
+  },
+  {
+    "id": 283,
+    "category": "Yazılım",
+    "title": "Plus 107 · Kod inceleme ve risk taraması",
+    "tier": "Plus",
+    "description": "Kod inceleme ve risk taraması: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #107: Kod inceleme ve risk taraması. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazılım kod inceleme ve risk taraması plus premium",
+    "enabled": true
+  },
+  {
+    "id": 284,
+    "category": "İçerik",
+    "title": "Plus 108 · İçerik serisi ve yayın takvimi",
+    "tier": "Plus",
+    "description": "İçerik serisi ve yayın takvimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #108: İçerik serisi ve yayın takvimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇çerik i̇çerik serisi ve yayın takvimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 285,
+    "category": "İş Analizi",
+    "title": "Plus 109 · Kullanıcı ihtiyacı analizi",
+    "tier": "Plus",
+    "description": "Kullanıcı ihtiyacı analizi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #109: Kullanıcı ihtiyacı analizi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇ş analizi kullanıcı ihtiyacı analizi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 286,
+    "category": "Eğitim",
+    "title": "Plus 110 · Kişisel öğrenme sistemi",
+    "tier": "Plus",
+    "description": "Kişisel öğrenme sistemi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #110: Kişisel öğrenme sistemi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "eğitim kişisel öğrenme sistemi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 287,
+    "category": "Araştırma",
+    "title": "Plus 111 · Kaynak değerlendirme planı",
+    "tier": "Plus",
+    "description": "Kaynak değerlendirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #111: Kaynak değerlendirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "araştırma kaynak değerlendirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 288,
+    "category": "Veri",
+    "title": "Plus 112 · Veri kalite kontrolü",
+    "tier": "Plus",
+    "description": "Veri kalite kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #112: Veri kalite kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "veri veri kalite kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 289,
+    "category": "Tasarım",
+    "title": "Plus 113 · Erişilebilirlik ve tasarım denetimi",
+    "tier": "Plus",
+    "description": "Erişilebilirlik ve tasarım denetimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #113: Erişilebilirlik ve tasarım denetimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "tasarım erişilebilirlik ve tasarım denetimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 290,
+    "category": "Ürün",
+    "title": "Plus 114 · Ürün gereksinim dokümanı",
+    "tier": "Plus",
+    "description": "Ürün gereksinim dokümanı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #114: Ürün gereksinim dokümanı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "ürün ürün gereksinim dokümanı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 291,
+    "category": "Pazarlama",
+    "title": "Plus 115 · Kampanya deney planı",
+    "tier": "Plus",
+    "description": "Kampanya deney planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #115: Kampanya deney planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "pazarlama kampanya deney planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 292,
+    "category": "Yazı",
+    "title": "Plus 116 · Editoryal kalite kontrol",
+    "tier": "Plus",
+    "description": "Editoryal kalite kontrol: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #116: Editoryal kalite kontrol. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazı editoryal kalite kontrol plus premium",
+    "enabled": true
+  },
+  {
+    "id": 293,
+    "category": "Operasyon",
+    "title": "Plus 117 · Süreç iyileştirme planı",
+    "tier": "Plus",
+    "description": "Süreç iyileştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #117: Süreç iyileştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "operasyon süreç iyileştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 294,
+    "category": "Kariyer",
+    "title": "Plus 118 · Portföy geliştirme planı",
+    "tier": "Plus",
+    "description": "Portföy geliştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #118: Portföy geliştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "kariyer portföy geliştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 295,
+    "category": "Güvenlik",
+    "title": "Plus 119 · Gizlilik risk kontrolü",
+    "tier": "Plus",
+    "description": "Gizlilik risk kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #119: Gizlilik risk kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "güvenlik gizlilik risk kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 296,
+    "category": "Sunum",
+    "title": "Plus 120 · Yönetici özeti ve karar notu",
+    "tier": "Plus",
+    "description": "Yönetici özeti ve karar notu: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #120: Yönetici özeti ve karar notu. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "sunum yönetici özeti ve karar notu plus premium",
+    "enabled": true
+  },
+  {
+    "id": 297,
+    "category": "Proje Yönetimi",
+    "title": "Plus 121 · Proje kapsamı ve kabul kriterleri",
+    "tier": "Plus",
+    "description": "Proje kapsamı ve kabul kriterleri: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #121: Proje kapsamı ve kabul kriterleri. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "proje yönetimi proje kapsamı ve kabul kriterleri plus premium",
+    "enabled": true
+  },
+  {
+    "id": 298,
+    "category": "Yazılım",
+    "title": "Plus 122 · Kod inceleme ve risk taraması",
+    "tier": "Plus",
+    "description": "Kod inceleme ve risk taraması: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #122: Kod inceleme ve risk taraması. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazılım kod inceleme ve risk taraması plus premium",
+    "enabled": true
+  },
+  {
+    "id": 299,
+    "category": "İçerik",
+    "title": "Plus 123 · İçerik serisi ve yayın takvimi",
+    "tier": "Plus",
+    "description": "İçerik serisi ve yayın takvimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #123: İçerik serisi ve yayın takvimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇çerik i̇çerik serisi ve yayın takvimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 300,
+    "category": "İş Analizi",
+    "title": "Plus 124 · Kullanıcı ihtiyacı analizi",
+    "tier": "Plus",
+    "description": "Kullanıcı ihtiyacı analizi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #124: Kullanıcı ihtiyacı analizi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇ş analizi kullanıcı ihtiyacı analizi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 301,
+    "category": "Eğitim",
+    "title": "Plus 125 · Kişisel öğrenme sistemi",
+    "tier": "Plus",
+    "description": "Kişisel öğrenme sistemi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #125: Kişisel öğrenme sistemi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "eğitim kişisel öğrenme sistemi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 302,
+    "category": "Araştırma",
+    "title": "Plus 126 · Kaynak değerlendirme planı",
+    "tier": "Plus",
+    "description": "Kaynak değerlendirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #126: Kaynak değerlendirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "araştırma kaynak değerlendirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 303,
+    "category": "Veri",
+    "title": "Plus 127 · Veri kalite kontrolü",
+    "tier": "Plus",
+    "description": "Veri kalite kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #127: Veri kalite kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "veri veri kalite kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 304,
+    "category": "Tasarım",
+    "title": "Plus 128 · Erişilebilirlik ve tasarım denetimi",
+    "tier": "Plus",
+    "description": "Erişilebilirlik ve tasarım denetimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #128: Erişilebilirlik ve tasarım denetimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "tasarım erişilebilirlik ve tasarım denetimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 305,
+    "category": "Ürün",
+    "title": "Plus 129 · Ürün gereksinim dokümanı",
+    "tier": "Plus",
+    "description": "Ürün gereksinim dokümanı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #129: Ürün gereksinim dokümanı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "ürün ürün gereksinim dokümanı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 306,
+    "category": "Pazarlama",
+    "title": "Plus 130 · Kampanya deney planı",
+    "tier": "Plus",
+    "description": "Kampanya deney planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #130: Kampanya deney planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "pazarlama kampanya deney planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 307,
+    "category": "Yazı",
+    "title": "Plus 131 · Editoryal kalite kontrol",
+    "tier": "Plus",
+    "description": "Editoryal kalite kontrol: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #131: Editoryal kalite kontrol. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazı editoryal kalite kontrol plus premium",
+    "enabled": true
+  },
+  {
+    "id": 308,
+    "category": "Operasyon",
+    "title": "Plus 132 · Süreç iyileştirme planı",
+    "tier": "Plus",
+    "description": "Süreç iyileştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #132: Süreç iyileştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "operasyon süreç iyileştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 309,
+    "category": "Kariyer",
+    "title": "Plus 133 · Portföy geliştirme planı",
+    "tier": "Plus",
+    "description": "Portföy geliştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #133: Portföy geliştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "kariyer portföy geliştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 310,
+    "category": "Güvenlik",
+    "title": "Plus 134 · Gizlilik risk kontrolü",
+    "tier": "Plus",
+    "description": "Gizlilik risk kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #134: Gizlilik risk kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "güvenlik gizlilik risk kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 311,
+    "category": "Sunum",
+    "title": "Plus 135 · Yönetici özeti ve karar notu",
+    "tier": "Plus",
+    "description": "Yönetici özeti ve karar notu: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #135: Yönetici özeti ve karar notu. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "sunum yönetici özeti ve karar notu plus premium",
+    "enabled": true
+  },
+  {
+    "id": 312,
+    "category": "Proje Yönetimi",
+    "title": "Plus 136 · Proje kapsamı ve kabul kriterleri",
+    "tier": "Plus",
+    "description": "Proje kapsamı ve kabul kriterleri: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #136: Proje kapsamı ve kabul kriterleri. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "proje yönetimi proje kapsamı ve kabul kriterleri plus premium",
+    "enabled": true
+  },
+  {
+    "id": 313,
+    "category": "Yazılım",
+    "title": "Plus 137 · Kod inceleme ve risk taraması",
+    "tier": "Plus",
+    "description": "Kod inceleme ve risk taraması: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #137: Kod inceleme ve risk taraması. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazılım kod inceleme ve risk taraması plus premium",
+    "enabled": true
+  },
+  {
+    "id": 314,
+    "category": "İçerik",
+    "title": "Plus 138 · İçerik serisi ve yayın takvimi",
+    "tier": "Plus",
+    "description": "İçerik serisi ve yayın takvimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #138: İçerik serisi ve yayın takvimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇çerik i̇çerik serisi ve yayın takvimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 315,
+    "category": "İş Analizi",
+    "title": "Plus 139 · Kullanıcı ihtiyacı analizi",
+    "tier": "Plus",
+    "description": "Kullanıcı ihtiyacı analizi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #139: Kullanıcı ihtiyacı analizi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "i̇ş analizi kullanıcı ihtiyacı analizi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 316,
+    "category": "Eğitim",
+    "title": "Plus 140 · Kişisel öğrenme sistemi",
+    "tier": "Plus",
+    "description": "Kişisel öğrenme sistemi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #140: Kişisel öğrenme sistemi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "eğitim kişisel öğrenme sistemi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 317,
+    "category": "Araştırma",
+    "title": "Plus 141 · Kaynak değerlendirme planı",
+    "tier": "Plus",
+    "description": "Kaynak değerlendirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #141: Kaynak değerlendirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "araştırma kaynak değerlendirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 318,
+    "category": "Veri",
+    "title": "Plus 142 · Veri kalite kontrolü",
+    "tier": "Plus",
+    "description": "Veri kalite kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #142: Veri kalite kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "veri veri kalite kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 319,
+    "category": "Tasarım",
+    "title": "Plus 143 · Erişilebilirlik ve tasarım denetimi",
+    "tier": "Plus",
+    "description": "Erişilebilirlik ve tasarım denetimi: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #143: Erişilebilirlik ve tasarım denetimi. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "tasarım erişilebilirlik ve tasarım denetimi plus premium",
+    "enabled": true
+  },
+  {
+    "id": 320,
+    "category": "Ürün",
+    "title": "Plus 144 · Ürün gereksinim dokümanı",
+    "tier": "Plus",
+    "description": "Ürün gereksinim dokümanı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #144: Ürün gereksinim dokümanı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "ürün ürün gereksinim dokümanı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 321,
+    "category": "Pazarlama",
+    "title": "Plus 145 · Kampanya deney planı",
+    "tier": "Plus",
+    "description": "Kampanya deney planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #145: Kampanya deney planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "pazarlama kampanya deney planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 322,
+    "category": "Yazı",
+    "title": "Plus 146 · Editoryal kalite kontrol",
+    "tier": "Plus",
+    "description": "Editoryal kalite kontrol: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #146: Editoryal kalite kontrol. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "yazı editoryal kalite kontrol plus premium",
+    "enabled": true
+  },
+  {
+    "id": 323,
+    "category": "Operasyon",
+    "title": "Plus 147 · Süreç iyileştirme planı",
+    "tier": "Plus",
+    "description": "Süreç iyileştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #147: Süreç iyileştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "operasyon süreç iyileştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 324,
+    "category": "Kariyer",
+    "title": "Plus 148 · Portföy geliştirme planı",
+    "tier": "Plus",
+    "description": "Portföy geliştirme planı: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #148: Portföy geliştirme planı. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "kariyer portföy geliştirme planı plus premium",
+    "enabled": true
+  },
+  {
+    "id": 325,
+    "category": "Güvenlik",
+    "title": "Plus 149 · Gizlilik risk kontrolü",
+    "tier": "Plus",
+    "description": "Gizlilik risk kontrolü: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #149: Gizlilik risk kontrolü. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "güvenlik gizlilik risk kontrolü plus premium",
+    "enabled": true
+  },
+  {
+    "id": 326,
+    "category": "Sunum",
+    "title": "Plus 150 · Yönetici özeti ve karar notu",
+    "tier": "Plus",
+    "description": "Yönetici özeti ve karar notu: hedefleri, kısıtları, riskleri ve ölçüm yöntemini birlikte düzenle.",
+    "prompt": "Plus çalışma akışı #150: Yönetici özeti ve karar notu. Kullanıcıdan gelen bağlamı kullan; eksik kritik bilgi varsa en fazla 3 net soru sor. Ardından şu başlıklarla uygulanabilir çıktı hazırla: Amaç, varsayımlar, mevcut durum, seçenekler, adım adım plan, sorumluluklar, zaman tahmini, riskler ve azaltma adımları, kalite kontrol listesi, başarı ölçütleri ve sonraki en küçük adım. Gerçek dışı bilgi uydurma; doğrulanması gereken noktaları açıkça işaretle. Konu güvenlik, hukuk, sağlık veya finans gibi yüksek etkili bir alandaysa sınırları ve uzman doğrulaması ihtiyacını belirt.",
+    "keywords": "sunum yönetici özeti ve karar notu plus premium",
+    "enabled": true
+  }
+];
+
+const td175Category=$('td175Category');
+[...new Set(td175FeatureLibrary.map(x=>x.category))].sort().forEach(c=>{const o=document.createElement('option');o.value=c;o.textContent=c;td175Category.appendChild(o)});
+function td175Render(){const q=$('td175Search').value.trim().toLocaleLowerCase('tr-TR');const c=td175Category.value;const t=$('td175Tier').value;const matches=td175FeatureLibrary.filter(x=>(x.tier!=='Plus'||(user&&user.plan==='plus'))&&(!q||(x.title+' '+x.description+' '+x.keywords).toLocaleLowerCase('tr-TR').includes(q))&&(!c||x.category===c)&&(!t||x.tier===t));$('td175Count').textContent=matches.length+' araç'+(user&&user.plan==='plus'?' · Plus açık':' · Plus araçları Plus aboneliğine özel');const box=$('td175Results');box.innerHTML='';matches.forEach(x=>{const b=document.createElement('button');b.innerHTML='<b>'+String(x.id).padStart(3,'0')+'. '+esc(x.title)+'</b><small>'+esc(x.category)+' · '+esc(x.tier)+'<br>'+esc(x.description)+'</small>';b.onclick=()=>{if(!$('prompt'))return;$('prompt').value=x.prompt;$('prompt').focus();td175Modal.style.display='none';if(typeof tdCloseTools==='function')tdCloseTools();if(typeof setStatus==='function')setStatus('Araç hazır: '+x.title+' · Göndermek için Gönder düğmesine bas.');};box.appendChild(b)});if(!matches.length)box.innerHTML='<p>Bu filtrelerle eşleşen araç yok.</p>'}
+$('td175Search').addEventListener('input',td175Render);td175Category.addEventListener('change',td175Render);$('td175Tier').addEventListener('change',td175Render);$('td175Close').onclick=()=>td175Modal.style.display='none';td175Modal.addEventListener('click',e=>{if(e.target===td175Modal)td175Modal.style.display='none'});
+$('tdOpenFeatureLibrary')?.addEventListener('click',()=>{td175Modal.style.display='flex';td175Render()});
+// Also expose the library in the primary dock so visitors discover the new workflows.
+const td175DockButton=document.createElement('button');td175DockButton.className='secondary';td175DockButton.textContent='✦ 325 Araç';td175DockButton.onclick=()=>{td175Modal.style.display='flex';td175Render()};$('tdQuickDock')?.appendChild(td175DockButton);
+// A compact plan notice: Plus is advertised as a planned 400 TL tier, not falsely marked as purchasable.
+const td175PlusNotice=document.createElement('div');td175PlusNotice.id='td175PlusNotice';td175PlusNotice.style.cssText='position:fixed;left:12px;bottom:12px;z-index:900;max-width:300px;padding:10px 12px;border:1px solid var(--line,#d8e6f6);border-radius:12px;background:var(--panel,#fff);color:var(--text,#172b46);box-shadow:0 8px 28px #10204018;font-size:12px;display:none';td175PlusNotice.innerHTML='<b>Tekden AI Plus · 400 TL/ay</b><br>Plan taslağıdır; ödeme entegrasyonu tamamlanana kadar aktif satış yapılmaz.';document.body.appendChild(td175PlusNotice);
+$('profilePlansBtn')?.addEventListener('click',()=>{td175PlusNotice.style.display='block'});
+
 // Better onboarding: give first-time visitors a one-click starter prompt.
 if(!localStorage.getItem('tekden_seen_toolkit')){localStorage.setItem('tekden_seen_toolkit','1');setTimeout(()=>{if(!user&&guestHistory.length===0)setStatus('İpucu: ✦ Araç kutusunda 25 hazır prompt, not defteri ve kişisel yanıt ayarları var.');},900)}
 
@@ -1428,7 +4721,7 @@ def create_game(body: GameBody, request: Request):
     car_intent = re.search(r"\b(araba|otomobil|arac|yar\w*|trafik|surus|drift|formula|racing|racer|car game|car racing)\b", normalized_prompt) and re.search(r"\b(oyun|yap|olustur|tasarla|gelistir|yar\w*|sur|kac|drift|game)\b", normalized_prompt)
     if car_intent:
         return {"html": CAR_RACING_GAME_HTML, "title": "Neon Highway — oynanabilir araba yarışı", "tier": "free-compatible"}
-    if plan != "pro":
+    if plan not in ("pro", "plus"):
         raise HTTPException(403, "Free planında hazır Neon Highway araba oyununu oynayabilirsin. Kendi tarifinden farklı türlerde gelişmiş oyun üretmek Pro özelliğidir.")
     system = """You are the senior game-engineering team for Tekden AI Pro. Return ONLY one complete standalone HTML document beginning with <!doctype html>. Never return a plan, questions, pseudocode, a static screenshot, or a toy rectangle demo. Build the requested game now.
 
@@ -1491,7 +4784,7 @@ def require_song_pro(request: Request):
     if not user:
         raise HTTPException(401, "Şarkı Stüdyosu için giriş yapmalısın.")
     plan = "pro" if user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else user.get("plan", "free")
-    if plan != "pro":
+    if plan not in ("pro", "plus"):
         raise HTTPException(403, "Vokalli şarkı üretimi yalnızca Tekden AI Pro üyelerine açıktır.")
     return user
 
@@ -1700,7 +4993,7 @@ HTML = r"""<!doctype html>
 <div class="composerwrap"><div class="composer"><textarea id="prompt" placeholder="Tekden AI'a mesaj yaz..."></textarea><div class="attachrow"><label class="attachlabel" for="fileInput">📎 Dosya / görsel ekle</label><input id="fileInput" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.docx" hidden><span class="attachname" id="fileName">Dosya seçilmedi</span></div><div class="tools"><div class="toolleft"><button class="secondary" id="searchBtn" title="İnternette ara">⌕ Web ara</button><button class="secondary" id="imageBtn" title="Görsel oluştur">▧ Görsel</button><button class="secondary" id="dictationBtn" title="Konuşarak yaz">🎙 Dikte et</button><button class="secondary" id="voiceBtn" title="Sesli sohbet">🔊 Sesli sohbet</button><span class="status" id="status">Hazır</span></div><button id="sendBtn">Gönder ↑</button></div></div><div class="notice" style="text-align:center;margin-top:8px">Misafir sohbetleri bu tarayıcıda saklanır; hesap açarsan sohbet geçmişin hesabına kaydedilir.</div></div></main></div>
 <div class="modalback" id="modalback"><div class="modal"><h2 id="modalTitle">Tekden AI'a giriş yap</h2><p class="notice">Hesabınla sohbet geçmişin saklanır.</p><input id="authUser" placeholder="Kullanıcı adı" autocomplete="username"><input id="authPass" type="password" placeholder="Şifre (en az 8 karakter)" autocomplete="current-password"><div class="row"><button id="authSubmit">Giriş yap</button><button class="secondary" id="registerBtn">Kayıt ol</button></div><p id="authError" class="notice"></p><button class="secondary" id="closeModal" style="width:100%;margin-top:8px">Kapat</button></div></div>
 <div class="modalback" id="profileBack"><div class="modal"><h2>Profilim</h2><p class="notice">Hesap bilgilerin ve üyelik durumun</p><div class="profilegrid"><div class="profileitem"><small>Kullanıcı adı</small><b id="profileUsername">Misafir</b></div><div class="profileitem"><small>Üyelik</small><b id="profilePlan">Free</b></div></div><div class="rightcard" style="margin:12px 0"><h3>Üyelik özellikleri</h3><p id="profileFeatures">Standart sohbet ve mevcut temel araçlar.</p></div><button class="secondary" id="profileArchiveBtn" style="width:100%;margin-bottom:8px">Arşivlenmiş sohbetler</button><button id="profilePlansBtn" style="width:100%;margin-bottom:8px">Planları ve Pro avantajlarını gör</button><button class="secondary" id="profileLoginBtn" style="width:100%;margin-bottom:8px">Giriş yap / Kayıt ol</button><button class="secondary" id="profileLogoutBtn" style="width:100%;margin-bottom:8px;display:none">Çıkış yap</button><button class="secondary" id="closeProfile" style="width:100%">Kapat</button></div></div>
-<div class="modalback" id="plansBack"><div class="modal"><h2>Tekden AI planları</h2><div class="plans"><div class="plan"><strong>Free · 0 TL/ay</strong><p>Günlük sohbet, sohbet geçmişi, web araması, görsel oluşturma, desteklenen dosya türlerini inceleme ve hazır Neon Highway arcade oyununu oynama. Harici servis limitleri geçerlidir.</p><button class="secondary" disabled>Ücretsiz plan</button></div><div class="plan"><strong>✦ Pro · 100 TL/ay</strong><p><b>Gelişmiş Pro modeli</b> (OLLAMA_PRO_MODEL yapılandırılmışsa), çok kaynaklı genişletilmiş web araştırması, karmaşık görevlerde derin analiz, uzun proje bağlamı, belge değerlendirme ve tarifinden kod göstermeden farklı türlerde gelişmiş, doğrudan oynanabilir oyun üretimi; tam ekran, HTML indirme ve vokalli şarkı stüdyosu (müzik motoru yapılandırıldığında). Free plan hazır arcade oyununu oynayabilir. Görsel/web sağlayıcılarının kendi limitleri devam eder; sonuçlar kullanılan model ve servislerin kapasitesine bağlıdır.</p><button id="buyPro">Pro'ya geç</button><p id="proAlreadyActive" class="notice" style="display:none;color:#087b4d;font-weight:700">Pro üyeliğin aktif. Yeniden satın alman gerekmiyor.</p></div></div><p class="notice">Türkiye için iyzico abonelik entegrasyonu planlanmaktadır. Ödeme, işletme hesabı ve gerekli sözleşme/vergisel yükümlülükler tamamlanmadan satın alma etkin değildir.</p><button class="secondary" id="closePlans" style="width:100%">Kapat</button></div></div>
+<div class="modalback" id="plansBack"><div class="modal"><h2>Tekden AI planları</h2><div class="plans"><div class="plan"><strong>Free · 0 TL/ay</strong><p>Günlük sohbet, sohbet geçmişi, web araması, görsel oluşturma, desteklenen dosya türlerini inceleme ve hazır Neon Highway arcade oyununu oynama. Harici servis limitleri geçerlidir.</p><button class="secondary" disabled>Ücretsiz plan</button></div><div class="plan"><strong>✦ Plus · 400 TL/ay</strong><p><b>En kapsamlı plan taslağı:</b> gelişmiş çalışma akışları, 175 araç kütüphanesi, büyük proje planları, çok adımlı görev taslakları, öncelikli özellik erişimi ve kişisel çalışma alanı. Bu plan şu an yalnızca fiyat/özellik taslağıdır; ödeme ve yetkilendirme bağlanana kadar satın alma etkin değildir.</p><button id="buyPlus" type="button">Plus'a geç · 400 TL/ay</button><p class="notice">Satın alma yalnızca Stripe Price ID ve webhook yapılandırıldığında etkinleşir.</p></div><div class="plan"><strong>✦ Pro · 100 TL/ay</strong><p><b>Gelişmiş Pro modeli</b> (OLLAMA_PRO_MODEL yapılandırılmışsa), çok kaynaklı genişletilmiş web araştırması, karmaşık görevlerde derin analiz, uzun proje bağlamı, belge değerlendirme ve tarifinden kod göstermeden farklı türlerde gelişmiş, doğrudan oynanabilir oyun üretimi; tam ekran, HTML indirme ve vokalli şarkı stüdyosu (müzik motoru yapılandırıldığında). Free plan hazır arcade oyununu oynayabilir. Görsel/web sağlayıcılarının kendi limitleri devam eder; sonuçlar kullanılan model ve servislerin kapasitesine bağlıdır.</p><button id="buyPro">Pro'ya geç</button><p id="proAlreadyActive" class="notice" style="display:none;color:#087b4d;font-weight:700">Pro üyeliğin aktif. Yeniden satın alman gerekmiyor.</p></div></div><p class="notice">Ödeme Stripe Checkout üzerinden alınır. Stripe hesabında Plus için aylık fiyat oluşturup STRIPE_PRICE_ID_PLUS değerini Render ortam değişkenlerine eklemen gerekir.</p><button class="secondary" id="closePlans" style="width:100%">Kapat</button></div></div>
 <div class="modalback" id="songStudioBack"><div class="modal songmodal"><h2>🎤 Tekden AI Pro · Vokalli Şarkı Stüdyosu</h2><p>Şarkını Tekden AI ekranından üret. Ses motoru sunucu tarafında çalışır; Free hesaplar kullanamaz.</p><label for="songTitle"><b>Şarkı adı</b></label><input id="songTitle" placeholder="Örn. Uzaklara giden birine özlem"><label for="songStyle"><b>Müzik tarzı</b></label><input id="songStyle" value="Turkish arabesk, emotional male-female duet, bağlama, piano, expressive vocals"><label for="songLyrics"><b>Şarkı sözleri</b></label><textarea id="songLyrics" placeholder="Özgün şarkı sözlerini buraya yaz..." ></textarea><div class="row"><button type="button" id="generateVocalSongBtn" onclick="generateVocalSong()">🎵 Vokalli şarkı üret</button><button type="button" class="secondary" onclick="closeSongStudio()">Kapat</button></div><p id="songStudioStatus" class="notice" aria-live="polite"></p><audio id="songAudioPlayer" controls style="display:none;width:100%;margin-top:12px"></audio><a id="songAudioDownload" style="display:none" download="tekden-ai-sarki.mp3">Şarkıyı indir ↓</a></div></div>
 <div id="tdQuickDock" aria-label="Hızlı araçlar"><button class="secondary" id="tdToolsOpen">✦ Araç kutusu</button><button class="secondary" id="tdThemeToggle" title="Açık/koyu tema">◐ Tema</button><button class="secondary" id="tdFocusToggle" title="Dikkat dağıtmayan görünüm">⛶ Odak</button></div>
 <div id="tdToolsBack"><div id="tdToolsPanel" role="dialog" aria-modal="true" aria-label="Tekden AI araç kutusu"><button class="secondary tdToolClose" id="tdToolsClose">Kapat ✕</button><h2 style="margin:0 0 4px">✦ Tekden AI Araç Kutusu</h2><p class="tdSmall">Kişisel çalışma alanın. Bazı hesap özellikleri giriş yapmanı gerektirir.</p><div class="tdToolGrid">
@@ -1710,7 +5003,7 @@ HTML = r"""<!doctype html>
 <div class="tdToolCard"><h3>🔖 Kaydedilen yanıtlar</h3><p>Önemli bir yanıtın üstündeki “Kaydet” düğmesiyle buraya ekle.</p><div id="tdBookmarksList" class="tdToolList"></div><button id="tdRefreshBookmarks" class="secondary" style="margin-top:8px">Listeyi yenile</button></div>
 <div class="tdToolCard"><h3>📊 Hesap ve geçmiş</h3><p>Hesabındaki sohbet ve kayıt özetini görüntüle.</p><button id="tdAccountStats" class="secondary">Hesap özetini göster</button><div id="tdStatsResult" class="tdSmall" style="margin-top:8px"></div><div class="tdToolRow" style="margin-top:8px"><button id="tdExportGuest" class="secondary">Misafir geçmişini indir</button><button id="tdClearGuest" class="secondary">Misafir geçmişini temizle</button></div></div>
 <div class="tdToolCard"><h3>💡 Ürün önerileri</h3><p>Tekden AI'ın gelişmesi için yeni bir özellik öner.</p><input id="tdFeatureTitle" maxlength="100" placeholder="Öneri başlığı"><textarea id="tdFeatureDetails" rows="2" maxlength="1000" placeholder="Neden faydalı olur?"></textarea><button id="tdSubmitFeature">Öneriyi gönder</button><div id="tdFeatureStatus" class="tdSmall"></div></div>
-<div class="tdToolCard"><h3>♿ Görünüm ve erişilebilirlik</h3><p>Arayüzü çalışma şekline göre düzenle.</p><div class="tdToolRow"><button id="tdFontSmaller" class="secondary">A− Yazı küçült</button><button id="tdFontLarger" class="secondary">A+ Yazı büyüt</button></div><div class="tdToolRow" style="margin-top:8px"><button id="tdShortcuts" class="secondary">Klavye kısayolları</button><button id="tdFeedback" class="secondary">Geri bildirim</button></div></div>
+<div class="tdToolCard"><h3>♿ Görünüm ve erişilebilirlik</h3><p>Arayüzü çalışma şekline göre düzenle.</p><div class="tdToolRow"><button id="tdFontSmaller" class="secondary">A− Yazı küçült</button><button id="tdFontLarger" class="secondary">A+ Yazı büyüt</button></div><div class="tdToolRow" style="margin-top:8px"><button id="tdShortcuts" class="secondary">Klavye kısayolları</button><button id="tdOpenFeatureLibrary" class="secondary">175 araç</button></div></div>
 </div><p class="tdSmall" style="margin-bottom:0">Kısayollar: Ctrl/⌘ + K araç kutusu · Ctrl/⌘ + Enter gönder · Esc kapat · Ctrl/⌘ + Shift + N yeni sohbet.</p></div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.8.0/mammoth.browser.min.js"></script><script src="https://js.puter.com/v2/"></script>
 <script>
@@ -1920,7 +5213,7 @@ $('sendBtn').onclick=send;
 $('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('fileInput').onchange=e=>{selectedFile=e.target.files?.[0]||null;if(selectedFile&&selectedFile.size>12*1024*1024){alert('Dosya en fazla 12 MB olabilir.');selectedFile=null;$('fileInput').value=''}$('fileName').textContent=selectedFile?selectedFile.name:'Dosya seçilmedi';if(selectedFile)setStatus("Dosya hazır · sorunu yazıp Gönder'e bas")};$('imageBtn').onclick=generateImage;$('searchBtn').onclick=()=>{forceSearch=!forceSearch;$('searchBtn').style.borderColor=forceSearch?'#a78bfa':'var(--line)';setStatus(forceSearch?'Web araması açık':'Otomatik arama')};$('newChat').onclick=newChat;$('mobileNew').onclick=newChat;$('closeModal').onclick=closeModal;$('modalback').onclick=e=>{if(e.target===$('modalback'))closeModal()};
 let authMode='login';$('authSubmit').onclick=()=>auth('login');$('registerBtn').onclick=()=>auth('register');
 async function auth(mode){authMode=mode;const username=$('authUser').value.trim(),password=$('authPass').value;try{const d=await api('/api/'+mode,{method:'POST',body:JSON.stringify({username,password})});user=d.user;showArchived=false;closeModal();renderUser();newChat();loadChats()}catch(e){$('authError').textContent=e.message}}
-function openSongStudio(){if(!user){showModal();$('authError').textContent='Vokalli şarkı üretimi yalnızca Pro üyelerine açık. Önce Pro hesabına giriş yap.';return}if(user.plan!=='pro'){ $('plansBack').style.display='flex'; return }const b=$('songStudioBack');if(b)b.style.display='flex'}
+function openSongStudio(){if(!user){showModal();$('authError').textContent='Vokalli şarkı üretimi yalnızca Pro üyelerine açık. Önce Pro hesabına giriş yap.';return}if(!(['pro','plus'].includes(user.plan))){ $('plansBack').style.display='flex'; return }const b=$('songStudioBack');if(b)b.style.display='flex'}
 function closeSongStudio(){const b=$('songStudioBack');if(b)b.style.display='none'}
 async function waitForVocalSong(generationId,statusEl,player,download){const deadline=Date.now()+15*60*1000;let transientFailures=0;while(Date.now()<deadline){await new Promise(r=>setTimeout(r,6000));try{const s=await api('/api/studio/song/status/'+encodeURIComponent(generationId));transientFailures=0;if(s.status==='succeeded'&&s.audio_url){player.src=s.audio_url;player.style.display='block';download.href=s.audio_url;download.style.display='inline-block';download.style.marginTop='10px';statusEl.textContent='Şarkı hazır! Buradan dinleyebilir veya indirebilirsin.';player.load();return}if(s.status==='failed')throw new Error('Müzik motoru üretimi başarısız olarak bildirdi. eroq panelini kontrol et.');statusEl.textContent=(s.temporary_issue||'Vokalli şarkı oluşturuluyor… Durum: '+(s.status||'processing')+'.')+' Biraz sürebilir.'}catch(e){if(String(e.message||e).includes('Müzik motoru üretimi başarısız'))throw e;transientFailures++;statusEl.textContent='Müzik sunucusu geç yanıt veriyor. Otomatik tekrar deniyorum ('+transientFailures+'); aynı şarkı için yeniden üretim başlatmıyorum.';}}throw new Error('Şarkı hâlâ hazırlanıyor veya servis yavaş yanıt veriyor. Aynı şarkı için yeniden üretim başlatmadan eroq panelindeki Music geçmişini kontrol et.')}
 async function generateVocalSong(){const title=$('songTitle').value.trim()||'Tekden AI şarkısı';const style=$('songStyle').value.trim();const lyrics=$('songLyrics').value.trim();const btn=$('generateVocalSongBtn');const status=$('songStudioStatus');const player=$('songAudioPlayer');const download=$('songAudioDownload');if(!style||lyrics.length<5){status.textContent='Lütfen müzik tarzını ve şarkı sözlerini gir.';return}btn.disabled=true;btn.textContent='⏳ Şarkı üretiliyor…';status.textContent='eroq müzik motoruna istek gönderiliyor. 90 saniyelik tek üretim yaklaşık 9 kredi kullanır.';player.style.display='none';download.style.display='none';try{const d=await api('/api/studio/song/generate',{method:'POST',body:JSON.stringify({title,style,lyrics,language:'tr',duration:90})});if(!d.generation_id)throw new Error('Müzik servisi görev kimliği döndürmedi.');if(d.credits_remaining!==null&&d.credits_remaining!==undefined)status.textContent='Üretim başladı. Kalan eroq kredisi: '+d.credits_remaining+'.';await waitForVocalSong(d.generation_id,status,player,download)}catch(e){status.textContent=e.message}finally{btn.disabled=false;btn.textContent='🎵 Vokalli şarkı üret'}}
@@ -1929,13 +5222,14 @@ document.querySelectorAll('.suggestion').forEach(b=>b.onclick=()=>{const kind=b.
 $('activeChatsBtn').onclick=()=>{showArchived=false;$('activeChatsBtn').style.background='#e4f1ff';$('archivedChatsBtn').style.background='';loadChats()};$('archivedChatsBtn').onclick=()=>{if(!user){showModal();$('authError').textContent='Arşiv için giriş yapmalısın.';return}showArchived=true;$('archivedChatsBtn').style.background='#e4f1ff';$('activeChatsBtn').style.background='';loadChats()};$('profileBtn').onclick=()=>{if(user)$('profileBack').style.display='flex';else showModal()};$('profilePlansBtn').onclick=()=>{$('profileBack').style.display='none';renderUser();$('plansBack').style.display='flex'};$('closeProfile').onclick=()=>$('profileBack').style.display='none';$('profileBack').onclick=e=>{if(e.target===$('profileBack'))$('profileBack').style.display='none'};$('profileArchiveBtn').onclick=()=>{$('profileBack').style.display='none';if(!user){showModal();return}showArchived=true;$('archivedChatsBtn').style.background='#e4f1ff';$('activeChatsBtn').style.background='';loadChats()};$('profileLoginBtn').onclick=()=>{$('profileBack').style.display='none';if(!user)showModal();else alert('Hesabın açık: '+user.username)};$('profileLogoutBtn').onclick=async()=>{try{await api('/api/logout',{method:'POST'})}catch{}user=null;chatId=null;guestHistory=[];$('messages').innerHTML='';$('profileBack').style.display='none';newChat();renderUser();$('history').innerHTML=''};
 $('closePlans').onclick=()=>$('plansBack').style.display='none';$('plansBack').onclick=e=>{if(e.target===$('plansBack'))$('plansBack').style.display='none'};
 $('buyPro').onclick=async()=>{if(!user){$('plansBack').style.display='none';showModal();$('authError').textContent='Pro üyeliği için giriş yap veya kayıt ol.';return}try{const d=await api('/api/billing/checkout',{method:'POST'});if(d.url)location.href=d.url}catch(e){alert(e.message)}};
-const payState=new URLSearchParams(location.search).get('payment');if(payState==='success')setTimeout(()=>alert('Ödeme onayının hesabına yansıması webhook doğrulamasından sonra gerçekleşir.'),300);if(payState==='cancelled')setStatus('Ödeme iptal edildi');
+$('buyPlus').onclick=async()=>{if(!user){$('plansBack').style.display='none';showModal();$('authError').textContent='Plus üyeliği için giriş yap veya kayıt ol.';return}try{const d=await api('/api/billing/checkout',{method:'POST',body:JSON.stringify({plan:'plus'})});if(d.url)location.href=d.url}catch(e){alert(e.message)}};
+const payState=new URLSearchParams(location.search).get('payment');if(payState==='success')setTimeout(()=>alert('Ödeme alındıysa üyelik, Stripe webhook doğrulaması sonrasında etkinleşir.'),300);if(payState==='cancelled')setStatus('Ödeme iptal edildi');
 restoreGuestHistory();refreshMe();
 </script></body></html>"""
 
 @app.get("/kesfet", response_class=HTMLResponse)
 def discover_page():
-    return HTMLResponse("""<!doctype html><html lang='tr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Keşfet · Tekden AI</title><style>body{font:16px/1.6 system-ui;max-width:900px;margin:32px auto;padding:0 18px;color:#172b46}a,button{color:#0878f9}li{margin:8px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{border:1px solid #d8e6f6;border-radius:14px;padding:16px}</style><h1>Tekden AI ile daha fazlasını keşfet</h1><p>Sohbetten kişisel çalışma alanına kadar mevcut araçları keşfet.</p><div class='grid'><div class='card'><h2>✦ Akıllı sohbet</h2><p>Çalışma tarzına göre yanıtlar, hazır prompt kütüphanesi ve kaynaklı araştırma.</p></div><div class='card'><h2>📝 Kişisel çalışma alanı</h2><p>Notlar, kaydedilen yanıtlar ve kullanıcı tercihleri.</p></div><div class='card'><h2>📂 Sohbet düzeni</h2><p>Geçmişi ara, sohbetleri arşivle ve dışa aktar.</p></div><div class='card'><h2>♿ Erişilebilir arayüz</h2><p>Koyu tema, odak görünümü, yazı boyutu ve klavye kısayolları.</p></div><div class='card'><h2>🧩 Hazır promptlar</h2><p>Eğitim, yazı, kodlama, araştırma, planlama ve yaratıcılık için şablonlar.</p></div><div class='card'><h2>💡 Geri bildirim</h2><p>Yanıtları değerlendir ve geliştirme önerisi gönder.</p></div></div><p><a href='/'>← Tekden AI'a dön</a></p></html>""")
+    return HTMLResponse("""<!doctype html><html lang='tr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Keşfet · Tekden AI</title><style>body{font:16px/1.6 system-ui;max-width:900px;margin:32px auto;padding:0 18px;color:#172b46}a,button{color:#0878f9}li{margin:8px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{border:1px solid #d8e6f6;border-radius:14px;padding:16px}</style><h1>Tekden AI ile daha fazlasını keşfet</h1><p><b>175 çalışma aracı:</b> öğrenme, yazı, kodlama, araştırma, proje yönetimi, tasarım, verimlilik, veri analizi ve kalite kontrolü için hazır iş akışları ana sayfadaki araç kutusunda bulunur.</p><p>Sohbetten kişisel çalışma alanına kadar mevcut araçları keşfet.</p><div class='grid'><div class='card'><h2>✦ Akıllı sohbet</h2><p>Çalışma tarzına göre yanıtlar, hazır prompt kütüphanesi ve kaynaklı araştırma.</p></div><div class='card'><h2>📝 Kişisel çalışma alanı</h2><p>Notlar, kaydedilen yanıtlar ve kullanıcı tercihleri.</p></div><div class='card'><h2>📂 Sohbet düzeni</h2><p>Geçmişi ara, sohbetleri arşivle ve dışa aktar.</p></div><div class='card'><h2>♿ Erişilebilir arayüz</h2><p>Koyu tema, odak görünümü, yazı boyutu ve klavye kısayolları.</p></div><div class='card'><h2>🧩 Hazır promptlar</h2><p>Eğitim, yazı, kodlama, araştırma, planlama ve yaratıcılık için şablonlar.</p></div><div class='card'><h2>⚡ Araç kütüphanesi</h2><p>175 çalışma akışı ve hazır görev şablonunu keşfet.</p></div></div><p><a href='/'>← Tekden AI'a dön</a></p></html>""")
 
 @app.get("/pro-studio", response_class=HTMLResponse)
 def pro_studio():
@@ -1956,7 +5250,7 @@ document.querySelectorAll('[data-song]').forEach(b=>b.onclick=()=>{$('songPrompt
 async function waitForVocalSong(generationId,statusEl,player,download){const deadline=Date.now()+15*60*1000;let transientFailures=0;while(Date.now()<deadline){await new Promise(r=>setTimeout(r,6000));try{const s=await api('/api/studio/song/status/'+encodeURIComponent(generationId));transientFailures=0;if(s.status==='succeeded'&&s.audio_url){player.src=s.audio_url;player.style.display='block';download.href=s.audio_url;download.style.display='inline-block';download.style.marginTop='10px';statusEl.textContent='Şarkı hazır! Buradan dinleyebilir veya indirebilirsin.';player.load();return}if(s.status==='failed')throw new Error('Müzik motoru üretimi başarısız olarak bildirdi. eroq panelini kontrol et.');statusEl.textContent=(s.temporary_issue||'Vokalli şarkı oluşturuluyor… Durum: '+(s.status||'processing')+'.')+' Biraz sürebilir.'}catch(e){if(String(e.message||e).includes('Müzik motoru üretimi başarısız'))throw e;transientFailures++;statusEl.textContent='Müzik sunucusu geç yanıt veriyor. Otomatik tekrar deniyorum ('+transientFailures+'); aynı şarkı için yeniden üretim başlatmıyorum.';}}throw new Error('Şarkı hâlâ hazırlanıyor veya servis yavaş yanıt veriyor. Aynı şarkı için yeniden üretim başlatmadan eroq panelindeki Music geçmişini kontrol et.')}
 $('makeSong').onclick=async()=>{const title=$('songPrompt').value.trim()||'Tekden AI şarkısı';const style=$('songStylePro').value.trim();const lyrics=$('songLyricsPro').value.trim();const b=$('makeSong');if(lyrics.length<5){$('songStatus').textContent='Önce şarkı sözlerini gir.';return}b.disabled=true;b.textContent='⏳ Şarkı üretiliyor…';$('songStatus').textContent='eroq müzik motoruna istek gönderiliyor. 90 saniyelik tek üretim yaklaşık 9 kredi kullanır.';$('proSongAudio').style.display='none';$('proSongDownload').style.display='none';try{const d=await api('/api/studio/song/generate',{method:'POST',body:JSON.stringify({title,style,lyrics,language:'tr',duration:90})});if(!d.generation_id)throw new Error('Müzik servisi görev kimliği döndürmedi.');if(d.credits_remaining!==null&&d.credits_remaining!==undefined)$('songStatus').textContent='Üretim başladı. Kalan eroq kredisi: '+d.credits_remaining+'.';await waitForVocalSong(d.generation_id,$('songStatus'),$('proSongAudio'),$('proSongDownload'))}catch(e){$('songStatus').textContent=e.message}finally{b.disabled=false;b.textContent='🎵 Vokalli şarkı üret'}};
 async function api(url,opts={}){const r=await fetch(url,{...opts,credentials:'same-origin',headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.detail||'İstek başarısız oldu.');return d}
-async function check(){try{const d=await api('/api/me');if(!d.user){location.href='/?login=1';return}if(d.user.plan!=='pro'){document.body.innerHTML=`<main style="max-width:700px;margin:12vh auto;padding:24px;font:16px system-ui"><h1>Bu alan Pro üyelerine özel</h1><p>Pro üyeliğinle giriş yaparak bu stüdyoyu kullanabilirsin.</p><button onclick="location.href='/'">Ana sayfaya dön</button></main>`;return}}catch(e){location.href='/?login=1'}}
+async function check(){try{const d=await api('/api/me');if(!d.user){location.href='/?login=1';return}if(d.!(['pro','plus'].includes(user.plan))){document.body.innerHTML=`<main style="max-width:700px;margin:12vh auto;padding:24px;font:16px system-ui"><h1>Bu alan Pro üyelerine özel</h1><p>Pro üyeliğinle giriş yaparak bu stüdyoyu kullanabilirsin.</p><button onclick="location.href='/'">Ana sayfaya dön</button></main>`;return}}catch(e){location.href='/?login=1'}}
 document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{$('prompt').value=b.dataset.p;$('prompt').focus()});$('clear').onclick=()=>{$('prompt').value='';$('prompt').focus()};
 $('generate').onclick=async()=>{const prompt=$('prompt').value.trim();if(prompt.length<3){$('status').textContent='Önce oyunu biraz tarif et.';return}const btn=$('generate');btn.disabled=true;btn.textContent='⏳ Oyun hazırlanıyor…';$('status').textContent='Pro modeli oyun kodunu oluşturuyor. Bu işlem biraz sürebilir…';try{const d=await api('/api/game',{method:'POST',body:JSON.stringify({prompt})});currentHtml=d.html;$('preview').innerHTML='';frame=document.createElement('iframe');frame.title='Oynanabilir oyun';frame.setAttribute('sandbox','allow-scripts allow-pointer-lock');frame.srcdoc=currentHtml;$('preview').appendChild(frame);$('tools').style.display='flex';$('status').textContent='Oyun hazır. Kontrolleri deneyebilir, tam ekran açabilir veya HTML indirebilirsin.'}catch(e){$('status').textContent='Oyun oluşturulamadı: '+e.message}finally{btn.disabled=false;btn.textContent='✦ Oyunu oluştur'}};
 $('fullscreen').onclick=()=>frame?.requestFullscreen?.();$('download').onclick=()=>{const a=document.createElement('a'),url=URL.createObjectURL(new Blob([currentHtml],{type:'text/html;charset=utf-8'}));a.href=url;a.download='tekden-ai-pro-oyunu.html';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};check();
@@ -1978,4 +5272,1932 @@ def privacy_page():
 @app.get("/iletisim", response_class=HTMLResponse)
 def contact_page():
     return HTMLResponse("""<!doctype html><html lang='tr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>İletişim · Tekden AI</title><style>body{font:16px/1.7 system-ui;max-width:850px;margin:40px auto;padding:0 20px;color:#17304f}a{color:#0878f9}</style><h1>İletişim</h1><p>Tekden AI ile ilgili destek, hata bildirimi, gizlilik veya içerik talepleriniz için proje sahibine ait, düzenli kontrol edilen bir iletişim e-posta adresi eklenmelidir.</p><p><strong>Not:</strong> Yayına almadan önce bu sayfaya gerçek ve erişilebilir bir destek e-posta adresi ekleyin.</p><p><a href='/'>Ana sayfaya dön</a> · <a href='/gizlilik'>Gizlilik Politikası</a></p></html>""")
+
+
+
+# ----------------------- Tekden AI 175 workflow catalog notes -----------------------
+# Feature 001: Ders konusunu seviyeme göre anlat
+# Category: Öğrenme
+# Purpose: Bir konuyu temel kavramlardan başlayıp örnekler, mini test ve özetle öğret.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 002: Sınava hazırlık planı
+# Category: Öğrenme
+# Purpose: Sınav tarihime ve konularıma göre günlük çalışma planı, tekrar ve deneme aşamaları oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 003: Konu anlatım kartları
+# Category: Öğrenme
+# Purpose: Verdiğim materyalden kısa soru-cevap kartları ve hatırlama ipuçları üret.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 004: Sokratik öğretmen
+# Category: Öğrenme
+# Purpose: Yanıtı hemen verme; küçük yönlendirici sorularla kendim bulmama yardım et.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 005: Yanlışlarımı analiz et
+# Category: Öğrenme
+# Purpose: Çözümlerimdeki hataları sınıflandır, nedenlerini açıkla ve benzer alıştırmalar üret.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 006: Matematik adım adım
+# Category: Öğrenme
+# Purpose: Problemi ara işlemleri ve kontrol yöntemiyle adım adım çöz; sonucu doğrula.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 007: Fen deney raporu taslağı
+# Category: Öğrenme
+# Purpose: Deney amacı, hipotez, değişkenler, yöntem, gözlem ve sonuç başlıklarıyla rapor taslağı hazırla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 008: Dil bilgisi alıştırması
+# Category: Öğrenme
+# Purpose: Seviyeme uygun dil bilgisi soruları üret; cevap anahtarını ayrı ver.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 009: Kelime öğrenme seti
+# Category: Öğrenme
+# Purpose: Verdiğim kelimeler için anlam, örnek cümle, eş anlam ve kısa test hazırla.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 010: Tarih zaman çizelgesi
+# Category: Öğrenme
+# Purpose: Konu olaylarını kronolojik sıraya koy; neden-sonuç ilişkilerini belirt.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 011: Edebî tür karşılaştırması
+# Category: Öğrenme
+# Purpose: İki edebî türü amaç, yapı, dil ve örnek özellikler bakımından karşılaştır.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 012: Sunum konuşma provası
+# Category: Öğrenme
+# Purpose: Sunumumu dinleyici soruları, süre ve anlaşılabilirlik açısından prova ettir.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 013: Okuma anlama testi
+# Category: Öğrenme
+# Purpose: Metnimden farklı zorluklarda anlama, çıkarım ve kelime soruları hazırla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 014: Kişisel sözlük
+# Category: Öğrenme
+# Purpose: Metindeki önemli terimleri sade tanım ve örneklerle sözlük hâline getir.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 015: Haftalık tekrar sistemi
+# Category: Öğrenme
+# Purpose: Öğrendiğim konular için aralıklı tekrar takvimi ve kısa kontrol noktaları tasarla.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 016: E-posta taslağı
+# Category: Yazı
+# Purpose: Amacıma ve alıcıya uygun, net konu satırlı bir e-posta taslağı hazırla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 017: Metin sadeleştirici
+# Category: Yazı
+# Purpose: Metni anlamını koruyarak daha sade, kısa ve akıcı hâle getir.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 018: Yazım denetimi
+# Category: Yazı
+# Purpose: Yazım, noktalama ve anlatım bozukluklarını işaretle; düzeltmeleri açıkla.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 019: Farklı tonlarda yaz
+# Category: Yazı
+# Purpose: Metni resmî, samimi ve ikna edici tonlarda ayrı ayrı yeniden yaz.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 020: Blog yazısı planı
+# Category: Yazı
+# Purpose: Hedef kitle, ana fikir, ara başlıklar ve sonuç içeren özgün yazı taslağı oluştur.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 021: Hikâye iskeleti
+# Category: Yazı
+# Purpose: Karakter, hedef, çatışma, dönüm noktası ve finalden oluşan hikâye planı hazırla.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 022: Karakter profili
+# Category: Yazı
+# Purpose: Karakterin motivasyonu, güçlü yönü, kusuru, geçmişi ve gelişim çizgisini oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 023: Başlık üreticisi
+# Category: Yazı
+# Purpose: İçeriğim için merak uyandıran ama yanıltıcı olmayan 15 başlık öner.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 024: Özet çıkarıcı
+# Category: Yazı
+# Purpose: Metni ana fikir, destekleyici noktalar ve sonuç olarak üç seviyede özetle.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 025: Metin karşılaştırıcı
+# Category: Yazı
+# Purpose: İki metnin ortak yönlerini, farklılıklarını, tonunu ve eksiklerini karşılaştır.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 026: İkna metni oluştur
+# Category: Yazı
+# Purpose: Hedef kitleyi ve kanıtlanabilir faydaları dikkate alan dürüst bir ikna metni yaz.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 027: Sosyal medya gönderisi
+# Category: Yazı
+# Purpose: Platforma uygun kısa gönderi, alternatif açılış ve erişilebilir açıklama üret.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 028: Video senaryo taslağı
+# Category: Yazı
+# Purpose: Giriş, sahneler, anlatıcı metni ve kapanış içeren video senaryosu hazırla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 029: Basın duyurusu
+# Category: Yazı
+# Purpose: Kim, ne, nerede, ne zaman, neden ve nasıl sorularını yanıtlayan duyuru hazırla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 030: Toplantı tutanağı
+# Category: Yazı
+# Purpose: Notları kararlar, sorumlular, son tarihler ve açık sorular biçiminde düzenle.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 031: Kod incelemesi
+# Category: Kodlama
+# Purpose: Kodu hata, güvenlik, performans ve okunabilirlik açısından incele; öncelikli düzeltmeleri sırala.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 032: Hata ayıklama planı
+# Category: Kodlama
+# Purpose: Hata mesajını olası nedenler, doğrulama adımları ve en küçük düzeltme şeklinde analiz et.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 033: API tasarımcısı
+# Category: Kodlama
+# Purpose: Uç noktalar, istek/yanıt şemaları, hata kodları ve kimlik doğrulama öner.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 034: Veritabanı şeması
+# Category: Kodlama
+# Purpose: Varlıklar, ilişkiler, indeksler ve geçiş planı içeren güvenli şema taslağı oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 035: Test senaryosu üret
+# Category: Kodlama
+# Purpose: Normal, sınır, hata ve yetki senaryoları için test listesi hazırla.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 036: Birim test taslağı
+# Category: Kodlama
+# Purpose: Verdiğim fonksiyon için bağımlılıkları izole eden birim testler yaz.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 037: Performans incelemesi
+# Category: Kodlama
+# Purpose: Darboğaz ihtimallerini belirle; ölçüm yöntemi ve düşük riskli optimizasyon öner.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 038: Güvenli kod kontrolü
+# Category: Kodlama
+# Purpose: Girdi doğrulama, yetki, sırlar, hata mesajları ve veri sızıntısı risklerini denetle.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 039: README oluşturucu
+# Category: Kodlama
+# Purpose: Proje kurulum, yapılandırma, kullanım, test ve dağıtım adımlarını README olarak yaz.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 040: Git commit mesajı
+# Category: Kodlama
+# Purpose: Değişiklik özetinden kısa, anlamlı ve standart biçimli commit mesajı üret.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 041: SQL sorgu açıklayıcı
+# Category: Kodlama
+# Purpose: SQL sorgusunu bölüm bölüm açıkla ve indeks/performans risklerini belirt.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 042: Regex yardımcısı
+# Category: Kodlama
+# Purpose: İhtiyacıma uygun regex üret; eşleşen ve eşleşmeyen örneklerle açıkla.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 043: JSON doğrulama
+# Category: Kodlama
+# Purpose: JSON yapısını kontrol et, hataları göster ve geçerli sürümünü oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 044: HTML erişilebilirlik
+# Category: Kodlama
+# Purpose: HTML arayüzünü semantik etiket, klavye ve ekran okuyucu açısından denetle.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 045: CSS düzenleme
+# Category: Kodlama
+# Purpose: CSS sorununu en az yan etkiyle çöz; mobil ve masaüstü davranışını açıkla.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 046: Refaktör planı
+# Category: Kodlama
+# Purpose: Davranışı koruyarak kodu küçük ve test edilebilir adımlarla sadeleştir.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 047: Mimari karar kaydı
+# Category: Kodlama
+# Purpose: Seçenekler, karar, gerekçeler, riskler ve geri dönüş planı içeren ADR yaz.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 048: Sürüm notları
+# Category: Kodlama
+# Purpose: Değişiklikleri yeni özellik, düzeltme ve uyumluluk başlıklarıyla sürüm notuna dönüştür.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 049: CLI komut tasarımı
+# Category: Kodlama
+# Purpose: Kullanıcı dostu komut satırı aracı için seçenek, yardım ve hata davranışları tasarla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 050: Webhook güvenliği
+# Category: Kodlama
+# Purpose: Webhook doğrulama, tekrar gönderim, idempotency ve loglama planı oluştur.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 051: Kaynaklı araştırma planı
+# Category: Araştırma
+# Purpose: Araştırma sorusunu alt sorulara böl; güvenilir kaynak türleri ve doğrulama ölçütleri öner.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 052: İddia doğrulama tablosu
+# Category: Araştırma
+# Purpose: İddiaları kanıt, kaynak, tarih ve güven düzeyi alanlarıyla kontrol tablosuna dönüştür.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 053: Kaynak kalitesi denetimi
+# Category: Araştırma
+# Purpose: Kaynağın yazarı, tarihi, yöntemi, çıkar çatışması ve birincil kaynak niteliğini değerlendir.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 054: Literatür taraması taslağı
+# Category: Araştırma
+# Purpose: Konuyu temalara ayır; benzerlikleri, çelişkileri ve araştırma boşluklarını çıkar.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 055: Karşılaştırmalı ürün analizi
+# Category: Araştırma
+# Purpose: Ürünleri ölçüt, kanıt, avantaj, sınırlama ve uygun kullanıcı açısından karşılaştır.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 056: Pazar araştırması soruları
+# Category: Araştırma
+# Purpose: Hedef kitleyi anlamaya yönelik tarafsız anket ve görüşme soruları tasarla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 057: Rakip analizi çerçevesi
+# Category: Araştırma
+# Purpose: Rakipleri ürün, kullanıcı deneyimi, fiyatlandırma ve farklılaşma bakımından inceleme planı kur.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 058: Veri kümesi sözlüğü
+# Category: Araştırma
+# Purpose: Veri sütunlarını tanımla; tür, birim, eksik değer ve olası kalite sorunlarını listele.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 059: Anket sonuçlarını yorumla
+# Category: Araştırma
+# Purpose: Paylaşılan sonuçları örneklem ve sınırlılıkları belirterek temkinli yorumla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 060: Hipotez test planı
+# Category: Araştırma
+# Purpose: Hipotez, ölçülebilir değişken, veri ihtiyacı ve yanlışlanma koşullarını tanımla.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 061: Teknik doküman özeti
+# Category: Araştırma
+# Purpose: Teknik dokümanı amaç, mimari, gereksinimler, riskler ve kararlar şeklinde özetle.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 062: Kaynakça düzenleme
+# Category: Araştırma
+# Purpose: Verilen kaynak bilgilerini seçilen atıf biçimine göre tutarlı biçimde düzenle.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 063: Bilgi boşluğu tespiti
+# Category: Araştırma
+# Purpose: Elimdeki bilginin hangi soruları yanıtlamadığını ve hangi ek kanıta ihtiyaç olduğunu belirle.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 064: Senaryo analizi
+# Category: Araştırma
+# Purpose: En iyi, temel ve kötü senaryoları varsayımlarıyla birlikte kur; hassasiyetleri belirt.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 065: Risk matrisi
+# Category: Araştırma
+# Purpose: Riskleri olasılık, etki, erken uyarı ve azaltma planıyla matrise yerleştir.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 066: Proje yol haritası
+# Category: İş ve proje
+# Purpose: Hedefleri kilometre taşlarına, bağımlılıklara, sahiplerine ve kabul ölçütlerine böl.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 067: Görev önceliklendirici
+# Category: İş ve proje
+# Purpose: Görevleri etki, aciliyet, efor ve bağımlılıklara göre sıralayıp gerekçelendir.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 068: Haftalık plan
+# Category: İş ve proje
+# Purpose: Zaman kısıtları ve önceliklere göre gerçekçi bir haftalık çalışma planı oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 069: Toplantı gündemi
+# Category: İş ve proje
+# Purpose: Amaç, süre, karar beklenen konular ve hazırlık materyalleri içeren gündem yaz.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 070: Karar günlüğü
+# Category: İş ve proje
+# Purpose: Kararları tarih, seçenekler, gerekçe, sorumlu ve yeniden değerlendirme tarihiyle düzenle.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 071: İş akışı iyileştirme
+# Category: İş ve proje
+# Purpose: Mevcut iş akışındaki tekrarları, beklemeleri ve otomasyon fırsatlarını belirle.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 072: SOP hazırlayıcı
+# Category: İş ve proje
+# Purpose: Tekrarlanan işi rol, ön koşul, adımlar, kontrol noktaları ve hata çözümüyle dokümante et.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 073: Kabul kriterleri yaz
+# Category: İş ve proje
+# Purpose: Özellik talebini test edilebilir kabul kriterlerine ve istisnalara dönüştür.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 074: Kullanıcı hikâyesi
+# Category: İş ve proje
+# Purpose: Kullanıcı, ihtiyaç ve fayda formatında hikâye ve kabul koşulları yaz.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 075: Sprint planlama
+# Category: İş ve proje
+# Purpose: Takım kapasitesi ve önceliklere göre sprint hedefi, görevler ve riskler oluştur.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 076: Retrospektif kolaylaştırıcı
+# Category: İş ve proje
+# Purpose: Neyi sürdürmeli, bırakmalı ve denemeli sorularıyla uygulanabilir retrospektif hazırla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 077: Müşteri görüşmesi
+# Category: İş ve proje
+# Purpose: Müşteri ihtiyacını yönlendirmeden keşfeden soru akışı oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 078: Destek yanıtı taslağı
+# Category: İş ve proje
+# Purpose: Müşteri sorununa empatik, net ve çözüm adımları içeren yanıt yaz.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 079: Teklif taslağı
+# Category: İş ve proje
+# Purpose: Kapsam, teslimatlar, varsayımlar, zaman planı ve kapsam dışı maddeleri içeren teklif oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 080: İş gereksinimi belgesi
+# Category: İş ve proje
+# Purpose: Amaç, kullanıcılar, kapsam, gereksinimler, ölçütler ve riskleri dokümante et.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 081: İş sürekliliği planı
+# Category: İş ve proje
+# Purpose: Önemli sistemler, kurtarma öncelikleri, sorumlular ve iletişim planı taslağı oluştur.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 082: KPI tasarımcısı
+# Category: İş ve proje
+# Purpose: Hedefe bağlı ölçülebilir göstergeler, formül, veri kaynağı ve takip sıklığı öner.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 083: Ürün lansman kontrol listesi
+# Category: İş ve proje
+# Purpose: Lansman öncesi ürün, destek, dokümantasyon, iletişim ve geri dönüş kontrolleri hazırla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 084: Değişiklik etki analizi
+# Category: İş ve proje
+# Purpose: Bir değişikliğin kullanıcı, sistem, maliyet, takvim ve güvenlik etkilerini çıkar.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 085: Süreç haritası
+# Category: İş ve proje
+# Purpose: Süreci adım, karar, sorumlu ve girdiler/çıktılar olarak haritala.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 086: Arayüz değerlendirmesi
+# Category: Tasarım
+# Purpose: Arayüzü hiyerarşi, okunabilirlik, tutarlılık, mobil kullanım ve erişilebilirlik açısından incele.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 087: Renk paleti önerisi
+# Category: Tasarım
+# Purpose: Marka kişiliğine göre ana, yardımcı, vurgu ve nötr renkler öner; kontrastı gözet.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 088: Tasarım sistemi taslağı
+# Category: Tasarım
+# Purpose: Renk, tipografi, boşluk, bileşen ve etkileşim kuralları içeren tasarım sistemi oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 089: Kullanıcı akışı
+# Category: Tasarım
+# Purpose: Kullanıcının hedefinden sonuca kadar ekranlar, kararlar ve hata durumlarını çizelgele.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 090: Erişilebilirlik kontrolü
+# Category: Tasarım
+# Purpose: Klavye odağı, kontrast, etiketler, hata mesajları ve alternatif metinleri denetle.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 091: Mobil düzen kontrolü
+# Category: Tasarım
+# Purpose: Dar ekranlarda taşma, hedef boyutu, metin uzunluğu ve gezinme sorunlarını tespit et.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 092: Mikro metin yazarı
+# Category: Tasarım
+# Purpose: Buton, boş durum, hata ve başarı mesajları için kısa, tutarlı mikro metin üret.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 093: Kullanıcı testi senaryosu
+# Category: Tasarım
+# Purpose: Kullanıcıyı yönlendirmeyen görevler, gözlem soruları ve başarı ölçütleri hazırla.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 094: Marka ses rehberi
+# Category: Tasarım
+# Purpose: Marka tonu, kelime tercihleri, kaçınılacak ifadeler ve örnek mesajlar tanımla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 095: Landing page planı
+# Category: Tasarım
+# Purpose: Değer önerisi, kanıt, özellikler, sık sorulan sorular ve çağrı eylemini düzenle.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 096: Boş durum tasarımı
+# Category: Tasarım
+# Purpose: İçerik bulunmayan ekranlar için açıklama, ilk adım ve yardımcı bağlantı metni oluştur.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 097: Hata durumları tasarımı
+# Category: Tasarım
+# Purpose: Hataları kullanıcıya anlaşılır anlatan ve güvenli toparlanma sağlayan mesajlar yaz.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 098: İçerik hiyerarşisi
+# Category: Tasarım
+# Purpose: İçeriği kullanıcı önceliğine göre başlık, alt başlık, açıklama ve eylemlere ayır.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 099: İkon kullanım rehberi
+# Category: Tasarım
+# Purpose: İkonların anlam, boyut, hizalama ve metin etiketi kurallarını tanımla.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 100: Tasarım eleştirisi
+# Category: Tasarım
+# Purpose: Tasarım kararlarını gözlem, kullanıcı etkisi ve uygulanabilir önerilerle değerlendir.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 101: Beyin fırtınası
+# Category: Yaratıcılık
+# Purpose: Kısıtlarıma göre birbirinden farklı fikirler üret ve uygulanabilirliğe göre grupla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 102: Alternatif konseptler
+# Category: Yaratıcılık
+# Purpose: Aynı amaç için minimalist, cesur ve deneysel üç ayrı konsept geliştir.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 103: Özgün karakter üret
+# Category: Yaratıcılık
+# Purpose: Karakterin görünüşünü, motivasyonunu, çatışmasını ve ayırt edici özelliğini tasarla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 104: Dünya kurma
+# Category: Yaratıcılık
+# Purpose: Kurgusal dünyanın kuralları, coğrafyası, kültürü ve çatışmalarını tutarlı biçimde oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 105: Şarkı fikri geliştir
+# Category: Yaratıcılık
+# Purpose: Tür, tema, duygu, yapı ve özgün söz fikri öner; var olan şarkıları taklit etme.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 106: Podcast bölüm planı
+# Category: Yaratıcılık
+# Purpose: Açılış, konu blokları, geçişler, sorular ve kapanış içeren bölüm planı yaz.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 107: Reklam konsepti
+# Category: Yaratıcılık
+# Purpose: Hedef kitle ve gerçek faydayı merkeze alan farklı reklam konseptleri oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 108: İsim bulucu
+# Category: Yaratıcılık
+# Purpose: Proje için telaffuzu kolay, anlamı açıklanabilir isimler ve seçim ölçütleri öner.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 109: Etkinlik konsepti
+# Category: Yaratıcılık
+# Purpose: Hedef, katılımcı, akış, ihtiyaç listesi ve erişilebilirlik detaylarıyla etkinlik tasarla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 110: Oyun mekaniği fikirleri
+# Category: Yaratıcılık
+# Purpose: Özgün oyun döngüsü, hedefler, zorluk artışı ve ödül sistemleri öner.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 111: Hikâye sahnesi
+# Category: Yaratıcılık
+# Purpose: Sahnenin amacı, gerilimi, karakter eylemleri ve geçişini özgün şekilde yaz.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 112: Görsel üretim promptu
+# Category: Yaratıcılık
+# Purpose: Konu, kompozisyon, ışık, malzeme, kamera ve istenmeyen öğeleri içeren net prompt hazırla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 113: Storyboard planı
+# Category: Yaratıcılık
+# Purpose: Sahneleri kare numarası, görsel eylem, kamera, ses ve süreyle sırala.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 114: İçerik takvimi
+# Category: Yaratıcılık
+# Purpose: Kanal ve hedefe göre sürdürülebilir konu, format ve yayın takvimi oluştur.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 115: Marka sloganları
+# Category: Yaratıcılık
+# Purpose: Markanın gerçek değerini yansıtan kısa sloganlar üret ve tonlarını karşılaştır.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 116: İsimlendirme sistemi
+# Category: Yaratıcılık
+# Purpose: Özellik, sürüm ve içerik adları için tutarlı isimlendirme kuralları geliştir.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 117: Günlük planlayıcı
+# Category: Verimlilik
+# Purpose: Bugünkü görevleri süre, enerji ve önceliğe göre gerçekçi sıraya koy.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 118: Odak oturumu
+# Category: Verimlilik
+# Purpose: Bir görevi küçük odak bloklarına böl; dikkat dağıtıcılar için önlem öner.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 119: Karar matrisi
+# Category: Verimlilik
+# Purpose: Seçenekleri ağırlıklı ölçütlerle karşılaştır; varsayımları ve belirsizliği belirt.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 120: E-posta yanıt kuyruğu
+# Category: Verimlilik
+# Purpose: Mesajları aciliyet ve gerekli eyleme göre sınıflandır; yanıt taslakları hazırla.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 121: Bilgi düzenleyici
+# Category: Verimlilik
+# Purpose: Dağınık notları temalara, kararlara, görevlere ve açık sorulara ayır.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 122: Tekrarlı görev otomasyonu
+# Category: Verimlilik
+# Purpose: Tekrarlanan işi tetikleyici, adımlar, hata durumu ve güvenlik kontrolüyle tarif et.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 123: Kişisel hedef planı
+# Category: Verimlilik
+# Purpose: Hedefi ölçülebilir ara adımlara ve haftalık gözden geçirme sorularına dönüştür.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 124: Alışkanlık gözden geçirme
+# Category: Verimlilik
+# Purpose: Bir alışkanlığı sürdürülebilirlik, tetikleyici ve çevresel destek açısından değerlendir.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 125: Dosya adlandırma planı
+# Category: Verimlilik
+# Purpose: Dosyalar için tarih, proje, sürüm ve içerik içeren tutarlı adlandırma standardı öner.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 126: Notlardan görev çıkar
+# Category: Verimlilik
+# Purpose: Metindeki eylemleri sorumlu, son tarih, bağımlılık ve durum alanlarına ayır.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 127: Haftalık değerlendirme
+# Category: Verimlilik
+# Purpose: Tamamlanan işler, engeller, öğrenimler ve gelecek hafta önceliklerini özetle.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 128: Bilgi tabanı makalesi
+# Category: Verimlilik
+# Purpose: Tekrarlanan soruya adım adım çözüm ve sorun giderme içeren bilgi tabanı yazısı hazırla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 129: Kontrol listesi üret
+# Category: Verimlilik
+# Purpose: Bir işi atlanabilir adımlara böl ve son kontrol maddeleri ekle.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 130: Kişisel çalışma protokolü
+# Category: Verimlilik
+# Purpose: Çalışma hedefi, bildirim sınırları, mola ve gün sonu kapanış rutini tasarla.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 131: Süre tahmini
+# Category: Verimlilik
+# Purpose: Görevi parçalara böl, süre aralıkları ve tahmini etkileyen belirsizlikleri açıkla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 132: Öncelik çatışması çöz
+# Category: Verimlilik
+# Purpose: Çakışan işleri etki, son tarih ve maliyet üzerinden değerlendir; seçenekler sun.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 133: Öğrenme günlüğü
+# Category: Verimlilik
+# Purpose: Bugünkü öğrenmeyi ana fikir, kanıt, soru ve bir sonraki deneme olarak kaydet.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 134: Araştırma notu düzenle
+# Category: Verimlilik
+# Purpose: Kaynak notlarını bulgu, alıntı, yorum ve doğrulanması gereken nokta olarak ayır.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 135: Kişisel dashboard gereksinimi
+# Category: Verimlilik
+# Purpose: Takip etmek istediğim hedefler için gösterge, veri kaynağı ve güncelleme sıklığı tasarla.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 136: Gün sonu kapanışı
+# Category: Verimlilik
+# Purpose: Açık işleri toparlayan, yarına hazırlık yapan ve gerçekçi kapanış rutini oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 137: CSV analiz planı
+# Category: Veri ve analiz
+# Purpose: Veri yapısı, eksik değerler, dağılımlar ve olası ilişki analizleri için plan çıkar.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 138: Grafik seçici
+# Category: Veri ve analiz
+# Purpose: Veri türü ve soruya göre uygun grafik türünü ve yanlış yorum risklerini öner.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 139: Veri kalite kontrolü
+# Category: Veri ve analiz
+# Purpose: Eksik, yinelenen, aykırı ve tutarsız kayıtlar için kontrol kuralları yaz.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 140: İstatistik sonucu açıklama
+# Category: Veri ve analiz
+# Purpose: Verilen istatistikleri birim, örneklem, belirsizlik ve sınırlılıklarla sadeleştir.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 141: Deney sonuçları raporu
+# Category: Veri ve analiz
+# Purpose: Yöntem, ölçümler, bulgular, belirsizlik ve sonraki adımları raporlaştır.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 142: Gösterge paneli tasarımı
+# Category: Veri ve analiz
+# Purpose: Kullanıcı sorularına göre KPI kartları, filtreler, grafikler ve uyarı alanları tasarla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 143: Tahmin varsayımları
+# Category: Veri ve analiz
+# Purpose: Tahmin modelinin girdileri, varsayımları, hata kaynakları ve doğrulama planını belirle.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 144: Anomali inceleme
+# Category: Veri ve analiz
+# Purpose: Olağandışı değerler için olası nedenleri ve doğrulama adımlarını sırala.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 145: A/B testi planı
+# Category: Veri ve analiz
+# Purpose: Hipotez, varyantlar, ölçüt, örneklem ihtiyacı ve durdurma kuralları tasarla.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 146: Rapor yönetici özeti
+# Category: Veri ve analiz
+# Purpose: Uzun raporu bulgu, etki, risk ve önerilen eylemler şeklinde özetle.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 147: Zor konuşma hazırlığı
+# Category: İletişim
+# Purpose: Amacımı, somut gözlemleri, soruları ve yapıcı sınırları içeren konuşma planı hazırla.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 148: Geri bildirim cümleleri
+# Category: İletişim
+# Purpose: Davranışa odaklanan, somut ve saygılı geri bildirim seçenekleri yaz.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 149: Müzakere hazırlığı
+# Category: İletişim
+# Purpose: Hedef, alternatifler, taviz alanları ve sorulacak sorular için hazırlık planı oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 150: Sunum slayt iskeleti
+# Category: İletişim
+# Purpose: Her slayt için tek ana mesaj, kanıt ve konuşmacı notu öner.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 151: Soru-cevap hazırlığı
+# Category: İletişim
+# Purpose: Sunum veya proje için zor soruları ve kanıta dayalı yanıt taslaklarını hazırla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 152: Karmaşık konuyu sadeleştir
+# Category: İletişim
+# Purpose: Konuyu teknik olmayan kitleye benzetmeler ve sınırlarıyla açıkla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 153: Çok dilli çeviri kontrolü
+# Category: İletişim
+# Purpose: Çeviride anlam, ton, kültürel uygunluk ve terim tutarlılığını incele.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 154: Müşteri e-postası tonu
+# Category: İletişim
+# Purpose: E-postayı empatik ve profesyonel hâle getir; vaatleri doğrulanabilir tut.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 155: Kısa biyografi
+# Category: İletişim
+# Purpose: Amaca uygun, gerçek bilgilere bağlı kısa ve uzun biyografi seçenekleri oluştur.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 156: Soru listesi hazırlayıcı
+# Category: İletişim
+# Purpose: Görüşme veya toplantı hedefime ulaşmak için öncelikli sorular üret.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 157: Gizlilik kontrol listesi
+# Category: Güvenlik ve kalite
+# Purpose: Toplanan verileri, amaçları, saklama süresini ve kullanıcı kontrolünü gözden geçir.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 158: Tehdit modellemesi
+# Category: Güvenlik ve kalite
+# Purpose: Varlıklar, güven sınırları, tehdit aktörleri ve azaltıcı kontrolleri listele.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 159: Yedekleme stratejisi
+# Category: Güvenlik ve kalite
+# Purpose: Kurtarma hedefleri, yedek sıklığı, saklama ve geri yükleme test planı öner.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 160: Olay sonrası inceleme
+# Category: Güvenlik ve kalite
+# Purpose: Suçlayıcı olmayan olay raporu, zaman çizelgesi, kök neden ve takip görevleri hazırla.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 161: Kullanıcı yetkisi denetimi
+# Category: Güvenlik ve kalite
+# Purpose: Rol ve izinleri en az ayrıcalık ilkesine göre gözden geçir.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 162: Dağıtım kontrol listesi
+# Category: Güvenlik ve kalite
+# Purpose: Test, yapılandırma, gizli anahtarlar, sağlık kontrolü ve geri alma adımlarını listele.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 163: Bağımlılık risk özeti
+# Category: Güvenlik ve kalite
+# Purpose: Bağımlılık listesinden güncelleme, lisans ve bakım risklerini araştırmak için kontrol planı çıkar.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 164: Hata mesajı güvenliği
+# Category: Güvenlik ve kalite
+# Purpose: Hata mesajlarının sır veya kişisel veri sızdırıp sızdırmadığını incele.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 165: Kurtarma tatbikatı
+# Category: Güvenlik ve kalite
+# Purpose: Hizmet kesintisi için senaryo, sorumlular, adımlar ve başarı ölçütleri hazırla.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 166: Kalite kapısı tasarımı
+# Category: Güvenlik ve kalite
+# Purpose: Yayına çıkış için test, erişilebilirlik, performans ve güvenlik kabul eşikleri öner.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 167: Kullanıcı persona taslağı
+# Category: Ürün geliştirme
+# Purpose: Verilen araştırma bulgularından varsayımları açıkça işaretleyerek kullanıcı profilleri oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 168: İhtiyaçtan özelliğe
+# Category: Ürün geliştirme
+# Purpose: Kullanıcı sorununu problem tanımı, kanıt, çözüm seçenekleri ve ölçülebilir sonuçlara çevir.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 169: Özellik önceliklendirme
+# Category: Ürün geliştirme
+# Purpose: Özellikleri kullanıcı etkisi, maliyet, risk ve stratejik uyum üzerinden sırala.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 170: Kullanıcı geri bildirim sentezi
+# Category: Ürün geliştirme
+# Purpose: Geri bildirimleri temalara ayır; tekrar eden sorun ve kanıt gücünü belirt.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 171: Ürün gereksinim belgesi
+# Category: Ürün geliştirme
+# Purpose: Amaç, kapsam, kullanıcı hikâyeleri, analitik olaylar ve kabul koşulları yaz.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 172: Deney tasarımı
+# Category: Ürün geliştirme
+# Purpose: Ürün varsayımını düşük maliyetli bir deneyle doğrulama planı oluştur.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 173: Aktivasyon akışı
+# Category: Ürün geliştirme
+# Purpose: Yeni kullanıcının ilk değer anına ulaşmasını sağlayan adımları tasarla.
+# Suggested plan segment: Free
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 174: Elde tutma fikirleri
+# Category: Ürün geliştirme
+# Purpose: Kullanıcıya gerçek değer sunan geri dönüş sebepleri ve ölçüm yöntemleri öner.
+# Suggested plan segment: Pro
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
+
+# Feature 175: Ürün içi yardım metni
+# Category: Ürün geliştirme
+# Purpose: Kısa açıklamalar, ilk kullanım adımları ve bağlamsal yardım metinleri hazırla.
+# Suggested plan segment: Plus
+# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# User control: this template only fills the prompt composer; the user decides whether to send it.
+# Privacy: template content is not sent until the user presses the existing Send button.
+# Compatibility: this uses the existing homepage composer and current chat API.
+# Reliability: avoid claiming that external actions completed unless a connected service confirms it.
+# Maintenance: revise the prompt and label together when changing this workflow.
 
