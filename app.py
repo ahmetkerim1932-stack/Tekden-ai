@@ -36,6 +36,9 @@ SESSION_DAYS = 30
 
 app = FastAPI(title=APP_NAME)
 
+@app.get("/google60fefbe52fe7bb22.html", response_class=HTMLResponse)
+def google_site_verification():
+    return "google-site-verification: google60fefbe52fe7bb22.html"
 def db():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL eksik. Supabase PostgreSQL bağlantısını Render Environment bölümüne ekle.")
