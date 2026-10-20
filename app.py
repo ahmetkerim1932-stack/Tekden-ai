@@ -36,9 +36,11 @@ SESSION_DAYS = 30
 
 app = FastAPI(title=APP_NAME)
 
-@app.get("/google60fefbe52fe7bb22.html", response_class=HTMLResponse)
+# Google Search Console HTML-file verification (keep filename and body exact).
+@app.get("/google60fefbe52fe7bb22.html", response_class=HTMLResponse, include_in_schema=False)
 def google_site_verification():
     return "google-site-verification: google60fefbe52fe7bb22.html"
+
 def db():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL eksik. Supabase PostgreSQL bağlantısını Render Environment bölümüne ekle.")
@@ -148,9 +150,9 @@ def init_db():
         if OWNER_PASSWORD and len(OWNER_PASSWORD) >= 8 and OWNER_USERNAME:
             owner = conn.execute("SELECT id FROM users WHERE lower(username)=lower(%s)", (OWNER_USERNAME,)).fetchone()
             if owner:
-                conn.execute("UPDATE users SET plan='pro', password_hash=%s WHERE id=%s", (hash_password(OWNER_PASSWORD), owner["id"]))
+                conn.execute("UPDATE users SET plan='plus', password_hash=%s WHERE id=%s", (hash_password(OWNER_PASSWORD), owner["id"]))
             else:
-                conn.execute("INSERT INTO users(username,password_hash,plan) VALUES(%s,%s,'pro')", (OWNER_USERNAME, hash_password(OWNER_PASSWORD)))
+                conn.execute("INSERT INTO users(username,password_hash,plan) VALUES(%s,%s,'plus')", (OWNER_USERNAME, hash_password(OWNER_PASSWORD)))
         # Optional additional Pro account, configured through Render Environment.
         # This grants Pro only; it does not grant owner/admin privileges.
         if EXTRA_PRO_USERNAME and EXTRA_PRO_PASSWORD and len(EXTRA_PRO_PASSWORD) >= 8:
@@ -177,7 +179,7 @@ PLAN_FEATURES = {
         "Uzun analiz ve çok adımlı proje desteği", "Pro araç kütüphanesi"
     ], "disclaimer": "Özellikler sunucu, model ve harici sağlayıcı yapılandırmasına bağlıdır."},
     "plus": {"title": "Tekden AI Plus", "price_try_month": 400, "features": [
-        "Pro özelliklerine ek Plus iş akışları", "150 özel Plus çalışma şablonu",
+        "Pro planındaki tüm özellikler dâhil", "Pro özelliklerine ek Plus iş akışları", "150 özel Plus çalışma şablonu",
         "Proje planlama ve gereksinim matrisi", "Belge ve toplantı iş akışları",
         "İçerik takvimi ve kampanya planları", "Ürün ve kullanıcı araştırması şablonları",
         "Yazılım kalite kontrol ve yayın öncesi kontrol listeleri",
@@ -793,7 +795,7 @@ def login(body: AuthBody):
         row = conn.execute("SELECT id, username, password_hash, plan FROM users WHERE lower(username)=lower(%s)", (body.username.strip(),)).fetchone()
     if not row or not verify_password(body.password, row["password_hash"]):
         raise HTTPException(401, "Kullanıcı adı veya şifre hatalı.")
-    out = JSONResponse({"ok": True, "user": {"id": row["id"], "username": row["username"], "plan": ("pro" if row["username"].lower()==OWNER_USERNAME.lower() and OWNER_PASSWORD else row.get("plan", "free"))}})
+    out = JSONResponse({"ok": True, "user": {"id": row["id"], "username": row["username"], "plan": ("plus" if row["username"].lower()==OWNER_USERNAME.lower() and OWNER_PASSWORD else row.get("plan", "free"))}})
     out.set_cookie(COOKIE_NAME, make_session(row["id"]), httponly=True, secure=True, samesite="lax", max_age=SESSION_DAYS*86400)
     return out
 
@@ -825,7 +827,7 @@ def me(request: Request):
     except Exception:
         user = None
     if user and user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD:
-        user["plan"] = "pro"
+        user["plan"] = "plus"
     return {"user": user}
 
 @app.get("/api/chats")
@@ -992,7 +994,7 @@ def billing_status(request: Request):
 def chat(body: ChatBody, request: Request):
     user = current_user(request)
     user_message = body.message.strip()
-    plan = "pro" if user and user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else (user or {}).get("plan", "free")
+    plan = "plus" if user and user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else (user or {}).get("plan", "free")
     account_preferences = None
     if user:
         try:
@@ -1002,7 +1004,7 @@ def chat(body: ChatBody, request: Request):
             account_preferences = None
     use_search = body.force_search or should_search(user_message)
     query = user_message.replace("/search ", "", 1)
-    sources = (pro_web_search(query) if plan == "pro" else web_search(query)) if use_search else []
+    sources = (pro_web_search(query) if plan in ("pro", "plus") else web_search(query)) if use_search else []
     if plan in ("pro", "plus"):
         plan_rules = """Kullanıcının planı Tekden AI Pro. Üst düzey, kişiye özel bir çalışma ortağı gibi davran: isteğin amacını koru, önceki sohbet bağlamını etkin kullan, belirsizlikleri gerektiğinde sor, karmaşık işleri aşamalara böl ve uygulanabilir, tamamlanmış sonuç üret. Web kaynakları mevcutsa çoklu kaynağı karşılaştır, tarihleri kontrol et ve iddiaları kaynaklarla destekle. Kod, tasarım, araştırma ve planlama taleplerinde yalnızca genel tavsiye verme; mümkün olduğunda doğrudan kullanılabilir bir çıktı sun. Dosya/görsel içeriğine sadık kal. Doğal, akıcı Türkçe kullan; gereksiz sembol ve biçimlendirme yapma. Kullanıcı kısa yanıt isterse kısa tut. Gerçekte çalıştırılmamış işlemleri yaptığını iddia etme. Pro modeli kullanılamazsa temel modele geçiş olabilir; bunu gerekiyorsa açıkça belirt."""
     else:
@@ -4712,7 +4714,7 @@ if(!localStorage.getItem('tekden_seen_toolkit')){localStorage.setItem('tekden_se
 @app.post("/api/game")
 def create_game(body: GameBody, request: Request):
     user = current_user(request)
-    plan = "pro" if user and user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else (user or {}).get("plan", "free")
+    plan = "plus" if user and user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else (user or {}).get("plan", "free")
     prompt = (body.prompt or "").strip()
     if len(prompt) < 3:
         raise HTTPException(400, "Nasıl bir oyun istediğini biraz daha açık yaz.")
@@ -4786,7 +4788,7 @@ def require_song_pro(request: Request):
     user = current_user(request)
     if not user:
         raise HTTPException(401, "Şarkı Stüdyosu için giriş yapmalısın.")
-    plan = "pro" if user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else user.get("plan", "free")
+    plan = "plus" if user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else user.get("plan", "free")
     if plan not in ("pro", "plus"):
         raise HTTPException(403, "Vokalli şarkı üretimi yalnızca Tekden AI Pro üyelerine açıktır.")
     return user
@@ -4995,7 +4997,7 @@ HTML = r"""<!doctype html>
 <section class="messages" id="messages"><div class="welcome" id="welcome"><div class="welcome-logo">Tekden <span>AI</span><span class="spark">✦</span></div><h1>Tekden AI'ye Hoş Geldin <span class="blue">✦</span></h1><p>Sana nasıl yardımcı olabilirim? Bir mesaj yazman yeterli; diğer araçlar gerektiğinde hazır.</p><div class="welcomegrid"><button class="feature suggestion" data-kind="chat"><span class="ico">◉</span><span><b>Sohbet</b><small>Konuları açıkla, sorularını yanıtla ve adım adım ilerle.</small></span></button><button class="feature suggestion" data-kind="image"><span class="ico">▧</span><span><b>Görsel Oluştur</b><small>İstediğin sahneyi tarif et, görselini üret.</small></span></button><button class="feature suggestion" data-kind="file"><span class="ico">▤</span><span><b>Dosya Analizi</b><small>PDF, belge ve görsellerdeki içeriği incele.</small></span></button><button class="feature suggestion" data-kind="web"><span class="ico">⌕</span><span><b>Web Arama</b><small>Güncel bilgileri kaynaklarıyla araştır.</small></span></button><button class="feature suggestion" data-kind="app"><span class="ico">⌘</span><span><b>Uygulama Geliştir</b><small>Kod, site ve proje fikirleri üzerinde çalış.</small></span></button><button class="feature suggestion" data-kind="game"><span class="ico">♧</span><span><b>Oyun Tasarla</b><small>Free ile arcade oyna; Pro ile tarifinden özgün, oynanabilir oyun üret.</small></span></button><button class="feature songstudio" type="button" onclick="openSongStudio()"><span class="ico">🎤</span><span><b>Vokalli Şarkı Stüdyosu</b><small>Pro üyelerine özel: Tekden AI içinde vokalli şarkı üret.</small></span></button></div></div></section>
 <div class="composerwrap"><div class="composer"><textarea id="prompt" placeholder="Tekden AI'a mesaj yaz..."></textarea><div class="attachrow"><label class="attachlabel" for="fileInput">📎 Dosya / görsel ekle</label><input id="fileInput" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.docx" hidden><span class="attachname" id="fileName">Dosya seçilmedi</span></div><div class="tools"><div class="toolleft"><button class="secondary" id="searchBtn" title="İnternette ara">⌕ Web ara</button><button class="secondary" id="imageBtn" title="Görsel oluştur">▧ Görsel</button><button class="secondary" id="dictationBtn" title="Konuşarak yaz">🎙 Dikte et</button><button class="secondary" id="voiceBtn" title="Sesli sohbet">🔊 Sesli sohbet</button><span class="status" id="status">Hazır</span></div><button id="sendBtn">Gönder ↑</button></div></div><div class="notice" style="text-align:center;margin-top:8px">Misafir sohbetleri bu tarayıcıda saklanır; hesap açarsan sohbet geçmişin hesabına kaydedilir.</div></div></main></div>
 <div class="modalback" id="modalback"><div class="modal"><h2 id="modalTitle">Tekden AI'a giriş yap</h2><p class="notice">Hesabınla sohbet geçmişin saklanır.</p><input id="authUser" placeholder="Kullanıcı adı" autocomplete="username"><input id="authPass" type="password" placeholder="Şifre (en az 8 karakter)" autocomplete="current-password"><div class="row"><button id="authSubmit">Giriş yap</button><button class="secondary" id="registerBtn">Kayıt ol</button></div><p id="authError" class="notice"></p><button class="secondary" id="closeModal" style="width:100%;margin-top:8px">Kapat</button></div></div>
-<div class="modalback" id="profileBack"><div class="modal"><h2>Profilim</h2><p class="notice">Hesap bilgilerin ve üyelik durumun</p><div class="profilegrid"><div class="profileitem"><small>Kullanıcı adı</small><b id="profileUsername">Misafir</b></div><div class="profileitem"><small>Üyelik</small><b id="profilePlan">Free</b></div></div><div class="rightcard" style="margin:12px 0"><h3>Üyelik özellikleri</h3><p id="profileFeatures">Standart sohbet ve mevcut temel araçlar.</p></div><button class="secondary" id="profileArchiveBtn" style="width:100%;margin-bottom:8px">Arşivlenmiş sohbetler</button><button id="profilePlansBtn" style="width:100%;margin-bottom:8px">Planları ve Pro avantajlarını gör</button><button class="secondary" id="profileLoginBtn" style="width:100%;margin-bottom:8px">Giriş yap / Kayıt ol</button><button class="secondary" id="profileLogoutBtn" style="width:100%;margin-bottom:8px;display:none">Çıkış yap</button><button class="secondary" id="closeProfile" style="width:100%">Kapat</button></div></div>
+<div class="modalback" id="profileBack"><div class="modal"><h2>Profilim</h2><p class="notice">Hesap bilgilerin ve üyelik durumun</p><div class="profilegrid"><div class="profileitem"><small>Kullanıcı adı</small><b id="profileUsername">Misafir</b></div><div class="profileitem"><small>Üyelik</small><b id="profilePlan">Free</b></div></div><div class="rightcard" style="margin:12px 0"><h3>Üyelik özellikleri</h3><p id="profileFeatures">Standart sohbet ve mevcut temel araçlar.</p></div><button class="secondary" id="profileArchiveBtn" style="width:100%;margin-bottom:8px">Arşivlenmiş sohbetler</button><button id="profilePlansBtn" style="width:100%;margin-bottom:8px">Planları ve Plus avantajlarını gör</button><button class="secondary" id="profileLoginBtn" style="width:100%;margin-bottom:8px">Giriş yap / Kayıt ol</button><button class="secondary" id="profileLogoutBtn" style="width:100%;margin-bottom:8px;display:none">Çıkış yap</button><button class="secondary" id="closeProfile" style="width:100%">Kapat</button></div></div>
 <div class="modalback" id="plansBack"><div class="modal"><h2>Tekden AI planları</h2><div class="plans"><div class="plan"><strong>Free · 0 TL/ay</strong><p>Günlük sohbet, sohbet geçmişi, web araması, görsel oluşturma, desteklenen dosya türlerini inceleme ve hazır Neon Highway arcade oyununu oynama. Harici servis limitleri geçerlidir.</p><button class="secondary" disabled>Ücretsiz plan</button></div><div class="plan"><strong>✦ Plus · 400 TL/ay</strong><p><b>En kapsamlı plan taslağı:</b> gelişmiş çalışma akışları, 175 araç kütüphanesi, büyük proje planları, çok adımlı görev taslakları, öncelikli özellik erişimi ve kişisel çalışma alanı. Bu plan şu an yalnızca fiyat/özellik taslağıdır; ödeme ve yetkilendirme bağlanana kadar satın alma etkin değildir.</p><button id="buyPlus" type="button">Plus'a geç · 400 TL/ay</button><p class="notice">Satın alma yalnızca Stripe Price ID ve webhook yapılandırıldığında etkinleşir.</p></div><div class="plan"><strong>✦ Pro · 100 TL/ay</strong><p><b>Gelişmiş Pro modeli</b> (OLLAMA_PRO_MODEL yapılandırılmışsa), çok kaynaklı genişletilmiş web araştırması, karmaşık görevlerde derin analiz, uzun proje bağlamı, belge değerlendirme ve tarifinden kod göstermeden farklı türlerde gelişmiş, doğrudan oynanabilir oyun üretimi; tam ekran, HTML indirme ve vokalli şarkı stüdyosu (müzik motoru yapılandırıldığında). Free plan hazır arcade oyununu oynayabilir. Görsel/web sağlayıcılarının kendi limitleri devam eder; sonuçlar kullanılan model ve servislerin kapasitesine bağlıdır.</p><button id="buyPro">Pro'ya geç</button><p id="proAlreadyActive" class="notice" style="display:none;color:#087b4d;font-weight:700">Pro üyeliğin aktif. Yeniden satın alman gerekmiyor.</p></div></div><p class="notice">Ödeme Stripe Checkout üzerinden alınır. Stripe hesabında Plus için aylık fiyat oluşturup STRIPE_PRICE_ID_PLUS değerini Render ortam değişkenlerine eklemen gerekir.</p><button class="secondary" id="closePlans" style="width:100%">Kapat</button></div></div>
 <div class="modalback" id="songStudioBack"><div class="modal songmodal"><h2>🎤 Tekden AI Pro · Vokalli Şarkı Stüdyosu</h2><p>Şarkını Tekden AI ekranından üret. Ses motoru sunucu tarafında çalışır; Free hesaplar kullanamaz.</p><label for="songTitle"><b>Şarkı adı</b></label><input id="songTitle" placeholder="Örn. Uzaklara giden birine özlem"><label for="songStyle"><b>Müzik tarzı</b></label><input id="songStyle" value="Turkish arabesk, emotional male-female duet, bağlama, piano, expressive vocals"><label for="songLyrics"><b>Şarkı sözleri</b></label><textarea id="songLyrics" placeholder="Özgün şarkı sözlerini buraya yaz..." ></textarea><div class="row"><button type="button" id="generateVocalSongBtn" onclick="generateVocalSong()">🎵 Vokalli şarkı üret</button><button type="button" class="secondary" onclick="closeSongStudio()">Kapat</button></div><p id="songStudioStatus" class="notice" aria-live="polite"></p><audio id="songAudioPlayer" controls style="display:none;width:100%;margin-top:12px"></audio><a id="songAudioDownload" style="display:none" download="tekden-ai-sarki.mp3">Şarkıyı indir ↓</a></div></div>
 <div id="tdQuickDock" aria-label="Hızlı araçlar"><button class="secondary" id="tdToolsOpen">✦ Araç kutusu</button><button class="secondary" id="tdThemeToggle" title="Açık/koyu tema">◐ Tema</button><button class="secondary" id="tdFocusToggle" title="Dikkat dağıtmayan görünüm">⛶ Odak</button></div>
@@ -5039,14 +5041,14 @@ async function refreshMe(){try{const d=await api('/api/me');user=d.user;renderUs
 function renderUser(){
  $('topAvatar').textContent=user?(user.username[0]||'U').toUpperCase():'?';
  $('profileButtonText').textContent=user?user.username:'Profil';
- const studioButton=$('proStudioBtn');if(studioButton)studioButton.style.display=user&&user.plan==='pro'?'block':'none';
+ const studioButton=$('proStudioBtn');if(studioButton)studioButton.style.display=user&&['pro','plus'].includes(user.plan)?'block':'none';
  $('profileUsername').textContent=user?user.username:'Misafir';
- $('profilePlan').textContent=user?(user.plan==='pro'?'Tekden AI Pro':'Free'):'Giriş yapılmadı';
- $('profileFeatures').textContent=user&&user.plan==='pro'?'PRO: yapılandırılmışsa daha güçlü model, kapsamlı web araştırması, uzun proje bağlamı, özel oyun üretimi, HTML oyun indirme, daha ayrıntılı kodlama ve yaratıcı proje iş akışları. Kullanılabilirlik sağlayıcı yapılandırmasına bağlıdır.':'Standart sohbet ve temel araçlar. Pro, yapılandırılmışsa daha güçlü model erişimi ve daha kapsamlı çalışma iş akışı sunar.';
- if($('buyPro')){ $('buyPro').style.display=user&&user.plan==='pro'?'none':''; }
- const proState=$('proAlreadyActive'); if(proState)proState.style.display=user&&user.plan==='pro'?'block':'none';
+ $('profilePlan').textContent=user?(user.plan==='plus'?'Tekden AI Plus':(user.plan==='pro'?'Tekden AI Pro':'Free')):'Giriş yapılmadı';
+ $('profileFeatures').textContent=user&&user.plan==='plus'?'PLUS: Pro özelliklerinin tamamı ve 150 Plus iş akışı. Model ve harici sağlayıcı özellikleri yapılandırmaya bağlıdır.':(user&&user.plan==='pro'?'PRO: yapılandırılmışsa daha güçlü model, kapsamlı web araştırması, uzun proje bağlamı, özel oyun üretimi, HTML oyun indirme ve yaratıcı proje iş akışları.':'Standart sohbet ve temel araçlar.');
+ if($('buyPro')){ $('buyPro').style.display=user&&['pro','plus'].includes(user.plan)?'none':''; }
+ const proState=$('proAlreadyActive'); if(proState)proState.style.display=user&&['pro','plus'].includes(user.plan)?'block':'none';
  if($('profileLogoutBtn'))$('profileLogoutBtn').style.display=user?'block':'none';
- $('userbar').innerHTML=`<button class="sidebar-profile" id="sidebarProfileBtn"><span class="avatar">${user?esc((user.username[0]||'U').toUpperCase()):'?'}</span><span class="profile-copy"><b>${user?esc(user.username):'Profil ve hesap'}</b><small>${user?(user.plan==='pro'?'✦ PRO üyeliği aktif':'Free plan · Pro seçenekleri'):'Giriş yap veya hesap oluştur'}</small></span><span aria-hidden="true">›</span></button>`;
+ $('userbar').innerHTML=`<button class="sidebar-profile" id="sidebarProfileBtn"><span class="avatar">${user?esc((user.username[0]||'U').toUpperCase()):'?'}</span><span class="profile-copy"><b>${user?esc(user.username):'Profil ve hesap'}</b><small>${user?(['pro','plus'].includes(user.plan)?'✦ PRO üyeliği aktif':'Free plan · Pro seçenekleri'):'Giriş yap veya hesap oluştur'}</small></span><span aria-hidden="true">›</span></button>`;
  $('sidebarProfileBtn').onclick=()=>{if(user)$('profileBack').style.display='flex';else showModal()};
 }
 function newChat(){chatId=null;guestHistory=[];saveGuestHistory();$('messages').innerHTML='<div class="welcome" id="welcome"><div class="welcome-logo">Tekden <span>AI</span><span class="spark">✦</span></div><h1>Bugün ne yapmak istersin?</h1><p>Soru sor, internette araştırma yap veya bir görsel oluştur.</p></div>'; $('prompt').focus()}
@@ -5253,7 +5255,7 @@ document.querySelectorAll('[data-song]').forEach(b=>b.onclick=()=>{$('songPrompt
 async function waitForVocalSong(generationId,statusEl,player,download){const deadline=Date.now()+15*60*1000;let transientFailures=0;while(Date.now()<deadline){await new Promise(r=>setTimeout(r,6000));try{const s=await api('/api/studio/song/status/'+encodeURIComponent(generationId));transientFailures=0;if(s.status==='succeeded'&&s.audio_url){player.src=s.audio_url;player.style.display='block';download.href=s.audio_url;download.style.display='inline-block';download.style.marginTop='10px';statusEl.textContent='Şarkı hazır! Buradan dinleyebilir veya indirebilirsin.';player.load();return}if(s.status==='failed')throw new Error('Müzik motoru üretimi başarısız olarak bildirdi. eroq panelini kontrol et.');statusEl.textContent=(s.temporary_issue||'Vokalli şarkı oluşturuluyor… Durum: '+(s.status||'processing')+'.')+' Biraz sürebilir.'}catch(e){if(String(e.message||e).includes('Müzik motoru üretimi başarısız'))throw e;transientFailures++;statusEl.textContent='Müzik sunucusu geç yanıt veriyor. Otomatik tekrar deniyorum ('+transientFailures+'); aynı şarkı için yeniden üretim başlatmıyorum.';}}throw new Error('Şarkı hâlâ hazırlanıyor veya servis yavaş yanıt veriyor. Aynı şarkı için yeniden üretim başlatmadan eroq panelindeki Music geçmişini kontrol et.')}
 $('makeSong').onclick=async()=>{const title=$('songPrompt').value.trim()||'Tekden AI şarkısı';const style=$('songStylePro').value.trim();const lyrics=$('songLyricsPro').value.trim();const b=$('makeSong');if(lyrics.length<5){$('songStatus').textContent='Önce şarkı sözlerini gir.';return}b.disabled=true;b.textContent='⏳ Şarkı üretiliyor…';$('songStatus').textContent='eroq müzik motoruna istek gönderiliyor. 90 saniyelik tek üretim yaklaşık 9 kredi kullanır.';$('proSongAudio').style.display='none';$('proSongDownload').style.display='none';try{const d=await api('/api/studio/song/generate',{method:'POST',body:JSON.stringify({title,style,lyrics,language:'tr',duration:90})});if(!d.generation_id)throw new Error('Müzik servisi görev kimliği döndürmedi.');if(d.credits_remaining!==null&&d.credits_remaining!==undefined)$('songStatus').textContent='Üretim başladı. Kalan eroq kredisi: '+d.credits_remaining+'.';await waitForVocalSong(d.generation_id,$('songStatus'),$('proSongAudio'),$('proSongDownload'))}catch(e){$('songStatus').textContent=e.message}finally{b.disabled=false;b.textContent='🎵 Vokalli şarkı üret'}};
 async function api(url,opts={}){const r=await fetch(url,{...opts,credentials:'same-origin',headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.detail||'İstek başarısız oldu.');return d}
-async function check(){try{const d=await api('/api/me');if(!d.user){location.href='/?login=1';return}if(d.!(['pro','plus'].includes(user.plan))){document.body.innerHTML=`<main style="max-width:700px;margin:12vh auto;padding:24px;font:16px system-ui"><h1>Bu alan Pro üyelerine özel</h1><p>Pro üyeliğinle giriş yaparak bu stüdyoyu kullanabilirsin.</p><button onclick="location.href='/'">Ana sayfaya dön</button></main>`;return}}catch(e){location.href='/?login=1'}}
+async function check(){try{const d=await api('/api/me');if(!d.user){location.href='/?login=1';return}if(!['pro','plus'].includes(d.user.plan)){document.body.innerHTML=`<main style="max-width:700px;margin:12vh auto;padding:24px;font:16px system-ui"><h1>Bu alan Pro ve Plus üyelerine özel</h1><p>Pro veya Plus üyeliğinle giriş yaparak bu stüdyoyu kullanabilirsin.</p><button onclick="location.href='/'">Ana sayfaya dön</button></main>`;return}}catch(e){location.href='/?login=1'}}
 document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{$('prompt').value=b.dataset.p;$('prompt').focus()});$('clear').onclick=()=>{$('prompt').value='';$('prompt').focus()};
 $('generate').onclick=async()=>{const prompt=$('prompt').value.trim();if(prompt.length<3){$('status').textContent='Önce oyunu biraz tarif et.';return}const btn=$('generate');btn.disabled=true;btn.textContent='⏳ Oyun hazırlanıyor…';$('status').textContent='Pro modeli oyun kodunu oluşturuyor. Bu işlem biraz sürebilir…';try{const d=await api('/api/game',{method:'POST',body:JSON.stringify({prompt})});currentHtml=d.html;$('preview').innerHTML='';frame=document.createElement('iframe');frame.title='Oynanabilir oyun';frame.setAttribute('sandbox','allow-scripts allow-pointer-lock');frame.srcdoc=currentHtml;$('preview').appendChild(frame);$('tools').style.display='flex';$('status').textContent='Oyun hazır. Kontrolleri deneyebilir, tam ekran açabilir veya HTML indirebilirsin.'}catch(e){$('status').textContent='Oyun oluşturulamadı: '+e.message}finally{btn.disabled=false;btn.textContent='✦ Oyunu oluştur'}};
 $('fullscreen').onclick=()=>frame?.requestFullscreen?.();$('download').onclick=()=>{const a=document.createElement('a'),url=URL.createObjectURL(new Blob([currentHtml],{type:'text/html;charset=utf-8'}));a.href=url;a.download='tekden-ai-pro-oyunu.html';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};check();
