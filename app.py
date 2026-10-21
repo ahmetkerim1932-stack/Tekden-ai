@@ -5,7 +5,7 @@ import requests
 import psycopg
 from psycopg.rows import dict_row
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 APP_NAME = "Tekden AI"
@@ -36,22 +36,16 @@ SESSION_DAYS = 30
 
 app = FastAPI(title=APP_NAME)
 
-from fastapi.responses import Response
-
-@app.get("/sitemap.xml", include_in_schema=False)
-def sitemap():
-    xml = """<?xml version="1.0" encoding="UTF-8"?>
-    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-      <url>
-        <loc>https://tekden-ai-2.onrender.com/</loc>
-      </url>
-    </urlset>
-    """
-    return Response(content=xml, media_type="application/xml")
 # Google Search Console HTML-file verification (keep filename and body exact).
 @app.get("/google60fefbe52fe7bb22.html", response_class=HTMLResponse, include_in_schema=False)
 def google_site_verification():
     return "google-site-verification: google60fefbe52fe7bb22.html"
+
+
+# Google AdSense ads.txt authorization. Publisher ID matches the AdSense script in the page HTML.
+@app.get("/ads.txt", response_class=PlainTextResponse, include_in_schema=False)
+def ads_txt():
+    return "google.com, pub-3311978441761062, DIRECT, f08c47fec0942fa0"
 
 def db():
     if not DATABASE_URL:
@@ -7265,3 +7259,5 @@ def contact_page():
 # Reliability: avoid claiming that external actions completed unless a connected service confirms it.
 # Maintenance: revise the prompt and label together when changing this workflow.
 
+
+                                                                
