@@ -5317,7 +5317,10 @@ $('fullscreen').onclick=()=>frame?.requestFullscreen?.();$('download').onclick=(
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    return HTMLResponse(HTML)
+    # Monetization entry point is appended to the existing homepage; existing UI stays intact.
+    monetization_link = """<div style="position:fixed;right:14px;bottom:14px;z-index:9999"><a href="/ortaklik" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#155eef;color:#fff;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0002">Tekden AI'ı destekle / İş ortaklığı</a></div>"""
+    page = HTML.replace("</body>", monetization_link + "</body>", 1) if "</body>" in HTML else HTML + monetization_link
+    return HTMLResponse(page)
 
 @app.get("/hakkimizda", response_class=HTMLResponse)
 def about_page():
@@ -7260,4 +7263,51 @@ def contact_page():
 # Maintenance: revise the prompt and label together when changing this workflow.
 
 
-                                                                
+
+# --- Additive monetization page (keeps existing routes and features unchanged) ---
+from html import escape as _html_escape
+from urllib.parse import urlparse as _urlparse
+
+
+def _safe_partner_url(env_name: str) -> str:
+    """Only render explicitly configured HTTPS affiliate URLs."""
+    value = os.getenv(env_name, "").strip()
+    parsed = _urlparse(value)
+    if parsed.scheme == "https" and parsed.netloc:
+        return value
+    return ""
+
+
+@app.get("/ortaklik", response_class=HTMLResponse)
+def monetization_page():
+    # Add real affiliate links only after joining the corresponding programs.
+    offers = [
+        ("AFFILIATE_LINK_DESIGN", "Tasarım araçları", "Görsel ve tasarım çalışmalarında kullanılabilecek araçlar."),
+        ("AFFILIATE_LINK_HOSTING", "Web sitesi ve barındırma", "Web projesi yayımlamak isteyenler için hizmetler."),
+        ("AFFILIATE_LINK_PRODUCTIVITY", "Üretkenlik araçları", "İçerik ve proje üretimini destekleyen araçlar."),
+    ]
+    cards = []
+    configured = 0
+    for env_name, title, description in offers:
+        url = _safe_partner_url(env_name)
+        if url:
+            configured += 1
+            cards.append(
+                "<article class='card'><h2>" + _html_escape(title) + "</h2><p>" + _html_escape(description) +
+                "</p><a rel='sponsored nofollow noopener' target='_blank' href='" + _html_escape(url, quote=True) +
+                "'>Aracı incele ↗</a></article>"
+            )
+    if not cards:
+        cards_html = "<article class='card wide'><h2>İş ortaklığı bağlantıları hazırlanıyor</h2><p>Bu alan, gerçek bir satış ortaklığı programına kabul edildikten sonra bağlantılar eklenince otomatik görünür. Henüz bağlantı eklenmediği için şu anda burada satış ortaklığı bağlantısı gösterilmiyor.</p><p><b>Kurulum:</b> Render → Environment bölümüne katıldığın programların gerçek HTTPS bağlantılarını AFFILIATE_LINK_DESIGN, AFFILIATE_LINK_HOSTING veya AFFILIATE_LINK_PRODUCTIVITY değişkenleriyle ekle.</p></article>"
+    else:
+        cards_html = "".join(cards)
+    body = """<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>İş Ortaklığı ve Destek · Tekden AI</title><meta name='description' content='Tekden AI iş ortaklığı, faydalı araç önerileri ve sponsorluk bilgileri.'>
+<style>body{margin:0;background:#f5f8ff;color:#172b46;font:16px/1.65 system-ui}main{max-width:960px;margin:36px auto;padding:0 18px}.hero,.card{background:white;border:1px solid #dbe5f4;border-radius:18px;padding:22px;margin:14px 0}.hero{background:linear-gradient(135deg,#10274b,#174e9c);color:white}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}.card h2{font-size:19px;margin-top:0}.card a,.nav a{color:#075fe4;font-weight:700}.hero a{color:#fff}.muted{color:#62738b;font-size:14px}.hero .muted{color:#d5e5ff}.wide{grid-column:1/-1}li{margin:7px 0}</style></head><body><main>
+<section class='hero'><h1>Tekden AI ile daha fazlasını üret</h1><p>Tekden AI'ın gelişimini desteklemek, faydalı araçları keşfetmek veya iş birliği yapmak isteyenler için.</p><p class='muted'>Satış ortaklığı bağlantısı kullanıldığında Tekden AI uygun koşullarda komisyon kazanabilir. Bu durum, kullanıcıya ek ücret yansıtılacağı anlamına gelmez; koşullar ilgili hizmete bağlıdır.</p><p><a href='/'>← Tekden AI'a dön</a> · <a href='/iletisim'>İletişim</a></p></section>
+<h2>Önerilen araçlar</h2><div class='grid'>""" + cards_html + """</div>
+<div class='grid'><article class='card'><h2>Marka ve sponsorluk iş birlikleri</h2><p>Yapay zekâ, yazılım ve üretkenlik alanındaki markalar; açıkça sponsorlu olarak işaretlenen tanıtımlar veya ürün demoları için iş birliği önerebilir.</p><p>İş birliği teklifinde markanızı, teklifinizi ve iletişim bilgilerinizi belirtin.</p><a href='/iletisim'>İletişim sayfasına git</a></article>
+<article class='card'><h2>Tekden AI'ın gelişimini destekle</h2><p>Yeni araçlar, hata düzeltmeleri ve hizmet maliyetleri için öneri veya destek teklifi gönderebilirsiniz. Bu sayfa şu anda bağış/ödeme tahsil etmez.</p><a href='/iletisim'>Destek önerisi gönder</a></article></div>
+<p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
+<p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
+    return HTMLResponse(body)
