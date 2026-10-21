@@ -39,10 +39,12 @@ app = FastAPI(title=APP_NAME)
 from fastapi.responses import PlainTextResponse
 
 @app.get("/robots.txt", response_class=PlainTextResponse)
-async def robots_txt():
-    return """User-agent: *
-Allow: /
-"""
+def robots_txt():
+    return (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "Sitemap: https://tekden-ai-2.onrender.com/sitemap.xml\n"
+    )
 # Google Search Console HTML-file verification (keep filename and body exact).
 @app.get("/google60fefbe52fe7bb22.html", response_class=HTMLResponse, include_in_schema=False)
 def google_site_verification():
@@ -47359,8 +47361,7 @@ def contact_page():
 # Feature 174: Elde tutma fikirleri
 # Category: Ürün geliştirme
 # Purpose: Kullanıcıya gerçek değer sunan geri dönüş sebepleri ve ölçüm yöntemleri öner.
-# Suggested plan segment: Pro
-# Workflow: validate the request, produce a usable draft, state assumptions, and include a short quality checklist.
+# Suggested plan segment: ProFce a usable draft, state assumptions, and include a short quality checklist.
 # User control: this template only fills the prompt composer; the user decides whether to send it.
 # Privacy: template content is not sent until the user presses the existing Send button.
 # Compatibility: this uses the existing homepage composer and current chat API.
