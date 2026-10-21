@@ -36,6 +36,13 @@ SESSION_DAYS = 30
 
 app = FastAPI(title=APP_NAME)
 
+from fastapi.responses import PlainTextResponse
+
+@app.get("/robots.txt", response_class=PlainTextResponse)
+async def robots_txt():
+    return """User-agent: *
+Allow: /
+"""
 # Google Search Console HTML-file verification (keep filename and body exact).
 @app.get("/google60fefbe52fe7bb22.html", response_class=HTMLResponse, include_in_schema=False)
 def google_site_verification():
