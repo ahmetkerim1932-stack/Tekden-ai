@@ -36,6 +36,18 @@ SESSION_DAYS = 30
 
 app = FastAPI(title=APP_NAME)
 
+from fastapi.responses import Response
+
+@app.get("/sitemap.xml", include_in_schema=False)
+def sitemap():
+    xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+      <url>
+        <loc>https://tekden-ai-2.onrender.com/</loc>
+      </url>
+    </urlset>
+    """
+    return Response(content=xml, media_type="application/xml")
 # Google Search Console HTML-file verification (keep filename and body exact).
 @app.get("/google60fefbe52fe7bb22.html", response_class=HTMLResponse, include_in_schema=False)
 def google_site_verification():
