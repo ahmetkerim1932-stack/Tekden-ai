@@ -51,16 +51,15 @@ def ads_txt():
 @app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
 def robots_txt():
     content = (
-        "User-agent: *\\n"
-        "Allow: /\\n"
-        "Sitemap: https://tekden-ai-2.onrender.com/sitemap.xml\\n"
+        "User-agent: *\n"
+        "Allow: /\n"
+        "Sitemap: https://tekden-ai-2.onrender.com/sitemap.xml\n"
     )
     return PlainTextResponse(
         content,
         media_type="text/plain",
         headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )
-
 
 # Google Search Console için XML site haritası.
 @app.get("/sitemap.xml", include_in_schema=False)
