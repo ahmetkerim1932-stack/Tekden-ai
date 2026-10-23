@@ -50,16 +50,19 @@ def ads_txt():
 # Google Search Console: robots.txt dosyasını açık ve önbelleksiz sun.
 @app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
 def robots_txt():
-    content = (
-        "User-agent: *\n"
-        "Allow: /\n"
-        "Sitemap: https://tekden-ai-2.onrender.com/sitemap.xml\n"
-    )
+    # Gerçek satır sonları kullan; Google'ın robots.txt ayrıştırıcısı için açık içerik.
+    content = "\n".join([
+        "User-agent: *",
+        "Allow: /",
+        "Sitemap: https://tekden-ai-2.onrender.com/sitemap.xml",
+        "",
+    ])
     return PlainTextResponse(
         content,
-        media_type="text/plain",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+        media_type="text/plain; charset=utf-8",
+        headers={"Cache-Control": "no-cache, max-age=0", "X-Robots-Tag": "all"},
     )
+
 
 # Google Search Console için XML site haritası.
 @app.get("/sitemap.xml", include_in_schema=False)
