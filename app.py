@@ -16,8 +16,8 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud").strip()
 OLLAMA_PRO_MODEL = os.getenv("OLLAMA_PRO_MODEL", "gpt-oss:120b-cloud").strip()
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "AhmetKerim.").strip()
 OWNER_PASSWORD = os.getenv("OWNER_PASSWORD", "").strip()
-EXTRA_PRO_USERNAME = os.getenv("EXTRA_PRO_USERNAME", "").strip()
-EXTRA_PRO_PASSWORD = os.getenv("EXTRA_PRO_PASSWORD", "").strip()
+EXTRA_PLUS_USERNAME = os.getenv("EXTRA_PLUS_USERNAME", "").strip()
+EXTRA_PLUS_PASSWORD = os.getenv("EXTRA_PLUS_PASSWORD", "").strip()
 POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
 # Hugging Face free-tier credits are limited and may change.
@@ -47,27 +47,46 @@ def google_site_verification():
 def ads_txt():
     return "google.com, pub-3311978441761062, DIRECT, f08c47fec0942fa0"
 
-# Google arama motorlarının genel sayfaları taramasına izin ver.
+# Google Search Console: robots.txt dosyasını açık ve önbelleksiz sun.
 @app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
 def robots_txt():
-    return (
-        "User-agent: *\n"
-        "Allow: /\n"
-        "Disallow: /api/\n"
-        "Sitemap: https://tekden-ai-2.onrender.com/sitemap.xml\n"
+    content = (
+        "User-agent: *\\n"
+        "Allow: /\\n"
+        "Sitemap: https://tekden-ai-2.onrender.com/sitemap.xml\\n"
+    )
+    return PlainTextResponse(
+        content,
+        media_type="text/plain",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
     )
 
 
-# Google için site haritası.
-@app.get("/sitemap.xml", response_class=PlainTextResponse, include_in_schema=False)
+# Google Search Console için XML site haritası.
+@app.get("/sitemap.xml", include_in_schema=False)
 def sitemap_xml():
-    return """<?xml version="1.0" encoding="UTF-8"?>
+    content = """<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://tekden-ai-2.onrender.com/</loc>
   </url>
+  <url>
+    <loc>https://tekden-ai-2.onrender.com/hakkimizda</loc>
+  </url>
+  <url>
+    <loc>https://tekden-ai-2.onrender.com/gizlilik</loc>
+  </url>
+  <url>
+    <loc>https://tekden-ai-2.onrender.com/iletisim</loc>
+  </url>
 </urlset>
 """
+    return PlainTextResponse(
+        content,
+        media_type="application/xml",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+    )
+
 
 def db():
     if not DATABASE_URL:
@@ -181,16 +200,16 @@ def init_db():
                 conn.execute("UPDATE users SET plan='plus', password_hash=%s WHERE id=%s", (hash_password(OWNER_PASSWORD), owner["id"]))
             else:
                 conn.execute("INSERT INTO users(username,password_hash,plan) VALUES(%s,%s,'plus')", (OWNER_USERNAME, hash_password(OWNER_PASSWORD)))
-        # Optional additional Pro account, configured through Render Environment.
-        # This grants Pro only; it does not grant owner/admin privileges.
-        if EXTRA_PRO_USERNAME and EXTRA_PRO_PASSWORD and len(EXTRA_PRO_PASSWORD) >= 8:
+        # Optional additional Plus account, configured through Render Environment.
+        # This grants Plus only; it does not grant owner/admin privileges.
+        if EXTRA_PRO_USERNAME and EXTRA_PRO_PASSWORD and len(EXTRA_PLUS_PASSWORD) >= 8:
             extra = conn.execute("SELECT id FROM users WHERE lower(username)=lower(%s)", (EXTRA_PRO_USERNAME,)).fetchone()
             if extra:
-                conn.execute("UPDATE users SET plan='pro', password_hash=%s WHERE id=%s",
-                             (hash_password(EXTRA_PRO_PASSWORD), extra["id"]))
+                conn.execute("UPDATE users SET plan='plus', password_hash=%s WHERE id=%s",
+                             (hash_password(EXTRA_PLUS_PASSWORD), extra["id"]))
             else:
                 conn.execute("INSERT INTO users(username,password_hash,plan) VALUES(%s,%s,'pro')",
-                             (EXTRA_PRO_USERNAME, hash_password(EXTRA_PRO_PASSWORD)))
+                             (EXTRA_PLUS_USERNAME, hash_password(EXTRA_PLUS_PASSWORD)))
 
 
 # Product capability catalogue used by the plan UI and future billing screens.
