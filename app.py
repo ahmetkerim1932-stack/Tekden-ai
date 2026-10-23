@@ -47,6 +47,28 @@ def google_site_verification():
 def ads_txt():
     return "google.com, pub-3311978441761062, DIRECT, f08c47fec0942fa0"
 
+# Google arama motorlarının genel sayfaları taramasına izin ver.
+@app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
+def robots_txt():
+    return (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "Disallow: /api/\n"
+        "Sitemap: https://tekden-ai-2.onrender.com/sitemap.xml\n"
+    )
+
+
+# Google için site haritası.
+@app.get("/sitemap.xml", response_class=PlainTextResponse, include_in_schema=False)
+def sitemap_xml():
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://tekden-ai-2.onrender.com/</loc>
+  </url>
+</urlset>
+"""
+
 def db():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL eksik. Supabase PostgreSQL bağlantısını Render Environment bölümüne ekle.")
