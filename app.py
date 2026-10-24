@@ -36,6 +36,14 @@ SESSION_DAYS = 30
 
 app = FastAPI(title=APP_NAME)
 
+from fastapi.responses import PlainTextResponse
+
+# FastAPI uygulamasının hemen altına ekleyin:
+@app.get("/robots.txt", response_class=PlainTextResponse)
+def get_robots_txt():
+    data = "User-agent: *\nAllow: /\nSitemap: https://tekden-ai-2.onrender.com/sitemap.xml\n"
+    return PlainTextResponse(content=data, media_type="text/plain")
+    
 # Google Search Console HTML-file verification (keep filename and body exact).
 @app.get("/google60fefbe52fe7bb22.html", response_class=HTMLResponse, include_in_schema=False)
 def google_site_verification():
