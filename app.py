@@ -47,7 +47,16 @@ def google_site_verification():
 def ads_txt():
     return "google.com, pub-3311978441761062, DIRECT, f08c47fec0942fa0"
 
-
+# Google Search Console: robots.txt dosyasını açık ve önbelleksiz sun.
+@app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
+def robots_txt():
+    # Gerçek satır sonları kullan; Google'ın robots.txt ayrıştırıcısı için açık içerik.
+    content = "\n".join([
+        "User-agent: *",
+        "Allow: /",
+        "Sitemap: https://tekden-ai-2.onrender.com/sitemap.xml",
+        "",
+    ])
     return PlainTextResponse(
         content,
         media_type="text/plain; charset=utf-8",
