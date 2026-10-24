@@ -38,6 +38,22 @@ app = FastAPI(title=APP_NAME)
 
 from fastapi.responses import PlainTextResponse
 
+# 1. Rotaları en tepeye koyun ki diğer genel yakalayıcılar bunları engellemesin
+@app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
+def robots_txt():
+    content = "User-agent: *\nAllow: /\nSitemap: https://tekden-ai-2.onrender.com/sitemap.xml\n"
+    return PlainTextResponse(content, media_type="text/plain; charset=utf-8")
+
+@app.get("/sitemap.xml", include_in_schema=False)
+def sitemap_xml():
+    content = """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://tekden-ai-2.onrender.com/</loc></url>
+</urlset>
+"""
+    return PlainTextResponse(content, media_type="application/xml")
+from fastapi.responses import PlainTextResponse
+
 # FastAPI uygulamasının hemen altına ekleyin:
 @app.get("/robots.txt", response_class=PlainTextResponse)
 def get_robots_txt():
