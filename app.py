@@ -47,7 +47,6 @@ def google_site_verification():
 def ads_txt():
     return "google.com, pub-3311978441761062, DIRECT, f08c47fec0942fa0"
 
-# /robots.txt endpoint kaldırıldı; diğer uygulama kodları korunmuştur.
 
 
 # Google Search Console için XML site haritası.
@@ -7340,3 +7339,4 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
+    
