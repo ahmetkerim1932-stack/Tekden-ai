@@ -48,6 +48,12 @@ def ads_txt():
     return "google.com, pub-3311978441761062, DIRECT, f08c47fec0942fa0"
 
 
+    return PlainTextResponse(
+        content,
+        media_type="text/plain; charset=utf-8",
+        headers={"Cache-Control": "no-cache, max-age=0", "X-Robots-Tag": "all"},
+    )
+
 
 # Google Search Console için XML site haritası.
 @app.get("/sitemap.xml", include_in_schema=False)
@@ -7339,4 +7345,3 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
-    
