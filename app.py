@@ -126,6 +126,66 @@ def db():
         raise RuntimeError("DATABASE_URL eksik. Supabase PostgreSQL bağlantısını Render Environment bölümüne ekle.")
     return psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
 
+# Basic Turkish profanity/insult filter. Keep matching word-boundary based to reduce false positives.
+PROFANITY_RE = re.compile(
+    r"(?i)(?<![\w])(?:"
+    r"amk|aq|a\.q|oç|oc|orospu|siktir|sikik|sikerim|sikeyim|sik\w*|"
+    r"yarrak|yarr\w*|piç|pic|kahpe|pezevenk|göt|got|bok\w*|"
+    r"ananı|ananin|anan\w*|ibne|gerizekalı|gerizekali|"
+    r"salak\s+or\w*|mal\s+oğlu\s+mal|fuck\w*|shit|bitch|asshole|motherfucker"
+    r")(?![\w])"
+)
+
+
+def client_ip(request: Request) -> str:
+    # Prefer the address exposed by the ASGI server/proxy integration; do not trust arbitrary X-Forwarded-For input.
+    return request.client.host if request.client else "unknown"
+
+
+def active_ip_ban(ip: str):
+    if not DATABASE_URL or ip == "unknown":
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT expires_at FROM moderation_bans WHERE ip_address=%s AND expires_at > NOW()",
+            (ip,),
+        ).fetchone()
+        if row:
+            return row["expires_at"]
+        conn.execute("DELETE FROM moderation_bans WHERE ip_address=%s AND expires_at <= NOW()", (ip,))
+    return None
+
+
+@app.middleware("http")
+async def enforce_moderation_ban(request: Request, call_next):
+    # Applies the ban across the site, not only to chat requests.
+    if request.url.path not in ("/health", "/api/health/db", "/api/health/deep"):
+        try:
+            expires = active_ip_ban(client_ip(request))
+            if expires:
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "Tekden AI kullanım kuralları nedeniyle erişimin geçici olarak engellendi.",
+                             "ban_expires_at": expires.isoformat()},
+                )
+        except Exception:
+            # A database hiccup should not take the whole website offline.
+            pass
+    return await call_next(request)
+
+
+def ban_ip_for_month(ip: str):
+    if not DATABASE_URL or ip == "unknown":
+        return
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO moderation_bans(ip_address, reason, banned_at, expires_at)
+            VALUES(%s, 'Hakaret/küfür içeren mesaj', NOW(), NOW() + INTERVAL '30 days')
+            ON CONFLICT(ip_address) DO UPDATE SET
+                reason=EXCLUDED.reason, banned_at=NOW(), expires_at=NOW() + INTERVAL '30 days'
+        """, (ip,))
+
+
 def init_db():
     with db() as conn:
         conn.execute("""
@@ -161,6 +221,17 @@ def init_db():
         conn.execute("ALTER TABLE chats ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chats_user_updated ON chats(user_id, archived, updated_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id, id)")
+        # IP-based temporary moderation bans. This is a network-level approximation, not a unique device ID.
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS moderation_bans (
+            id BIGSERIAL PRIMARY KEY,
+            ip_address TEXT NOT NULL,
+            reason TEXT NOT NULL DEFAULT 'Hakaret/küfür içeren mesaj',
+            banned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at TIMESTAMPTZ NOT NULL,
+            UNIQUE(ip_address)
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_moderation_bans_expiry ON moderation_bans(expires_at)")
         # Optional account features are stored separately so older accounts migrate safely.
         conn.execute("""
         CREATE TABLE IF NOT EXISTS user_preferences (
@@ -1090,8 +1161,17 @@ def billing_status(request: Request):
 
 @app.post("/api/chat")
 def chat(body: ChatBody, request: Request):
-    user = current_user(request)
     user_message = body.message.strip()
+    if PROFANITY_RE.search(user_message):
+        try:
+            ban_ip_for_month(client_ip(request))
+        except Exception as exc:
+            print("[Tekden AI] Moderasyon banı kaydedilemedi:", type(exc).__name__)
+        raise HTTPException(
+            status_code=403,
+            detail="Mesajında küfür veya hakaret tespit edildi. Tekden AI erişimin 30 gün boyunca engellendi."
+        )
+    user = current_user(request)
     plan = "plus" if user and user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else (user or {}).get("plan", "free")
     account_preferences = None
     if user:
@@ -5108,135 +5188,42 @@ HTML = r"""<!doctype html>
 @media(max-width:720px){.layout{grid-template-columns:1fr}.sidebar{display:none}.mobile{display:inline-block}.messages{padding:20px 14px}.top{padding:10px 12px}.composerwrap{padding:8px 10px 12px}.welcomegrid{grid-template-columns:1fr}.feature{min-height:auto}.topnav{display:none}}
 .garage-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}.garage-item{border:1px solid #355b79;border-radius:12px;padding:10px;background:#0b1b2d;color:#eaf6ff;text-align:left;cursor:pointer}.garage-item:disabled{opacity:.45;cursor:not-allowed}.garage-item strong{display:block;margin-bottom:4px}.toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:3;background:#061423ed;border:1px solid #4de8ff;border-radius:999px;padding:8px 13px;color:#fff;pointer-events:none;white-space:nowrap}.badge-row{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}.mini-badge{background:#172c43;border:1px solid #375675;border-radius:8px;padding:6px 8px;font-size:12px}
 
-/* Tekden AI mobile UX refinement: clearer navigation, less visual clutter */
-@media (max-width: 720px) {
-  html, body { min-height: 100%; }
-  body { font-size: 14px; }
-  .layout {
-    display: flex;
-    flex-direction: column;
-    height: 100dvh;
-    min-height: 0;
-    overflow: hidden;
-  }
-  .main { flex: 1; min-height: 0; width: 100%; }
-  .top {
-    flex: 0 0 auto;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 9px 12px;
-    align-items: center;
-  }
-  .top > div:nth-child(2) { flex: 1; min-width: 0; }
-  .top > div:nth-child(2) strong { font-size: 15px; }
-  .top > div:nth-child(2) small { font-size: 11px; }
-  #profileBtn { padding: 6px 8px; gap: 5px; }
-  #profileButtonText { display: none; }
-  .topnav {
-    display: flex !important;
-    order: 5;
-    width: 100%;
-    max-width: 100%;
-    gap: 6px;
-    overflow-x: auto;
-    overflow-y: hidden;
-    flex-wrap: nowrap;
-    padding: 2px 0 4px;
-    scrollbar-width: thin;
-    -webkit-overflow-scrolling: touch;
-  }
-  .topnav button {
-    flex: 0 0 auto;
-    white-space: nowrap;
-    font-size: 12px;
-    padding: 7px 10px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: #f6faff;
-  }
-  .messages {
-    min-height: 0;
-    padding: 16px 12px 18px;
-    gap: 12px;
-    overscroll-behavior: contain;
-  }
-  .welcome { margin: 8px auto 20px; }
-  .welcome-logo { font-size: 30px; margin-bottom: 8px; }
-  .welcome h1 { font-size: clamp(23px, 6vw, 29px); line-height: 1.2; letter-spacing: -.6px; }
-  .welcome p { font-size: 13px; line-height: 1.45; margin: 8px auto 14px; }
-  .welcomegrid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
-    margin: 14px 0 8px;
-  }
-  .feature {
-    min-width: 0;
-    min-height: 100px;
-    padding: 11px 10px;
-    gap: 8px;
-    border-radius: 13px;
-    align-items: flex-start;
-  }
-  .feature .ico { flex: 0 0 30px; height: 30px; font-size: 15px; border-radius: 9px; }
-  .feature b { font-size: 13px; line-height: 1.3; }
-  .feature small { font-size: 11px; line-height: 1.35; }
-  .bubble { max-width: 100%; padding: 12px 13px; border-radius: 15px; font-size: 14px; }
-  .composerwrap {
-    flex: 0 0 auto;
-    padding: 7px 9px calc(8px + env(safe-area-inset-bottom));
-    border-top: 1px solid #edf2f8;
-  }
-  .composer { padding: 8px; border-radius: 16px; }
-  .composer textarea {
-    min-height: 46px;
-    max-height: 120px;
-    resize: none;
-    padding: 7px 8px;
-    font-size: 16px;
-  }
-  .attachrow { gap: 6px; padding: 0 3px 7px; }
-  .attachlabel { font-size: 12px; padding: 7px 9px; }
-  .attachname { max-width: 45%; font-size: 11px; }
-  .tools { align-items: stretch; gap: 7px; }
-  .toolleft {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px;
-    flex: 1 1 100%;
-    min-width: 0;
-  }
-  .toolleft button { width: 100%; min-width: 0; padding: 8px 6px; font-size: 12px; white-space: nowrap; }
-  .toolleft .status { display: none; }
-  #sendBtn { width: 100%; padding: 10px 12px; }
-  .composerwrap > .notice { font-size: 10px; line-height: 1.35; margin-top: 5px !important; }
-  .modalback { padding: 10px; align-items: flex-end; }
-  .modal { width: 100%; max-height: 88dvh; overflow-y: auto; padding: 18px; border-radius: 20px 20px 14px 14px; }
-  .modal .row { flex-direction: column; }
-  .profilegrid { gap: 7px; }
-  .profileitem { padding: 9px; }
+/* Tekden AI: sade alt alan ve mobil araç menüsü */
+#tdQuickDock{display:none!important}
+#mobileToolsBtn{display:none}
+#mobileToolsMenu{display:none}
+@media(max-width:720px){
+  .top{gap:8px}
+  #mobileToolsBtn{display:inline-flex;align-items:center;justify-content:center;width:42px;height:42px;padding:0;font-size:24px;flex:0 0 42px}
+  #mobileToolsMenu{position:absolute;right:10px;top:62px;z-index:50;width:min(270px,calc(100vw - 20px));padding:8px;background:#fff;border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 35px #173b6526;display:none;grid-template-columns:1fr 1fr;gap:6px}
+  #mobileToolsMenu.open{display:grid}
+  #mobileToolsMenu button{display:flex;align-items:center;gap:7px;justify-content:flex-start;padding:10px 9px;font-size:13px;min-width:0}
+  #mobileToolsMenu button .menuIcon{font-size:18px;width:22px;text-align:center;flex:0 0 22px}
+  .welcomegrid{display:none!important}
+  .welcome p{margin:8px auto 0;max-width:320px;font-size:14px}
+  .topnav{display:none!important}
+  .toolleft #searchBtn,.toolleft #imageBtn,.toolleft #dictationBtn,.toolleft #voiceBtn{display:none!important}
+  .toolleft{min-width:0}
+  .status{font-size:11px}
+  .composer textarea{min-height:52px}
 }
-@media (max-width: 380px) {
-  .welcomegrid { grid-template-columns: 1fr; }
-  .feature { min-height: 74px; }
-  .feature small { font-size: 12px; }
-  .top { gap: 6px; }
-  .topnav button { font-size: 11px; padding: 7px 9px; }
-}
-@media (max-height: 700px) and (max-width: 720px) {
-  .welcome-logo { font-size: 25px; }
-  .welcome h1 { font-size: 22px; }
-  .welcomegrid { gap: 6px; margin-top: 9px; }
-  .feature { min-height: 78px; padding: 8px; }
-  .feature small { display: none; }
-  .composerwrap > .notice { display: none; }
-}
+@media(min-width:721px){#mobileToolsMenu{display:none!important}}
 </style></head><body>
 <div class="layout"><aside class="sidebar"><div class="brand">Tekden <span>AI</span></div>
 <div class="sideactions"><button id="newChat">＋ Yeni sohbet</button><button id="proStudioBtn" class="secondary" style="display:none;border-color:#c5a4ff;color:#6132b8;background:linear-gradient(110deg,#f4edff,#edf5ff)" onclick="location.href='/pro-studio'">✦ Pro Stüdyo</button><button class="secondary" onclick="openSongStudio()" style="border-color:#d8c9ff;color:#6941b6;background:#faf7ff">🎤 Şarkı Stüdyosu</button></div>
 <div><small style="color:var(--muted)">SOHBETLER</small></div><div class="sideutility"><button class="secondary" id="activeChatsBtn">Son sohbetler</button><button class="secondary" id="archivedChatsBtn">Arşiv</button></div><div class="history" id="history"><div class="notice">Geçmişi görmek için giriş yap.</div></div>
 <div class="userbar" id="userbar"><div class="notice">Misafir modu · Sohbetler kaydedilmez.</div></div></aside>
-<main class="main"><header class="top"><button class="secondary mobile" id="mobileNew">＋</button><div><strong>Tekden AI</strong><br><small>Yardımcı yapay zekân</small></div><nav class="topnav"><button class="active" onclick="newChat()">◉ Sohbet</button><button onclick="$('prompt').value='Görsel oluştur: ';$('prompt').focus()">▧ Görsel</button><button onclick="$('fileInput').click()">▤ Dosya Analizi</button><button onclick="forceSearch=true;$('searchBtn').style.borderColor='var(--accent)';$('prompt').focus()">⌕ Web Arama</button><button onclick="$('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';$('prompt').focus()">▣ Uygulama</button><button onclick="$('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: '; $('prompt').focus()">🎮 Oyun</button><button onclick="openSongStudio()">🎤 Şarkı</button><button onclick="location.href='/kesfet'">✦ Keşfet</button></nav><div style="display:flex;gap:8px"><button class="secondary profilebtn" id="profileBtn" aria-label="Profil"><span class="avatar" id="topAvatar">?</span><span id="profileButtonText">Profil</span></button></div></header>
+<main class="main"><header class="top"><button class="secondary mobile" id="mobileNew">＋</button><div><strong>Tekden AI</strong><br><small>Yardımcı yapay zekân</small></div><nav class="topnav"><button class="active" onclick="newChat()">◉ Sohbet</button><button onclick="$('prompt').value='Görsel oluştur: ';$('prompt').focus()">▧ Görsel</button><button onclick="$('fileInput').click()">▤ Dosya Analizi</button><button onclick="forceSearch=true;$('searchBtn').style.borderColor='var(--accent)';$('prompt').focus()">⌕ Web Arama</button><button onclick="$('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';$('prompt').focus()">▣ Uygulama</button><button onclick="$('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: '; $('prompt').focus()">🎮 Oyun</button><button onclick="openSongStudio()">🎤 Şarkı</button><button onclick="location.href='/kesfet'">✦ Keşfet</button></nav><div style="display:flex;gap:8px;align-items:center"><button class="secondary" id="mobileToolsBtn" type="button" aria-label="Diğer araçlar" aria-expanded="false">⋮</button><button class="secondary profilebtn" id="profileBtn" aria-label="Profil"><span class="avatar" id="topAvatar">?</span><span id="profileButtonText">Profil</span></button></div></header>
+<div id="mobileToolsMenu" aria-label="Diğer araçlar">
+<button class="secondary" type="button" data-mobile-action="image"><span class="menuIcon">▧</span>Görsel oluştur</button>
+<button class="secondary" type="button" data-mobile-action="file"><span class="menuIcon">▤</span>Dosya analizi</button>
+<button class="secondary" type="button" data-mobile-action="web"><span class="menuIcon">⌕</span>Web arama</button>
+<button class="secondary" type="button" data-mobile-action="app"><span class="menuIcon">⌘</span>Uygulama</button>
+<button class="secondary" type="button" data-mobile-action="game"><span class="menuIcon">🎮</span>Oyun tasarla</button>
+<button class="secondary" type="button" data-mobile-action="song"><span class="menuIcon">🎵</span>Şarkı</button>
+<button class="secondary" type="button" data-mobile-action="dictation" aria-label="Dikte"><span class="menuIcon">🎙</span>Dikte</button>
+<button class="secondary" type="button" data-mobile-action="voice" aria-label="Sesli sohbet"><span class="menuIcon">🔊</span>Sesli sohbet</button>
+</div>
 <section class="messages" id="messages"><div class="welcome" id="welcome"><div class="welcome-logo">Tekden <span>AI</span><span class="spark">✦</span></div><h1>Tekden AI'ye Hoş Geldin <span class="blue">✦</span></h1><p>Sana nasıl yardımcı olabilirim? Bir mesaj yazman yeterli; diğer araçlar gerektiğinde hazır.</p><div class="welcomegrid"><button class="feature suggestion" data-kind="chat"><span class="ico">◉</span><span><b>Sohbet</b><small>Konuları açıkla, sorularını yanıtla ve adım adım ilerle.</small></span></button><button class="feature suggestion" data-kind="image"><span class="ico">▧</span><span><b>Görsel Oluştur</b><small>İstediğin sahneyi tarif et, görselini üret.</small></span></button><button class="feature suggestion" data-kind="file"><span class="ico">▤</span><span><b>Dosya Analizi</b><small>PDF, belge ve görsellerdeki içeriği incele.</small></span></button><button class="feature suggestion" data-kind="web"><span class="ico">⌕</span><span><b>Web Arama</b><small>Güncel bilgileri kaynaklarıyla araştır.</small></span></button><button class="feature suggestion" data-kind="app"><span class="ico">⌘</span><span><b>Uygulama Geliştir</b><small>Kod, site ve proje fikirleri üzerinde çalış.</small></span></button><button class="feature suggestion" data-kind="game"><span class="ico">♧</span><span><b>Oyun Tasarla</b><small>Free ile arcade oyna; Pro ile tarifinden özgün, oynanabilir oyun üret.</small></span></button><button class="feature songstudio" type="button" onclick="openSongStudio()"><span class="ico">🎤</span><span><b>Vokalli Şarkı Stüdyosu</b><small>Pro üyelerine özel: Tekden AI içinde vokalli şarkı üret.</small></span></button></div></div></section>
 <div class="composerwrap"><div class="composer"><textarea id="prompt" placeholder="Tekden AI'a mesaj yaz..."></textarea><div class="attachrow"><label class="attachlabel" for="fileInput">📎 Dosya / görsel ekle</label><input id="fileInput" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.docx" hidden><span class="attachname" id="fileName">Dosya seçilmedi</span></div><div class="tools"><div class="toolleft"><button class="secondary" id="searchBtn" title="İnternette ara">⌕ Web ara</button><button class="secondary" id="imageBtn" title="Görsel oluştur">▧ Görsel</button><button class="secondary" id="dictationBtn" title="Konuşarak yaz">🎙 Dikte et</button><button class="secondary" id="voiceBtn" title="Sesli sohbet">🔊 Sesli sohbet</button><span class="status" id="status">Hazır</span></div><button id="sendBtn">Gönder ↑</button></div></div><div class="notice" style="text-align:center;margin-top:8px">Misafir sohbetleri bu tarayıcıda saklanır; hesap açarsan sohbet geçmişin hesabına kaydedilir.</div></div></main></div>
 <div class="modalback" id="modalback"><div class="modal"><h2 id="modalTitle">Tekden AI'a giriş yap</h2><p class="notice">Hesabınla sohbet geçmişin saklanır.</p><input id="authUser" placeholder="Kullanıcı adı" autocomplete="username"><input id="authPass" type="password" placeholder="Şifre (en az 8 karakter)" autocomplete="current-password"><div class="row"><button id="authSubmit">Giriş yap</button><button class="secondary" id="registerBtn">Kayıt ol</button></div><p id="authError" class="notice"></p><button class="secondary" id="closeModal" style="width:100%;margin-top:8px">Kapat</button></div></div>
@@ -5482,6 +5469,37 @@ $('buyPro').onclick=async()=>{if(!user){$('plansBack').style.display='none';show
 $('buyPlus').onclick=async()=>{if(!user){$('plansBack').style.display='none';showModal();$('authError').textContent='Plus üyeliği için giriş yap veya kayıt ol.';return}try{const d=await api('/api/billing/checkout',{method:'POST',body:JSON.stringify({plan:'plus'})});if(d.url)location.href=d.url}catch(e){alert(e.message)}};
 const payState=new URLSearchParams(location.search).get('payment');if(payState==='success')setTimeout(()=>alert('Ödeme alındıysa üyelik, Stripe webhook doğrulaması sonrasında etkinleşir.'),300);if(payState==='cancelled')setStatus('Ödeme iptal edildi');
 restoreGuestHistory();refreshMe();
+
+// Mobil araç menüsü: mevcut araç düğmelerini kullanır, işlevleri değiştirmez.
+(function(){
+ const menu=document.getElementById('mobileToolsMenu');
+ const trigger=document.getElementById('mobileToolsBtn');
+ if(!menu||!trigger)return;
+ trigger.addEventListener('click',function(e){
+   e.stopPropagation();
+   const opened=menu.classList.toggle('open');
+   trigger.setAttribute('aria-expanded',String(opened));
+ });
+ document.addEventListener('click',function(e){
+   if(!menu.contains(e.target)&&!trigger.contains(e.target)){
+     menu.classList.remove('open');trigger.setAttribute('aria-expanded','false');
+   }
+ });
+ menu.addEventListener('click',function(e){
+   const b=e.target.closest('[data-mobile-action]');if(!b)return;
+   const action=b.dataset.mobileAction;
+   menu.classList.remove('open');trigger.setAttribute('aria-expanded','false');
+   if(action==='image'){document.getElementById('prompt').value='Görsel oluştur: ';document.getElementById('prompt').focus();}
+   else if(action==='file'){document.getElementById('fileInput').click();}
+   else if(action==='web'){window.forceSearch=true;const x=document.getElementById('searchBtn');if(x)x.style.borderColor='var(--accent)';document.getElementById('prompt').focus();}
+   else if(action==='app'){document.getElementById('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';document.getElementById('prompt').focus();}
+   else if(action==='game'){document.getElementById('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: ';document.getElementById('prompt').focus();}
+   else if(action==='song'&&typeof openSongStudio==='function'){openSongStudio();}
+   else if(action==='dictation'){const x=document.getElementById('dictationBtn');if(x)x.click();}
+   else if(action==='voice'){const x=document.getElementById('voiceBtn');if(x)x.click();}
+ });
+})();
+
 </script></body></html>"""
 
 @app.get("/kesfet", response_class=HTMLResponse)
