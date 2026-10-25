@@ -5107,6 +5107,130 @@ HTML = r"""<!doctype html>
 @media(max-width:1050px){.topnav{display:none}}
 @media(max-width:720px){.layout{grid-template-columns:1fr}.sidebar{display:none}.mobile{display:inline-block}.messages{padding:20px 14px}.top{padding:10px 12px}.composerwrap{padding:8px 10px 12px}.welcomegrid{grid-template-columns:1fr}.feature{min-height:auto}.topnav{display:none}}
 .garage-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}.garage-item{border:1px solid #355b79;border-radius:12px;padding:10px;background:#0b1b2d;color:#eaf6ff;text-align:left;cursor:pointer}.garage-item:disabled{opacity:.45;cursor:not-allowed}.garage-item strong{display:block;margin-bottom:4px}.toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:3;background:#061423ed;border:1px solid #4de8ff;border-radius:999px;padding:8px 13px;color:#fff;pointer-events:none;white-space:nowrap}.badge-row{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}.mini-badge{background:#172c43;border:1px solid #375675;border-radius:8px;padding:6px 8px;font-size:12px}
+
+/* Tekden AI mobile UX refinement: clearer navigation, less visual clutter */
+@media (max-width: 720px) {
+  html, body { min-height: 100%; }
+  body { font-size: 14px; }
+  .layout {
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .main { flex: 1; min-height: 0; width: 100%; }
+  .top {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 9px 12px;
+    align-items: center;
+  }
+  .top > div:nth-child(2) { flex: 1; min-width: 0; }
+  .top > div:nth-child(2) strong { font-size: 15px; }
+  .top > div:nth-child(2) small { font-size: 11px; }
+  #profileBtn { padding: 6px 8px; gap: 5px; }
+  #profileButtonText { display: none; }
+  .topnav {
+    display: flex !important;
+    order: 5;
+    width: 100%;
+    max-width: 100%;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    flex-wrap: nowrap;
+    padding: 2px 0 4px;
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+  }
+  .topnav button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+    font-size: 12px;
+    padding: 7px 10px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: #f6faff;
+  }
+  .messages {
+    min-height: 0;
+    padding: 16px 12px 18px;
+    gap: 12px;
+    overscroll-behavior: contain;
+  }
+  .welcome { margin: 8px auto 20px; }
+  .welcome-logo { font-size: 30px; margin-bottom: 8px; }
+  .welcome h1 { font-size: clamp(23px, 6vw, 29px); line-height: 1.2; letter-spacing: -.6px; }
+  .welcome p { font-size: 13px; line-height: 1.45; margin: 8px auto 14px; }
+  .welcomegrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin: 14px 0 8px;
+  }
+  .feature {
+    min-width: 0;
+    min-height: 100px;
+    padding: 11px 10px;
+    gap: 8px;
+    border-radius: 13px;
+    align-items: flex-start;
+  }
+  .feature .ico { flex: 0 0 30px; height: 30px; font-size: 15px; border-radius: 9px; }
+  .feature b { font-size: 13px; line-height: 1.3; }
+  .feature small { font-size: 11px; line-height: 1.35; }
+  .bubble { max-width: 100%; padding: 12px 13px; border-radius: 15px; font-size: 14px; }
+  .composerwrap {
+    flex: 0 0 auto;
+    padding: 7px 9px calc(8px + env(safe-area-inset-bottom));
+    border-top: 1px solid #edf2f8;
+  }
+  .composer { padding: 8px; border-radius: 16px; }
+  .composer textarea {
+    min-height: 46px;
+    max-height: 120px;
+    resize: none;
+    padding: 7px 8px;
+    font-size: 16px;
+  }
+  .attachrow { gap: 6px; padding: 0 3px 7px; }
+  .attachlabel { font-size: 12px; padding: 7px 9px; }
+  .attachname { max-width: 45%; font-size: 11px; }
+  .tools { align-items: stretch; gap: 7px; }
+  .toolleft {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+  .toolleft button { width: 100%; min-width: 0; padding: 8px 6px; font-size: 12px; white-space: nowrap; }
+  .toolleft .status { display: none; }
+  #sendBtn { width: 100%; padding: 10px 12px; }
+  .composerwrap > .notice { font-size: 10px; line-height: 1.35; margin-top: 5px !important; }
+  .modalback { padding: 10px; align-items: flex-end; }
+  .modal { width: 100%; max-height: 88dvh; overflow-y: auto; padding: 18px; border-radius: 20px 20px 14px 14px; }
+  .modal .row { flex-direction: column; }
+  .profilegrid { gap: 7px; }
+  .profileitem { padding: 9px; }
+}
+@media (max-width: 380px) {
+  .welcomegrid { grid-template-columns: 1fr; }
+  .feature { min-height: 74px; }
+  .feature small { font-size: 12px; }
+  .top { gap: 6px; }
+  .topnav button { font-size: 11px; padding: 7px 9px; }
+}
+@media (max-height: 700px) and (max-width: 720px) {
+  .welcome-logo { font-size: 25px; }
+  .welcome h1 { font-size: 22px; }
+  .welcomegrid { gap: 6px; margin-top: 9px; }
+  .feature { min-height: 78px; padding: 8px; }
+  .feature small { display: none; }
+  .composerwrap > .notice { display: none; }
+}
 </style></head><body>
 <div class="layout"><aside class="sidebar"><div class="brand">Tekden <span>AI</span></div>
 <div class="sideactions"><button id="newChat">＋ Yeni sohbet</button><button id="proStudioBtn" class="secondary" style="display:none;border-color:#c5a4ff;color:#6132b8;background:linear-gradient(110deg,#f4edff,#edf5ff)" onclick="location.href='/pro-studio'">✦ Pro Stüdyo</button><button class="secondary" onclick="openSongStudio()" style="border-color:#d8c9ff;color:#6941b6;background:#faf7ff">🎤 Şarkı Stüdyosu</button></div>
