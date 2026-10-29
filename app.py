@@ -16,8 +16,8 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud").strip()
 OLLAMA_PRO_MODEL = os.getenv("OLLAMA_PRO_MODEL", "gpt-oss:120b-cloud").strip()
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "AhmetKerim.").strip()
 OWNER_PASSWORD = os.getenv("OWNER_PASSWORD", "").strip()
-EXTRA_PLUS_USERNAME = os.getenv("EXTRA_PLUS_USERNAME", "").strip()
-EXTRA_PLUS_PASSWORD = os.getenv("EXTRA_PLUS_PASSWORD", "").strip()
+EXTRA_PLUS_USERNAME = os.getenv("EXTRA_PRO_USERNAME", "").strip()
+EXTRA_PLUS_PASSWORD = os.getenv("EXTRA_PRO_PASSWORD", "").strip()
 POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
 # Hugging Face free-tier credits are limited and may change.
@@ -277,14 +277,14 @@ def init_db():
                 conn.execute("INSERT INTO users(username,password_hash,plan) VALUES(%s,%s,'plus')", (OWNER_USERNAME, hash_password(OWNER_PASSWORD)))
         # Optional additional Plus account, configured through Render Environment.
         # This grants Plus only; it does not grant owner/admin privileges.
-        if EXTRA_PRO_USERNAME and EXTRA_PRO_PASSWORD and len(EXTRA_PLUS_PASSWORD) >= 8:
+        if EXTRA_PRO_USERNAME and EXTRA_PRO_PASSWORD and len(EXTRA_PRO_PASSWORD) >= 8:
             extra = conn.execute("SELECT id FROM users WHERE lower(username)=lower(%s)", (EXTRA_PRO_USERNAME,)).fetchone()
             if extra:
-                conn.execute("UPDATE users SET plan='plus', password_hash=%s WHERE id=%s",
-                             (hash_password(EXTRA_PLUS_PASSWORD), extra["id"]))
+                conn.execute("UPDATE users SET plan='pro', password_hash=%s WHERE id=%s",
+                             (hash_password(EXTRA_PRO_PASSWORD), extra["id"]))
             else:
                 conn.execute("INSERT INTO users(username,password_hash,plan) VALUES(%s,%s,'pro')",
-                             (EXTRA_PLUS_USERNAME, hash_password(EXTRA_PLUS_PASSWORD)))
+                             (EXTRA_PRO_USERNAME, hash_password(EXTRA_PRO_PASSWORD)))
 
 
 # Product capability catalogue used by the plan UI and future billing screens.
