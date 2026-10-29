@@ -38,79 +38,57 @@ app = FastAPI(title=APP_NAME)
 
 from fastapi.responses import PlainTextResponse
 
-# 1. Rotaları en tepeye koyun ki diğer genel yakalayıcılar bunları engellemesin
+# SEO ve doğrulama uç noktaları: her rota yalnızca bir kez tanımlanır.
+PUBLIC_BASE_URL = "https://tekden-ai-2.onrender.com"
+
 @app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
 def robots_txt():
-    content = "User-agent: *\nAllow: /\nSitemap: https://tekden-ai-2.onrender.com/sitemap.xml\n"
-    return PlainTextResponse(content, media_type="text/plain; charset=utf-8")
-
-@app.get("/sitemap.xml", include_in_schema=False)
-def sitemap_xml():
-    content = """<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>https://tekden-ai-2.onrender.com/</loc></url>
-</urlset>
-"""
-    return PlainTextResponse(content, media_type="application/xml")
-from fastapi.responses import PlainTextResponse
-
-# FastAPI uygulamasının hemen altına ekleyin:
-@app.get("/robots.txt", response_class=PlainTextResponse)
-def get_robots_txt():
-    data = "User-agent: *\nAllow: /\nSitemap: https://tekden-ai-2.onrender.com/sitemap.xml\n"
-    return PlainTextResponse(content=data, media_type="text/plain")
-    
-# Google Search Console HTML-file verification (keep filename and body exact).
-@app.get("/google60fefbe52fe7bb22.html", response_class=HTMLResponse, include_in_schema=False)
-def google_site_verification():
-    return "google-site-verification: google60fefbe52fe7bb22.html"
-
-
-# Google AdSense ads.txt authorization. Publisher ID matches the AdSense script in the page HTML.
-@app.get("/ads.txt", response_class=PlainTextResponse, include_in_schema=False)
-def ads_txt():
-    return "google.com, pub-3311978441761062, DIRECT, f08c47fec0942fa0"
-
-# Google Search Console: robots.txt dosyasını açık ve önbelleksiz sun.
-@app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
-def robots_txt():
-    # Gerçek satır sonları kullan; Google'ın robots.txt ayrıştırıcısı için açık içerik.
-    content = "\n".join([
-        "User-agent: *",
-        "Allow: /",
-        "Sitemap: https://tekden-ai-2.onrender.com/sitemap.xml",
-        "",
-    ])
+    body = (
+        "User-agent: *\\n"
+        "Allow: /\\n"
+        f"Sitemap: {PUBLIC_BASE_URL}/sitemap.xml\\n"
+    )
     return PlainTextResponse(
-        content,
+        body,
         media_type="text/plain; charset=utf-8",
-        headers={"Cache-Control": "no-cache, max-age=0", "X-Robots-Tag": "all"},
+        headers={"Cache-Control": "no-cache, max-age=0"},
     )
 
-
-# Google Search Console için XML site haritası.
-@app.get("/sitemap.xml", include_in_schema=False)
+@app.get("/sitemap.xml", response_class=PlainTextResponse, include_in_schema=False)
 def sitemap_xml():
-    content = """<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url>
-    <loc>https://tekden-ai-2.onrender.com/</loc>
-  </url>
-  <url>
-    <loc>https://tekden-ai-2.onrender.com/hakkimizda</loc>
-  </url>
-  <url>
-    <loc>https://tekden-ai-2.onrender.com/gizlilik</loc>
-  </url>
-  <url>
-    <loc>https://tekden-ai-2.onrender.com/iletisim</loc>
-  </url>
-</urlset>
-"""
+    paths = [
+        "/", "/hakkimizda", "/gizlilik", "/iletisim",
+        "/rehberler",
+        "/rehberler/yapay-zeka-ile-verimli-calisma",
+        "/rehberler/gorsel-uretimi-ipuclari",
+        "/rehberler/dosya-analizinde-gizlilik",
+    ]
+    urls = "".join(
+        f"<url><loc>{PUBLIC_BASE_URL}{path}</loc></url>" for path in paths
+    )
+    body = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        + urls +
+        "</urlset>"
+    )
     return PlainTextResponse(
-        content,
-        media_type="application/xml",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+        body,
+        media_type="application/xml; charset=utf-8",
+        headers={"Cache-Control": "no-cache, max-age=0"},
+    )
+
+# Google Search Console HTML-file verification: dosya adı ve yanıt tam eşleşmeli.
+@app.get("/google60fefbe52fe7bb22.html", response_class=HTMLResponse, include_in_schema=False)
+def google_site_verification():
+    return HTMLResponse("google-site-verification: google60fefbe52fe7bb22.html")
+
+# AdSense ads.txt: yayıncı kimliği, AdSense hesabındaki kimlikle aynı olmalı.
+@app.get("/ads.txt", response_class=PlainTextResponse, include_in_schema=False)
+def ads_txt():
+    return PlainTextResponse(
+        "google.com, pub-3311978441761062, DIRECT, f08c47fec0942fa0\\n",
+        media_type="text/plain; charset=utf-8",
     )
 
 
@@ -5139,7 +5117,7 @@ def image(body: ImageBody):
 
 HTML = r"""<!doctype html>
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3311978441761062" crossorigin="anonymous"></script>
+
 <meta name="description" content="Tekden AI ile yapay zekâ sohbeti, web araştırması, görsel üretimi, dosya analizi ve yaratıcı proje araçlarını keşfet."><meta property="og:title" content="Tekden AI · Yapay zekâ çalışma alanı"><meta property="og:description" content="Sohbet, araştırma, dosya analizi, görsel üretimi ve kişisel çalışma araçları."><meta name="theme-color" content="#0878f9"><meta name="robots" content="index,follow"><title>Tekden AI · Yapay Zekâ Asistanı</title><style>
 :root{color-scheme:light;--bg:#fff;--panel:#fff;--panel2:#edf5ff;--text:#111c32;--muted:#526784;--accent:#086cff;--accent2:#e3f0ff;--line:#d6e5f8;--green:#0da96b;--shadow:0 10px 32px rgba(28,91,170,.10)}
 *{box-sizing:border-box}body{margin:0;background:#fff;color:var(--text);font:15px/1.5 Inter,system-ui,-apple-system,Segoe UI,sans-serif}button,input,textarea{font:inherit}button{cursor:pointer;border:1px solid transparent;border-radius:12px;padding:10px 14px;background:var(--accent);color:#fff;font-weight:650;transition:background .15s,transform .15s,border-color .15s}button:hover{background:#0067dc;transform:translateY(-1px)}button.secondary{background:#f4f8fd;color:#1a365d;border:1px solid #d9e6f5}button.secondary:hover{background:#e5f1ff;border-color:#a9d0ff}button:disabled{opacity:.5;cursor:wait;transform:none}
@@ -5528,7 +5506,7 @@ $('fullscreen').onclick=()=>frame?.requestFullscreen?.();$('download').onclick=(
 @app.get("/", response_class=HTMLResponse)
 def home():
     # Monetization entry point is appended to the existing homepage; existing UI stays intact.
-    monetization_link = """<div style="position:fixed;right:14px;bottom:14px;z-index:9999"><a href="/ortaklik" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#155eef;color:#fff;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0002">Tekden AI'ı destekle / İş ortaklığı</a></div>"""
+    monetization_link = """<div style="position:fixed;right:14px;bottom:14px;z-index:9999;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end"><a href="/rehberler" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#fff;color:#155eef;border:1px solid #cfe0f8;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0001">Yapay zekâ rehberleri</a><a href="/hakkimizda" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#fff;color:#155eef;border:1px solid #cfe0f8;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0001">Hakkımızda</a><a href="/iletisim" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#fff;color:#155eef;border:1px solid #cfe0f8;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0001">İletişim</a><a href="/ortaklik" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#155eef;color:#fff;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0002">Tekden AI'ı destekle / İş ortaklığı</a></div>"""
     page = HTML.replace("</body>", monetization_link + "</body>", 1) if "</body>" in HTML else HTML + monetization_link
     return HTMLResponse(page)
 
@@ -5544,6 +5522,121 @@ def privacy_page():
 def contact_page():
     return HTMLResponse("""<!doctype html><html lang='tr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>İletişim · Tekden AI</title><style>body{font:16px/1.7 system-ui;max-width:850px;margin:40px auto;padding:0 20px;color:#17304f}a{color:#0878f9}</style><h1>İletişim</h1><p>Tekden AI ile ilgili destek, hata bildirimi, gizlilik veya içerik talepleriniz için proje sahibine ait, düzenli kontrol edilen bir iletişim e-posta adresi eklenmelidir.</p><p><strong>Not:</strong> Yayına almadan önce bu sayfaya gerçek ve erişilebilir bir destek e-posta adresi ekleyin.</p><p><a href='/'>Ana sayfaya dön</a> · <a href='/gizlilik'>Gizlilik Politikası</a></p></html>""")
 
+
+
+# ----------------------- Editoryal rehberler -----------------------
+# Reklam kodu yalnızca rehber makalelerinde yüklenir; uygulama/sohbet ekranlarında yüklenmez.
+ADSENSE_GUIDE_HEAD = """
+<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3311978441761062" crossorigin="anonymous"></script>
+"""
+
+GUIDE_STYLE = """
+<style>
+:root{color-scheme:light;--ink:#142844;--muted:#536982;--blue:#0878f9;--line:#d9e6f5;--panel:#f5f9ff}
+*{box-sizing:border-box}body{margin:0;background:#f7faff;color:var(--ink);font:17px/1.75 system-ui,-apple-system,Segoe UI,sans-serif}
+header{background:#fff;border-bottom:1px solid var(--line)}.bar{max-width:960px;margin:auto;padding:18px 22px;display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap}
+.brand{font-weight:850;font-size:22px;text-decoration:none;color:var(--ink)}.brand span{color:var(--blue)}
+nav{display:flex;gap:14px;flex-wrap:wrap}a{color:#075fc9}nav a{text-decoration:none;font-weight:600}
+main{max-width:850px;margin:34px auto;padding:0 22px 56px}.eyebrow{color:#075fc9;font-size:13px;font-weight:800;letter-spacing:.07em;text-transform:uppercase}
+h1{font-size:clamp(30px,5vw,44px);line-height:1.15;letter-spacing:-.035em;margin:.4em 0}h2{margin-top:1.6em;line-height:1.3}p,li{color:#334b68}
+.lead{font-size:19px;color:#425d7b}.note{background:#edf5ff;border:1px solid #d5e7ff;border-radius:14px;padding:16px 18px}
+footer{border-top:1px solid var(--line);padding:24px;color:var(--muted);text-align:center;font-size:14px}
+</style>
+"""
+
+def render_guide_page(title: str, description: str, article_html: str) -> HTMLResponse:
+    safe_title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    safe_description = description.replace("&", "&amp;").replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+    page = f"""<!doctype html>
+<html lang="tr"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="{safe_description}">
+<meta name="robots" content="index,follow">
+<title>{safe_title} · Tekden AI Rehber</title>
+{ADSENSE_GUIDE_HEAD}
+{GUIDE_STYLE}
+</head><body>
+<header><div class="bar"><a class="brand" href="/">Tekden <span>AI</span></a>
+<nav><a href="/">Yapay zekâ aracına dön</a><a href="/rehberler">Rehberler</a><a href="/hakkimizda">Hakkımızda</a><a href="/iletisim">İletişim</a></nav>
+</div></header>
+<main><div class="eyebrow">Tekden AI · Bilgi merkezi</div>
+<article><h1>{safe_title}</h1><p class="lead">{safe_description}</p>
+{article_html}
+<p class="note"><strong>Önemli:</strong> Yapay zekâ araçları yardımcı olabilir ancak üretilen bilgileri, özellikle önemli kararlar veya hassas dosyalar söz konusu olduğunda, kontrol etmek gerekir. Bu rehber genel bilgilendirme amaçlıdır.</p>
+</article></main>
+<footer>© Tekden AI · <a href="/gizlilik">Gizlilik</a> · <a href="/iletisim">İletişim</a></footer>
+</body></html>"""
+    return HTMLResponse(page)
+
+@app.get("/rehberler", response_class=HTMLResponse)
+def guides_index():
+    # This directory page is intentionally ad-free; ads are loaded only on article pages.
+    page = """<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Yapay zekâ ile çalışma, görsel üretimi ve dosya gizliliği hakkında Tekden AI rehberleri."><meta name="robots" content="index,follow"><title>Rehberler · Tekden AI</title>""" + GUIDE_STYLE + """</head><body><header><div class="bar"><a class="brand" href="/">Tekden <span>AI</span></a><nav><a href="/">Ana sayfa</a><a href="/hakkimizda">Hakkımızda</a><a href="/iletisim">İletişim</a></nav></div></header><main><div class="eyebrow">Bilgi merkezi</div><h1>Tekden AI rehberleri</h1><p class="lead">Yapay zekâ araçlarını daha bilinçli, verimli ve güvenli kullanmak için hazırlanmış pratik rehberler.</p><h2><a href="/rehberler/yapay-zeka-ile-verimli-calisma">Yapay zekâ ile daha verimli çalışma</a></h2><p>İstekleri netleştirme, çıktıları kontrol etme ve adım adım ilerleme yöntemleri.</p><h2><a href="/rehberler/gorsel-uretimi-ipuclari">Görsel üretiminde iyi sonuç alma</a></h2><p>Kompozisyon, ışık, stil ve istenmeyen öğeleri tarif etmek için pratik bir yöntem.</p><h2><a href="/rehberler/dosya-analizinde-gizlilik">Dosya analizinde gizlilik ve güvenlik</a></h2><p>Dosya yüklemeden önce kişisel bilgileri ve hassas içerikleri gözden geçirme.</p></main><footer>© Tekden AI · <a href="/gizlilik">Gizlilik</a> · <a href="/iletisim">İletişim</a></footer></body></html>"""
+    return HTMLResponse(page)
+
+@app.get("/rehberler/yapay-zeka-ile-verimli-calisma", response_class=HTMLResponse)
+def guide_ai_productivity():
+    article = """
+<h2>1. İstediğin sonucu açıkça tarif et</h2>
+<p>İyi bir istek yalnızca konuyu söylemekle kalmaz; hedefi, okuyucuyu, biçimi ve sınırları da açıklar. Örneğin “bir sunum hazırla” yerine “lise öğrencilerine yönelik, sekiz slaytlık, her slaytta bir ana fikir ve kısa konuşmacı notları bulunan bir sunum taslağı hazırla” demek daha kullanılabilir bir başlangıç sağlar.</p>
+<p>Gerekli ayrıntılar henüz belli değilse, modelden varsayım yapmak yerine önce birkaç netleştirici soru sormasını isteyebilirsin.</p>
+<h2>2. Büyük işleri küçük adımlara böl</h2>
+<p>Bir projeyi tek mesajda bitirmeye çalışmak yerine önce hedefleri ve kapsamı belirle; ardından taslak, uygulama, kontrol ve son düzenleme adımlarına geç. Her aşamanın sonunda neyin tamamlandığını ve hangi kararların hâlâ açık olduğunu özetlet.</p>
+<ul><li><strong>Plan:</strong> Amaç, hedef kitle, teslim biçimi ve kısıtlar.</li><li><strong>Taslak:</strong> Bölümler, ana fikirler ve eksik bilgiler.</li><li><strong>Uygulama:</strong> Bölümleri tek tek geliştir.</li><li><strong>Kontrol:</strong> Hataları, tutarsızlıkları ve kaynak ihtiyacını incele.</li></ul>
+<h2>3. Çıktıyı otomatik olarak doğru kabul etme</h2>
+<p>Yapay zekâ akıcı bir dille yanlış bilgi de verebilir. Tarih, fiyat, mevzuat, istatistik ve teknik ayrıntılar gibi değişebilen bilgileri güvenilir kaynaklardan doğrula. Kaynak isteniyorsa yalnızca bağlantı listesi değil, her kaynağın hangi iddiayı desteklediğini de sor.</p>
+<h2>4. Biçimi önceden belirt</h2>
+<p>Tablo, kontrol listesi, kısa özet, adım adım açıklama veya örnek kod gibi bir çıktı biçimi seçmek sonradan düzenleme ihtiyacını azaltır. Uzun bir metinde başlıkları ve yaklaşık uzunluğu da belirtebilirsin.</p>
+<h2>5. Gizli bilgileri paylaşma</h2>
+<p>Parolalar, erişim anahtarları, kimlik numaraları ve başkalarına ait özel bilgiler gibi verileri bir isteğe ekleme. Kod inceletirken API anahtarlarını ve gizli değerleri örnek metinlerle değiştir. İş veya okul dosyalarında paylaşma yetkin olup olmadığını kontrol et.</p>
+<h2>Kullanabileceğin istek şablonu</h2>
+<p class="note">“Amacım: [hedef]. Hedef kitle: [kimler]. İstediğim çıktı: [biçim]. Kısıtlar: [süre, uzunluk, araçlar]. Önce eksik bilgileri sor; sonra bir taslak oluştur. Emin olmadığın noktaları belirt ve doğrulanması gereken iddiaları ayrı listele.”</p>
+<h2>Son kontrol</h2>
+<p>Sonucu kullanmadan önce amaca uygunluğunu, doğruluğunu, dilini, gizlilik risklerini ve gerekli izinleri kontrol et. Yapay zekâyı kararın yerine geçen bir otorite değil, kontrol edilebilir bir yardımcı olarak kullan.</p>
+"""
+    return render_guide_page("Yapay zekâ ile daha verimli çalışma", "İstekleri netleştirme, işleri adımlara bölme ve yapay zekâ çıktısını kontrol etme üzerine pratik bir rehber.", article)
+
+@app.get("/rehberler/gorsel-uretimi-ipuclari", response_class=HTMLResponse)
+def guide_image_generation():
+    article = """
+<h2>Görsel fikrini katmanlar hâlinde anlat</h2>
+<p>Bir görsel isteğini özne, ortam, kompozisyon, ışık, renk paleti ve genel atmosfer olarak bölümlere ayır. Bu, birbirinden bağımsız ayrıntıları tek bir belirsiz cümlede toplamak yerine modelin neyi önceliklendirmesi gerektiğini açıklar.</p>
+<h2>Özne ve ortam</h2>
+<p>Önce ana nesneyi veya karakteri ve nerede bulunduğunu belirt. Ardından önemli çevre ayrıntılarını ekle. Birbiriyle çelişen çok sayıda unsur istemek yerine en önemli iki veya üç görsel özelliği seç.</p>
+<h2>Kadraj ve kompozisyon</h2>
+<p>Yakın plan, geniş açı, göz hizası, üstten görünüm veya merkezî kompozisyon gibi terimler kullanabilirsin. Görselin afiş, profil resmi, sunum kapağı ya da yatay web görseli olarak kullanılacağını söylemek de yerleşimi etkileyebilir.</p>
+<h2>Işık ve renk</h2>
+<p>Yumuşak gün ışığı, dramatik yan ışık veya dengeli stüdyo ışığı gibi tarifler seç. Renkleri de birkaç ana tonla sınırlandır: örneğin lacivert, elektrik mavisi ve beyaz. Çok fazla stil ve ışık tanımını aynı anda kullanmak sonucu tutarsızlaştırabilir.</p>
+<h2>İstenmeyen öğeleri açıkça belirt</h2>
+<p>İstemediğin metin, filigran, kalabalık arka plan veya fazladan nesneler varsa bunları kısa bir bölümde yaz. Görselde yazı gerekiyorsa metni tırnak içinde ve tam olarak belirt; yine de görsel modellerinin harfleri kusursuz üretmeyebileceğini hesaba kat.</p>
+<h2>İlk sonuçtan sonra hedefli düzeltme yap</h2>
+<p>Her şeyi baştan yazmak yerine tek bir değişiklik iste: “Kompozisyonu koru, arka planı sadeleştir ve ışığı yumuşat.” Böylece hangi tarifin sonucu değiştirdiğini daha kolay anlayabilirsin.</p>
+<h2>Örnek istem</h2>
+<p class="note">“Masanın üzerinde duran küçük bir masa lambasının gerçekçi ürün fotoğrafı; sade açık gri stüdyo arka planı, yumuşak soldan gelen ışık, doğal gölgeler, merkezden hafif sağa yerleştirilmiş özne, temiz kompozisyon, yatay 16:9 kadraj. Ek yazı, logo veya filigran olmasın.”</p>
+<h2>Son kontrol</h2>
+<p>Üretilen görselde eller, yüzler, küçük yazılar, nesne birleşimleri ve perspektif gibi ayrıntıları kontrol et. Ticari kullanımda görselin kullanım koşullarını ve marka/telif haklarıyla ilgili gereklilikleri ayrıca değerlendir.</p>
+"""
+    return render_guide_page("Görsel üretiminde iyi sonuç alma", "Kompozisyon, ışık, renk ve net istem yazımıyla görsel üretim sürecini iyileştirme yöntemleri.", article)
+
+@app.get("/rehberler/dosya-analizinde-gizlilik", response_class=HTMLResponse)
+def guide_file_privacy():
+    article = """
+<h2>Dosya yüklemeden önce içeriği gözden geçir</h2>
+<p>Bir PDF, ekran görüntüsü, tablo veya metin dosyası analiz ettirmeden önce içinde hangi bilgilerin bulunduğunu kontrol et. İsimler, telefon numaraları, adresler, öğrenci numaraları, müşteri kayıtları ve özel yazışmalar görev için gerekli değilse kaldırılmalı veya örnek değerlerle değiştirilmelidir.</p>
+<h2>Paylaşma yetkini kontrol et</h2>
+<p>Başkasına ait bir dosyayı yüklemek, o dosyanın içeriğini üçüncü taraf bir hizmetle paylaşmak anlamına gelebilir. Okul, iş yeri veya müşteri belgelerinde ilgili kuralları ve paylaşım iznini kontrol et. Gerekli izin yoksa gerçek dosya yerine anonimleştirilmiş bir örnek kullan.</p>
+<h2>Gizli anahtarları ve parolaları ayıkla</h2>
+<p>Kod dosyalarında API anahtarları, oturum sırları, veritabanı bağlantı dizeleri ve parolalar bulunabilir. Bunları dosyadan çıkar; yerlerine “API_KEY_REMOVED” gibi açıklayıcı yer tutucular koy. Bir gizli anahtar yanlışlıkla paylaşıldıysa yalnızca metinden silmek yeterli olmayabilir; ilgili hizmette anahtarı iptal edip yenisini oluşturmak gerekebilir.</p>
+<h2>Ne istediğini daralt</h2>
+<p>“Bu dosyayı incele” yerine “3. bölümdeki tabloyu özetle; kişisel verileri tekrar etme ve yalnızca dosyada yazan bilgileri kullan” gibi belirli bir görev ver. Böylece gereksiz verinin yanıt içinde yeniden görünme ihtimalini azaltırsın.</p>
+<h2>Sonucu kaynağıyla karşılaştır</h2>
+<p>Özetlerin, hesaplamaların ve çıkarılan tabloların kaynak dosyayla uyuştuğunu kontrol et. Özellikle sayısal verilerde birimlerin, tarihlerin ve sütun başlıklarının korunup korunmadığına bak. Önemli kararları yalnızca otomatik analize dayandırma.</p>
+<h2>Veri saklama ve servis koşulları</h2>
+<p>Dosyayı işleyen uygulamanın gizlilik metnini ve dosyanın gönderildiği harici sağlayıcıların koşullarını incele. Bir dosyayı sohbetten silmek, harici sağlayıcılardaki kayıtların da silindiği anlamına her zaman gelmez; saklama ve silme koşullarını ilgili hizmetten doğrula.</p>
+<h2>Pratik kontrol listesi</h2>
+<ul><li>Dosyanın paylaşılmasına izin var mı?</li><li>Görev için gerekmeyen kişisel veriler kaldırıldı mı?</li><li>Parola ve erişim anahtarı bulunuyor mu?</li><li>İstenen analiz açıkça tanımlandı mı?</li><li>Sonuçlar orijinal dosyayla karşılaştırıldı mı?</li></ul>
+"""
+    return render_guide_page("Dosya analizinde gizlilik ve güvenlik", "Dosya analizi sırasında kişisel verileri, erişim anahtarlarını ve paylaşım izinlerini kontrol etmek için pratik öneriler.", article)
 
 
 # ----------------------- Tekden AI 175 workflow catalog notes -----------------------
