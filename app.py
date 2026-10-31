@@ -280,6 +280,15 @@ def init_db():
             UNIQUE(user_id, project_name)
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_project_memories_user_updated ON project_memories(user_id, updated_at DESC)")
+        # Anonymous opt-in community pulse: store only a coarse topic label, never raw prompts or project content.
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS mind_idea_pulses (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            topic TEXT NOT NULL CHECK (topic IN ('yapay-zeka','yazilim','egitim','tasarim','oyun','robotik','diger')),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mind_idea_pulses_topic_date ON mind_idea_pulses(topic, created_at DESC)")
         # Owner account is provisioned from Render environment variables, never from a hard-coded password.
         if OWNER_PASSWORD and len(OWNER_PASSWORD) >= 8 and OWNER_USERNAME:
             owner = conn.execute("SELECT id FROM users WHERE lower(username)=lower(%s)", (OWNER_USERNAME,)).fetchone()
@@ -313,7 +322,7 @@ PLAN_FEATURES = {
         "Uzun analiz ve çok adımlı proje desteği", "Pro araç kütüphanesi"
     ], "disclaimer": "Özellikler sunucu, model ve harici sağlayıcı yapılandırmasına bağlıdır."},
     "plus": {"title": "Tekden AI Plus", "price_try_month": 400, "features": [
-        "Pro planındaki tüm özellikler dâhil", "Zihin Atölyesi: proje hafızası, doğruluk denetimi, odak uyarlaması, nüanslı çeviri, dijital ikiz taslakları ve fikir mimarı", "Pro özelliklerine ek Plus iş akışları", "150 özel Plus çalışma şablonu",
+        "Pro planındaki tüm özellikler dâhil", "Zihin Atölyesi: proje hafızası, doğruluk denetimi, what-if senaryoları, uzman fikir paneli, kod otopsisi, içerik dönüştürme, anlatım uyumu, proaktif proje incelemesi ve anonim topluluk frekansı", "Pro özelliklerine ek Plus iş akışları", "150 özel Plus çalışma şablonu",
         "Proje planlama ve gereksinim matrisi", "Belge ve toplantı iş akışları",
         "İçerik takvimi ve kampanya planları", "Ürün ve kullanıcı araştırması şablonları",
         "Yazılım kalite kontrol ve yayın öncesi kontrol listeleri",
@@ -670,6 +679,13 @@ def product_features():
             "context_aware_translation": bool(OLLAMA_API_KEY),
             "approval_required_message_drafts": bool(OLLAMA_API_KEY),
             "idea_blueprints": bool(OLLAMA_API_KEY),
+            "what_if_scenarios": bool(OLLAMA_API_KEY),
+            "simulated_expert_boardroom": bool(OLLAMA_API_KEY),
+            "code_autopsy": bool(OLLAMA_API_KEY),
+            "cross_format_transfer_plans": bool(OLLAMA_API_KEY),
+            "self_reported_resonance": True,
+            "proactive_project_review": bool(OLLAMA_API_KEY and DATABASE_URL),
+            "anonymous_opt_in_community_pulse": bool(DATABASE_URL),
         },
         "notice": "Kullanılabilirlik harici sağlayıcılara, sunucu yapılandırmasına ve kullanım limitlerine bağlıdır.",
     }
@@ -1567,6 +1583,146 @@ def create_idea_blueprint(body: IdeaBlueprintBody, request: Request):
     except Exception as exc:
         raise HTTPException(502, "Fikir mimarisi oluşturulamadı: " + str(exc)[:180])
     return {"blueprint": blueprint}
+
+# Plus-only advanced creative engines. Outputs are scenario drafts, not predictions or autonomous actions.
+class WhatIfBody(BaseModel):
+    decision: str = Field(min_length=8, max_length=7000)
+    context: str = Field(default="", max_length=5000)
+    horizon: str = Field(default="30 gün", max_length=80)
+
+class BoardroomBody(BaseModel):
+    idea: str = Field(min_length=8, max_length=7000)
+    constraints: str = Field(default="", max_length=3000)
+
+class CodeAutopsyBody(BaseModel):
+    code: str = Field(min_length=10, max_length=18000)
+    error: str = Field(default="", max_length=5000)
+    context: str = Field(default="", max_length=3000)
+
+class TransferBody(BaseModel):
+    source_type: str = Field(default="metin", max_length=40)
+    content: str = Field(min_length=5, max_length=10000)
+    target_format: str = Field(default="oyun sahnesi", max_length=60)
+
+class ResonanceBody(BaseModel):
+    self_report: str = Field(min_length=3, max_length=40)
+    response_preference: str = Field(default="kısa ve sakin", max_length=80)
+
+class ProactiveBody(BaseModel):
+    focus: str = Field(default="Bugün için en önemli sonraki adım", max_length=500)
+
+class CommunityPulseBody(BaseModel):
+    topic: str = Field(min_length=2, max_length=30)
+
+@app.post("/api/mind/what-if")
+def mind_what_if(body: WhatIfBody, request: Request):
+    user = require_plus_user(request)
+    prompt = ("Kararı beş farklı alternatif senaryoda incele: (1) mevcut karar, (2) 3 gün önce/erken uygulama, "
+              "(3) gecikmeli uygulama, (4) düşük bütçeli/temkinli yol, (5) yüksek risk-yüksek getiri yolu. "
+              "Her senaryoda varsayımlar, olası sonuçlar, maliyet/zaman/risk etkileri, erken uyarı işaretleri ve "
+              "geri dönüş planı ver. Sayısal sonuçları yalnızca kullanıcı verisi hesaplamayı destekliyorsa hesapla; "
+              "aksi hâlde nitel ve açıkça varsayımsal tut. Bunlar paralel gerçek evrenler veya kesin gelecek tahminleri değildir. "
+              "Sonunda karşılaştırmalı özet ve en dayanıklı seçenek olsun.\nKarar: " + body.decision +
+              "\nBağlam: " + body.context + "\nZaman ufku: " + body.horizon)
+    try:
+        result = call_ollama([{"role":"system","content":"Sen karar senaryosu analisti ve risk planlayıcısısın. Kesin gelecek iddiasında bulunma."},
+                              {"role":"user","content":prompt}], OLLAMA_PRO_MODEL)
+    except Exception as exc:
+        raise HTTPException(502, "What-if senaryoları oluşturulamadı: " + str(exc)[:180])
+    return {"scenarios": result, "scenario_count": 5, "is_prediction": False}
+
+@app.post("/api/mind/boardroom")
+def mind_boardroom(body: BoardroomBody, request: Request):
+    user = require_plus_user(request)
+    prompt = ("Aynı fikri dört ayrı uzman bakış açısından tartış: risk sermayedarı (pazar/gelir), ürün tasarımcısı "
+              "(kullanıcı deneyimi), kıdemli yazılım denetçisi (mimari/güvenlik/ölçek), pazarlama stratejisti "
+              "(konumlandırma/edinim). Her biri diğerlerinin en güçlü itirazına yanıt versin. Ardından ortak karar, "
+              "çözülemeyen anlaşmazlıklar, en büyük 5 risk ve 3 doğrulama deneyi sun. Bunlar ayrı çalışan modeller değil, "
+              "tek modelin simüle ettiği bakış açılarıdır; tartışmayı gerçek zamanlı çoklu ajan çalışması gibi sunma.\nFikir: " +
+              body.idea + "\nKısıtlar: " + body.constraints)
+    try:
+        result = call_ollama([{"role":"system","content":"Sen yapılandırılmış uzman paneli simülatörüsün. Gereksiz övgü yerine kanıta dayalı itiraz üret."},
+                              {"role":"user","content":prompt}], OLLAMA_PRO_MODEL)
+    except Exception as exc:
+        raise HTTPException(502, "Uzman paneli oluşturulamadı: " + str(exc)[:180])
+    return {"boardroom": result, "mode": "simulated_personas"}
+
+@app.post("/api/mind/code-autopsy")
+def mind_code_autopsy(body: CodeAutopsyBody, request: Request):
+    user = require_plus_user(request)
+    prompt = ("Kodu savunmacı ve açıklayıcı biçimde incele. Çıktı: genel yapı, somut hata/şüpheli noktalar, "
+              "mantıksal varsayımlar, güvenlik ve performans riskleri, olası çakışmalar, önceliklendirilmiş düzeltmeler, "
+              "test planı. Satır numarası veriyorsan yalnızca sağlanan koddan say ve emin değilsen belirt. "
+              "Kodun geçmiş niyetini veya gelecekte kesin çökeceğini bildiğini iddia etme. Çalıştırmadığın testi çalıştırılmış gösterme.\n"
+              "Kod:\n" + body.code + "\nHata mesajı:\n" + body.error + "\nBağlam:\n" + body.context)
+    try:
+        result = call_ollama([{"role":"system","content":"Sen kıdemli yazılım inceleme ve hata ayıklama uzmanısın. Çıkarımları bulgulardan ayır."},
+                              {"role":"user","content":prompt}], OLLAMA_PRO_MODEL)
+    except Exception as exc:
+        raise HTTPException(502, "Kod incelemesi yapılamadı: " + str(exc)[:180])
+    return {"autopsy": result, "executed": False}
+
+@app.post("/api/mind/transfer")
+def mind_transfer(body: TransferBody, request: Request):
+    user = require_plus_user(request)
+    prompt = (f"Kaynak türü: {body.source_type}. Hedef biçim: {body.target_format}.\n"
+              "Verilen içeriğin temel yapısını ve anlamını koruyarak hedef biçime dönüştür. Hedef oyun sahnesiyse "
+              "sahne fikri, etkileşim döngüsü, görsel öğeler, ses/ritim eşlemesi ve uygulanabilir üretim promptu ver. "
+              "Hedef müzikse tempo, ölçü, motif, enstrüman, duygu ve bölüm planı oluştur; gerçek ses dosyası ürettiğini iddia etme. "
+              "Hedef görselse kompozisyon, hareket, renk ve etkileşim taslağı ver. İçerik verisinden gerçek bir melodiyi "
+              "otomatik çıkardığını iddia etme; eşleştirmeleri yaratıcı yorum olarak etiketle.\nİçerik:\n" + body.content)
+    try:
+        result = call_ollama([{"role":"system","content":"Sen metin, kod ve veri için yaratıcı format dönüştürme tasarımcısısın."},
+                              {"role":"user","content":prompt}], OLLAMA_PRO_MODEL)
+    except Exception as exc:
+        raise HTTPException(502, "Dönüşüm taslağı oluşturulamadı: " + str(exc)[:180])
+    return {"transfer": result, "media_generated": False}
+
+@app.post("/api/mind/resonance")
+def mind_resonance(body: ResonanceBody, request: Request):
+    user = require_plus_user(request)
+    allowed = {"sakinim", "yorgunum", "stresliyim", "heyecanlıyım", "odaklanmak istiyorum", "normal"}
+    state = body.self_report.strip().casefold()
+    if state not in allowed:
+        raise HTTPException(400, "Durum seçeneklerinden birini seç.")
+    return {"ok": True, "self_reported_state": state,
+            "instruction": f"Kullanıcı kendi durumunu '{state}' olarak bildirdi. Yanıt tercihi: {body.response_preference}. Buna göre anlatımını uyarlayabilirsin; bu bir duygu teşhisi değildir."}
+
+@app.post("/api/mind/proactive-review")
+def mind_proactive_review(body: ProactiveBody, request: Request):
+    user = require_plus_user(request)
+    with db() as conn:
+        rows = conn.execute("SELECT project_name,summary,next_actions,updated_at FROM project_memories WHERE user_id=%s ORDER BY updated_at DESC LIMIT 8", (user["id"],)).fetchall()
+    if not rows:
+        return {"review": "Henüz proje hafızan yok. Önce Proje Hafızası sekmesinden bir proje kaydet.", "items_considered": 0}
+    context = "\n\n".join(f"Proje: {r['project_name']}\nÖzet: {r['summary'][:1500]}\nSonraki adımlar: {r['next_actions'][:800]}\nGüncelleme: {r['updated_at']}" for r in rows)
+    try:
+        result = call_ollama([{"role":"system","content":"Sen proaktif proje planlama asistanısın. Yalnızca kayıtlı bilgilere dayan, arka planda iş yaptığını iddia etme. Önerileri kullanıcı onayına sun."},
+                              {"role":"user","content":"Odak: " + body.focus + "\nKayıtlı proje hafızaları:\n" + context + "\nHer proje için olası tıkanıklığı, en yararlı sonraki adımı ve kullanıcıdan gereken onayı belirt."}], OLLAMA_PRO_MODEL)
+    except Exception as exc:
+        raise HTTPException(502, "Proaktif proje değerlendirmesi yapılamadı: " + str(exc)[:180])
+    return {"review": result, "items_considered": len(rows), "background_actions_taken": False}
+
+@app.post("/api/mind/community-pulse")
+def submit_community_pulse(body: CommunityPulseBody, request: Request):
+    user = require_plus_user(request)
+    topic = body.topic.strip().casefold()
+    allowed = {"yapay-zeka", "yazilim", "egitim", "tasarim", "oyun", "robotik", "diger"}
+    if topic not in allowed:
+        raise HTTPException(400, "Geçerli bir konu kategorisi seç.")
+    with db() as conn:
+        conn.execute("INSERT INTO mind_idea_pulses(user_id,topic) VALUES(%s,%s)", (user["id"], topic))
+        rows = conn.execute("SELECT topic,COUNT(*) AS n FROM mind_idea_pulses WHERE created_at > NOW()-INTERVAL '30 days' GROUP BY topic ORDER BY n DESC").fetchall()
+    return {"ok": True, "message": "Yalnızca seçtiğin genel kategori kaydedildi; fikir metnin veya proje içeriğin paylaşılmadı.",
+            "pulse": [{"topic": r["topic"], "count": r["n"]} for r in rows]}
+
+@app.get("/api/mind/community-pulse")
+def get_community_pulse(request: Request):
+    require_plus_user(request)
+    with db() as conn:
+        rows = conn.execute("SELECT topic,COUNT(*) AS n FROM mind_idea_pulses WHERE created_at > NOW()-INTERVAL '30 days' GROUP BY topic ORDER BY n DESC").fetchall()
+    return {"pulse": [{"topic": r["topic"], "count": r["n"]} for r in rows],
+            "note": "Son 30 günde kullanıcıların açık rızayla paylaştığı genel kategori seçimleri. Ham sohbetler ve proje metinleri paylaşılmaz."}
 
 @app.get("/api/notes")
 def list_notes(request: Request):
@@ -5830,6 +5986,13 @@ MIND_LAB_HTML = r"""
    <button type="button" data-tk-tab="translate">Nüanslı çeviri</button>
    <button type="button" data-tk-tab="twin">Dijital ikiz taslağı</button>
    <button type="button" data-tk-tab="blueprint">Fikir mimarı</button>
+   <button type="button" data-tk-tab="whatif">What-if zaman tüneli</button>
+   <button type="button" data-tk-tab="boardroom">Uzman fikir paneli</button>
+   <button type="button" data-tk-tab="autopsy">Kod otopsisi</button>
+   <button type="button" data-tk-tab="transfer">İçerik dönüştürücü</button>
+   <button type="button" data-tk-tab="resonance">Anlatım uyumu</button>
+   <button type="button" data-tk-tab="proactive">Proaktif proje inceleme</button>
+   <button type="button" data-tk-tab="community">Topluluk frekansı</button>
   </div>
   <section class="tkMindPanel active" data-tk-panel="projects">
    <div class="tkMindGrid"><div class="tkMindCard">
@@ -5858,6 +6021,14 @@ MIND_LAB_HTML = r"""
    <label for="tkConstraints">Kısıtlar ve mevcut kaynaklar</label><textarea id="tkConstraints" placeholder="Bütçe, dil, cihaz, zaman, donanım veya teknik sınırlar..."></textarea>
    <button class="tkPrimary" id="tkIdeaBtn" type="button">Uygulanabilir mimari oluştur</button><pre id="tkIdeaResult" hidden></pre>
   </div></section>
+  <section class="tkMindPanel" data-tk-panel="whatif"><div class="tkMindCard"><strong>Beş alternatif gelecek senaryosu</strong><p>Kararını farklı varsayımlarla karşılaştırır. Bunlar kesin tahmin değil, planlama simülasyonlarıdır.</p>
+   <label for="tkWhatIfDecision">Karar veya geçmişteki hamle</label><textarea id="tkWhatIfDecision" placeholder="Hangi kararı değerlendirmek istiyorsun?"></textarea><label for="tkWhatIfContext">Bağlam, bütçe ve kısıtlar</label><textarea id="tkWhatIfContext"></textarea><label for="tkWhatIfHorizon">Zaman ufku</label><input id="tkWhatIfHorizon" value="30 gün"><button class="tkPrimary" id="tkWhatIfBtn">5 senaryo oluştur</button><pre id="tkWhatIfResult" hidden></pre></div></section>
+  <section class="tkMindPanel" data-tk-panel="boardroom"><div class="tkMindCard"><strong>Çok perspektifli fikir çatıştırma</strong><p>Yatırımcı, tasarımcı, yazılım denetçisi ve pazarlamacı bakış açılarını tek model içinde simüle eder.</p><label for="tkBoardIdea">Fikrin</label><textarea id="tkBoardIdea"></textarea><label for="tkBoardConstraints">Kısıtlar</label><textarea id="tkBoardConstraints"></textarea><button class="tkPrimary" id="tkBoardBtn">Uzman panelini başlat</button><pre id="tkBoardResult" hidden></pre></div></section>
+  <section class="tkMindPanel" data-tk-panel="autopsy"><div class="tkMindCard"><strong>Tersine mühendislik ve hata avcısı</strong><p>Kodu çalıştırmadan inceler; olası hataları ve test önerilerini raporlar.</p><label for="tkAutopsyCode">Kod</label><textarea id="tkAutopsyCode" style="min-height:180px" placeholder="İncelenecek kodu yapıştır..."></textarea><label for="tkAutopsyError">Hata mesajı (varsa)</label><textarea id="tkAutopsyError"></textarea><label for="tkAutopsyContext">Proje bağlamı</label><textarea id="tkAutopsyContext"></textarea><button class="tkPrimary" id="tkAutopsyBtn">Kodu incele</button><pre id="tkAutopsyResult" hidden></pre></div></section>
+  <section class="tkMindPanel" data-tk-panel="transfer"><div class="tkMindCard"><strong>Ekosistemler arası içerik dönüşümü</strong><p>Metin, kod veya veriyi müzik, oyun sahnesi ya da görsel tasarım için üretim planına dönüştürür. Gerçek ses/görsel dosyası üretimi bu araçtan yapılmaz.</p><label for="tkTransferType">Kaynak türü</label><select id="tkTransferType"><option>metin</option><option>kod</option><option>veri</option></select><label for="tkTransferTarget">Hedef biçim</label><select id="tkTransferTarget"><option>oyun sahnesi</option><option>müzik kompozisyonu</option><option>görsel tasarım</option></select><label for="tkTransferContent">İçerik</label><textarea id="tkTransferContent"></textarea><button class="tkPrimary" id="tkTransferBtn">Dönüştür</button><pre id="tkTransferResult" hidden></pre></div></section>
+  <section class="tkMindPanel" data-tk-panel="resonance"><div class="tkMindCard"><strong>Kullanıcı kontrollü anlatım uyumu</strong><p>Ruh hâlini yalnızca sen seçersin. Kamera, mikrofon, klavye ritmi veya biyometrik veri toplanmaz; bu özellik teşhis yapmaz.</p><label for="tkResonanceState">Şu an nasıl hissediyorsun?</label><select id="tkResonanceState"><option>sakinim</option><option>yorgunum</option><option>stresliyim</option><option>heyecanlıyım</option><option>odaklanmak istiyorum</option><option>normal</option></select><label for="tkResonancePreference">Yanıt tercihi</label><select id="tkResonancePreference"><option>kısa ve sakin</option><option>enerjik ve motive edici</option><option>adım adım ve sade</option><option>ayrıntılı ve teknik</option></select><button class="tkPrimary" id="tkResonanceBtn">Anlatım tercihimi uygula</button><pre id="tkResonanceResult" hidden></pre></div></section>
+  <section class="tkMindPanel" data-tk-panel="proactive"><div class="tkMindCard"><strong>Proaktif proje incelemesi</strong><p>Kaydettiğin projeleri açtığında olası tıkanıklıkları ve sonraki adımları önerir. Takvimine veya tarayıcı geçmişine erişmez, arka planda işlem yapmaz.</p><label for="tkProactiveFocus">Bugünkü odak</label><input id="tkProactiveFocus" value="En önemli sonraki adımı belirle"><button class="tkPrimary" id="tkProactiveBtn">Projelerimi değerlendir</button><pre id="tkProactiveResult" hidden></pre></div></section>
+  <section class="tkMindPanel" data-tk-panel="community"><div class="tkMindCard"><strong>Anonim topluluk frekansı</strong><p>İsteğe bağlı olarak yalnızca genel konu kategorisi paylaşılır. Sohbetlerin, fikirlerin, kodların ve proje metinlerin paylaşılmaz. Sayılar gerçek kullanıcı katılımına bağlıdır.</p><label for="tkCommunityTopic">Paylaşmak istediğin genel kategori</label><select id="tkCommunityTopic"><option value="yapay-zeka">Yapay zekâ</option><option value="yazilim">Yazılım</option><option value="egitim">Eğitim</option><option value="tasarim">Tasarım</option><option value="oyun">Oyun</option><option value="robotik">Robotik</option><option value="diger">Diğer</option></select><button class="tkPrimary" id="tkCommunityShare">Kategorimi isteğe bağlı paylaş</button><button class="tkSecondary" id="tkCommunityRefresh">Son 30 günü görüntüle</button><pre id="tkCommunityResult" hidden></pre></div></section>
   <div id="tkMindStatus" role="status"></div>
  </div>
 </div>
@@ -5878,6 +6049,15 @@ MIND_LAB_HTML = r"""
  $('tkTranslateBtn').addEventListener('click',async()=>{const text=$('tkTranslateText').value.trim(),target_language=$('tkTargetLang').value.trim();if(!text||!target_language){status('Metni ve hedef dili gir.');return}const b=$('tkTranslateBtn');b.disabled=true;try{status('Bağlam ve nüans korunarak çevriliyor…');const d=await req('/api/mind/translate',{method:'POST',body:JSON.stringify({text,source_language:$('tkSourceLang').value.trim()||'Otomatik algıla',target_language})});show('tkTranslateResult',d.translation);status('Çeviri hazır.')}catch(e){status(e.message)}finally{b.disabled=false}});
  $('tkTwinBtn').addEventListener('click',async()=>{const incoming_message=$('tkTwinIncoming').value.trim();if(incoming_message.length<2){status('Önce yanıtlanacak mesajı gir.');return}const b=$('tkTwinBtn');b.disabled=true;try{status('Taslak hazırlanıyor…');const d=await req('/api/mind/digital-twin/draft',{method:'POST',body:JSON.stringify({incoming_message,purpose:$('tkTwinPurpose').value,preferred_tone:$('tkTwinTone').value})});show('tkTwinResult',d.draft+'\n\n[Gönderilmedi — son kontrol ve gönderim sana ait.]');status('Taslak hazır; hiçbir yere gönderilmedi.')}catch(e){status(e.message)}finally{b.disabled=false}});
  $('tkIdeaBtn').addEventListener('click',async()=>{const idea=$('tkIdea').value.trim();if(idea.length<4){status('Önce fikrini yaz.');return}const b=$('tkIdeaBtn');b.disabled=true;try{status('Fikir uygulanabilir bileşenlere ayrılıyor…');const d=await req('/api/mind/blueprint',{method:'POST',body:JSON.stringify({idea,constraints:$('tkConstraints').value})});show('tkIdeaResult',d.blueprint);status('Mimari taslağı hazır.')}catch(e){status(e.message)}finally{b.disabled=false}});
+ async function runTool(btnId,url,payload,resultId,key,progress,done){const b=$(btnId);b.disabled=true;try{status(progress);const d=await req(url,{method:'POST',body:JSON.stringify(payload)});show(resultId,d[key]||JSON.stringify(d,null,2));status(done)}catch(e){status(e.message)}finally{b.disabled=false}}
+ $('tkWhatIfBtn').addEventListener('click',()=>runTool('tkWhatIfBtn','/api/mind/what-if',{decision:$('tkWhatIfDecision').value,context:$('tkWhatIfContext').value,horizon:$('tkWhatIfHorizon').value},'tkWhatIfResult','scenarios','Beş senaryo hazırlanıyor…','Senaryo taslakları hazır.'));
+ $('tkBoardBtn').addEventListener('click',()=>runTool('tkBoardBtn','/api/mind/boardroom',{idea:$('tkBoardIdea').value,constraints:$('tkBoardConstraints').value},'tkBoardResult','boardroom','Uzman bakış açıları değerlendiriliyor…','Fikir paneli tamamlandı.'));
+ $('tkAutopsyBtn').addEventListener('click',()=>runTool('tkAutopsyBtn','/api/mind/code-autopsy',{code:$('tkAutopsyCode').value,error:$('tkAutopsyError').value,context:$('tkAutopsyContext').value},'tkAutopsyResult','autopsy','Kod inceleniyor…','Kod inceleme raporu hazır.'));
+ $('tkTransferBtn').addEventListener('click',()=>runTool('tkTransferBtn','/api/mind/transfer',{source_type:$('tkTransferType').value,target_format:$('tkTransferTarget').value,content:$('tkTransferContent').value},'tkTransferResult','transfer','İçerik dönüştürülüyor…','Dönüşüm taslağı hazır.'));
+ $('tkResonanceBtn').addEventListener('click',async()=>{try{const d=await req('/api/mind/resonance',{method:'POST',body:JSON.stringify({self_report:$('tkResonanceState').value,response_preference:$('tkResonancePreference').value})});window.tkFocusState=({'yorgunum':'tired','stresliyim':'stressed','heyecanlıyım':'curious','odaklanmak istiyorum':'focused','sakinim':'stressed','normal':'neutral'})[d.self_reported_state]||'neutral';show('tkResonanceResult','Tercihin uygulandı: '+d.self_reported_state+'. Sonraki mesajlarında anlatım buna göre uyarlanacak.');status('Anlatım tercihi güncellendi.')}catch(e){status(e.message)}});
+ $('tkProactiveBtn').addEventListener('click',()=>runTool('tkProactiveBtn','/api/mind/proactive-review',{focus:$('tkProactiveFocus').value},'tkProactiveResult','review','Kayıtlı projeler inceleniyor…','Öneriler hazır; hiçbir işlem otomatik yapılmadı.'));
+ $('tkCommunityShare').addEventListener('click',()=>runTool('tkCommunityShare','/api/mind/community-pulse',{topic:$('tkCommunityTopic').value},'tkCommunityResult','message','Yalnızca seçtiğin kategori paylaşılıyor…','Kategori paylaşıldı.'));
+ $('tkCommunityRefresh').addEventListener('click',async()=>{try{const d=await req('/api/mind/community-pulse');show('tkCommunityResult',JSON.stringify(d,null,2));status(d.note)}catch(e){status(e.message)}});
 })();
 </script>
 """
