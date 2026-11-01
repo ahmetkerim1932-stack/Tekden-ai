@@ -1659,6 +1659,41 @@ class EvolutionJobBody(BaseModel):
     goal: str = Field(default="Bakım risklerini bul ve iyileştirme önerileri üret", max_length=800)
     code: str = Field(min_length=20, max_length=24000)
 
+class AdvancedSynapseBody(BaseModel):
+    feature: str = Field(min_length=3, max_length=50)
+    material: str = Field(min_length=5, max_length=16000)
+    context: str = Field(default="", max_length=4000)
+
+@app.post("/api/mind/advanced-synapse")
+def mind_advanced_synapse(body: AdvancedSynapseBody, request: Request):
+    """Plus-only applied workflow hub for the ten requested creative/engineering systems."""
+    require_plus_user(request)
+    modes = {
+        "thought_physics": "Kullanıcının yazdığı tasvir/etkileşim notlarından çalışan HTML Canvas veya JavaScript fizik prototipi üret. Yerçekimi, ivme, sürtünme, çarpışma, kontrol ve testleri açıkla. Zihin okuduğunu iddia etme; yalnızca sağlanan girdiyi kullan.",
+        "bio_ui": "Verilen tercih ve izinli yerel sinyal özetine göre erişilebilir arayüz teması, yazı boyutu, yoğunluk ve görev adımı öner. Sağlık/duygu teşhisi yapma; kullanıcı kontrolü ve kapatma seçeneği ekle.",
+        "multiverse_compile": "Aynı çözümün 10 farklı kod/mimari adayını üret veya tarif et. Her adayı doğrulama testleri, performans/maliyet/karmaşıklık açısından karşılaştır. Kod çalıştırılmadıysa çalıştırıldı deme; ana projeye otomatik yazma.",
+        "chaos": "Savunma amaçlı güvenli hata ve yük testi planı üret: trafik artışı, bellek, tarayıcı uyumluluğu, ağ kesintisi, bozuk girdi ve geri dönüş. Yalnızca kullanıcının kendi sistemi için kontrollü testler; üretim sistemini bozacak saldırı adımları verme.",
+        "collective": "Sağlanan anonim konu/başarı özetlerinden proje için çıkarımlar yap. Başka kullanıcıların özel konuşmalarına veya projelerine eriştiğini iddia etme; veri yoksa bunu belirt.",
+        "audio_mood": "Metnin yaratıcı tonuna göre özgün müzik üretim brifi, tempo aralığı, enstrüman, armoni, ritim ve kısa özgün motif tarif et. Gerçek ses dosyası üretilmediyse dosya varmış gibi sunma.",
+        "ip_sentinel": "Kod, metin ve varlıklar için lisans/telif risk kontrol listesi oluştur. Kaynak ve lisans metni verilmedikçe küresel veri tabanlarını taradığını veya hukuki kesinlik sağladığını iddia etme. Şüpheli parçaları işaretle ve özgün alternatif yaz.",
+        "temporal": "Görevleri süre, bağımlılık, öncelik ve kullanıcı tarafından belirtilen uygun zaman aralıklarına göre planla. Arka plan/uyku zamanı varsayma; otomatik takvim veya bilgisayar erişimin yoksa yalnızca uygulanabilir çizelge üret.",
+        "logic_map": "Projeyi bileşen, veri akışı, bağımlılık ve karar noktaları halinde haritala; Mermaid flowchart kodu ve açıklama üret. Belirsiz bağlantıları varsayım olarak etiketle.",
+        "persona": "Kullanıcının bu istekte verdiği örneklerden tercih profili taslağı çıkar: üslup, ayrıntı, tasarım, kod standartları. Kalıcı kayıt veya bağımsız karar yetkisi olduğunu iddia etme; kullanıcı onayı gereken noktaları belirt."
+    }
+    if body.feature not in modes:
+        raise HTTPException(400, "Bilinmeyen gelişmiş araç seçimi.")
+    prompt = (modes[body.feature] + "\nÇıktıyı uygulanabilir, bölümlü ve doğrulama adımlı ver. Yapılmamış işlemi yapılmış gibi anlatma. "
+              "Varsayımları, gereken harici donanım/servisleri ve güvenli sınırları belirt.\n"
+              f"Kullanıcı girdisi:\n{body.material}\nBağlam:\n{body.context}")
+    try:
+        result = call_ollama([
+            {"role":"system", "content":"Sen Tekden AI Plus'ın gelişmiş yaratıcı mühendislik motorusun. Gerçek yetenekleri ve sınırları dürüstçe belirt; somut çıktı üret."},
+            {"role":"user", "content":prompt}
+        ], OLLAMA_PRO_MODEL)
+    except Exception as exc:
+        raise HTTPException(502, "Gelişmiş motor çalıştırılamadı: " + str(exc)[:180])
+    return {"feature": body.feature, "result": result, "execution": "model_assisted_generation_not_autonomous_deployment"}
+
 @app.post("/api/mind/what-if")
 def mind_what_if(body: WhatIfBody, request: Request):
     user = require_plus_user(request)
@@ -6223,6 +6258,7 @@ MIND_LAB_HTML = r"""
    <button type="button" data-tk-tab="retro">Proje geçmişini yeniden kur</button>
    <button type="button" data-tk-tab="evolution">Arka plan kod evrimi</button>
    <button type="button" data-tk-tab="brainware">Nöral arayüz</button>
+   <button type="button" data-tk-tab="synapse">10 gelişmiş motor</button>
   </div>
   <section class="tkMindPanel active" data-tk-panel="projects">
    <div class="tkMindGrid"><div class="tkMindCard">
@@ -6233,7 +6269,7 @@ MIND_LAB_HTML = r"""
     <button class="tkPrimary" id="tkProjectSave" type="button">Projeyi kaydet</button>
    </div><div class="tkMindCard"><strong>Kayıtlı projeler</strong><p>Bir projeyi gözden geçirerek önerilen sonraki adımları güncelleyebilirsin.</p><div id="tkProjectList">Projeler yükleniyor…</div></div></div>
   </section>
-  <section class="tkMindPanel" data-tk-panel="focus"><div class="tkMindCard"><strong>Anlık anlatım uyarlaması</strong><p>Buradan anlatım tarzını kendin seçebilirsin. Kamera yalnızca cihaz üzerinde sınırlı görsel ipuçları sağlayabilir; kesin duygu tespiti yapmaz. Klavye basıncı tarayıcıdan ölçülemez; yazma ritmi ve tuş zamanlaması gibi yaklaşık etkileşim sinyalleri kullanılabilir. Bunlar sağlık veya duygu teşhisi değildir.</p>
+  <section class="tkMindPanel" data-tk-panel="focus"><div class="tkMindCard"><strong>Anlık anlatım uyarlaması</strong><p>Tekden AI; açıkça izin verdiğin kamera, uyumlu nabız cihazı ve bu sayfadaki yazma ritmi ipuçlarını anlatım ve arayüz tercihini uyarlamak için kullanabilir. Kamera ipuçları yaklaşık görsel sinyallerdir; duygu veya sağlık teşhisi değildir. Standart klavye fiziksel basma kuvvetini bildirmez; tuş zamanlaması ve yazma ritmi ölçülebilir. Her sensörü ayrı açıp kapatabilirsin.</p>
    <label for="tkFocusSelect">Şu an hangi anlatım sana uygun?</label><select id="tkFocusSelect"><option value="neutral">Normal</option><option value="focused">Odaklanmış ve kısa</option><option value="tired">Yorgunum, sade anlat</option><option value="stressed">Sakin ve küçük adımlarla anlat</option><option value="curious">Meraklıyım, ayrıntı ve örnek ekle</option><option value="brief">Kısa ve sakin</option><option value="detailed">Ayrıntılı ve teknik</option></select>
    <button class="tkPrimary" id="tkFocusSave" type="button">Tercihi uygula</button><p id="tkFocusInfo">Tercih henüz seçilmedi.</p>
   </div></section>
@@ -6279,6 +6315,11 @@ MIND_LAB_HTML = r"""
   <section class="tkMindPanel" data-tk-panel="worlds"><div class="tkMindCard"><strong>Paralel olasılık motoru</strong><p>Beş farklı senaryo dalı aynı anda ayrı model çağrılarıyla incelenir. Bu, klasik sunucu paralelliğidir; kuantum işlem veya bütün olasılıkların eksiksiz taranması değildir.</p><label for="tkWorldQuestion">Hangi soruyu farklı senaryolarda değerlendirelim?</label><textarea id="tkWorldQuestion" maxlength="5000" placeholder="Örn. Bu uygulamayı mobil uygulamaya dönüştürmenin seçenekleri neler?"></textarea><label for="tkWorldContext">Bağlam ve kısıtlar</label><textarea id="tkWorldContext" maxlength="4000" placeholder="Bütçe, süre, teknoloji, hedefler..."></textarea><button class="tkPrimary" id="tkWorldBtn" type="button">5 senaryoyu paralel incele</button><pre id="tkWorldResult" hidden></pre></div></section>
   <section class="tkMindPanel" data-tk-panel="retro"><div class="tkMindCard"><strong>Proje geçmişini yeniden kurma</strong><p>Eksik kod, not veya taslaktan üç olası tamamlanmış sürüm oluşturur. Gerçek geçmişi veya kayıp niyeti okuyamaz; hangi kısımların kanıt, hangilerinin varsayım olduğunu ayırır.</p><label for="tkRetroType">Proje türü</label><input id="tkRetroType" value="HTML/JavaScript oyunu"><label for="tkRetroContext">Hatırladığın bağlam</label><textarea id="tkRetroContext" maxlength="3000" placeholder="Oyun mekaniği, tasarım, kullanmayı planladığın teknoloji..."></textarea><label for="tkRetroFragment">Elindeki kod/not/melodi tarifi</label><textarea id="tkRetroFragment" maxlength="12000" placeholder="Kalan parçayı buraya yapıştır..."></textarea><button class="tkPrimary" id="tkRetroBtn" type="button">3 olası sürümü yeniden kur</button><pre id="tkRetroResult" hidden></pre></div></section>
   <section class="tkMindPanel" data-tk-panel="evolution"><div class="tkMindCard"><strong>Arka plan kod evrimi</strong><p>Gönderdiğin kod bakım incelemesi için kuyruğa alınır. Servis çalışıyorken işçi kodu analiz eder, teknik borç ve iyileştirme yamaları önerir. Kod çalıştırılmaz, kaynak dosyan değiştirilmez ve otomatik dağıtım yapılmaz. Render servisi uykuya geçer veya yeniden başlarsa işin tamamlanması gecikebilir. Kod Ollama Cloud modeline analiz için gönderilir; gizli anahtarları ve kişisel verileri göndermeden önce sil.</p><label for="tkEvolutionName">Proje adı</label><input id="tkEvolutionName" maxlength="100" value="Tekden AI"><label for="tkEvolutionGoal">İnceleme hedefi</label><input id="tkEvolutionGoal" maxlength="800" value="Bakım risklerini bul, 6-12-36 aylık risk senaryoları ve iyileştirme yamaları öner"><label for="tkEvolutionCode">İncelenecek kod</label><textarea id="tkEvolutionCode" maxlength="24000" placeholder="İncelemek istediğin kodu buraya yapıştır..."></textarea><button class="tkPrimary" id="tkEvolutionStart" type="button">Arka plan incelemesini başlat</button><p id="tkEvolutionStatus" role="status">Henüz iş başlatılmadı.</p><pre id="tkEvolutionResult" hidden></pre></div></section>
+  <section class="tkMindPanel" data-tk-panel="synapse"><div class="tkMindCard"><strong>Tekden AI · Gelişmiş Synapse Motorları</strong><p>Bu araçlar verdiğin içerikten prototip, analiz, plan ve kod taslağı üretir. İzin verilmeyen cihaz verilerini okumaz; kodu onaysız biçimde canlı projene yazmaz.</p>
+   <label for="tkSynapseMode">Çalıştırılacak motor</label><select id="tkSynapseMode">
+    <option value="thought_physics">1 · Nöro-Mekanik Fizik Motoru</option><option value="bio_ui">2 · Biyo-Ritmik Arayüz Adaptasyonu</option><option value="multiverse_compile">3 · 10 Alternatif Kod Derleyici</option><option value="chaos">4 · Kriz ve Çöküş Simülatörü</option><option value="collective">5 · Kolektif Synapse Havuzu</option><option value="audio_mood">6 · Duygu-Melodi Çevirmeni</option><option value="ip_sentinel">7 · Dijital Telif Kalkanı</option><option value="temporal">8 · Zamanlayıcı Görev Planlayıcı</option><option value="logic_map">9 · Mantık Haritalama</option><option value="persona">10 · Öğrenen Dijital Persona</option>
+   </select><label for="tkSynapseMaterial">İçerik, kod, proje veya tarif</label><textarea id="tkSynapseMaterial" maxlength="16000" placeholder="İncelenecek proje, kod, ritim tarifi veya hedef..."></textarea><label for="tkSynapseContext">Ek bağlam ve kısıtlar</label><textarea id="tkSynapseContext" maxlength="4000" placeholder="Teknoloji, hedef cihaz, bütçe, tercih ve sınırlar..."></textarea><button class="tkPrimary" id="tkSynapseRun" type="button">Motoru çalıştır</button><pre id="tkSynapseResult" hidden></pre>
+  </div><div class="tkMindCard" style="margin-top:12px"><strong>Yerel etkileşim uyumu</strong><p>Bu sekme açıkken tuşların basılma zamanlaması ve yazma temposu yalnızca tarayıcı belleğinde özetlenir; tuş içeriği kaydedilmez veya gönderilmez. Fiziksel basma kuvveti standart klavyeden okunamaz.</p><p id="tkTypingCue" role="status">Yazma ritmi henüz ölçülmedi.</p><label><input id="tkAdaptiveUI" type="checkbox" style="width:auto"> Yazma temposu çok düştüğünde arayüzü sadeleştir (yalnızca bu sekmede)</label></div></section>
   <section class="tkMindPanel" data-tk-panel="brainware"><div class="tkMindCard"><strong>Nöral-akustik doğrudan aktarım · EEG bağlantısı</strong><p>Gerçek beyin-sinyali girişi için EEG/BCI başlığı, o cihaza özel veri protokolü, kalibrasyon ve eğitilmiş sinyal çözücü gerekir. Genel web tarayıcısı insanın serbest düşüncelerini okuyamaz. Güncel non-invaziv BCI sistemleri belirli, önceden tanımlanmış komutları veya görev sinyallerini sınırlı doğrulukla çözebilir; serbest düşünceyi kelimesi kelimesine aktaramaz.</p><p><b>Şimdiki durum:</b> EEG donanımı bu projeye henüz bağlanmadı. Cihaz modeli ve üretici protokolü bilinmeden gerçek bağlantı kodu yazmak mümkün değil. Rastgele EEG değerleri uydurarak bu özelliği çalışıyormuş gibi göstermeyeceğiz.</p><p>Bir EEG başlığıyla bağlantı kurulduğunda ilk hedef; örneğin seçili komutları (ileri/geri, seç/onayla/iptal) kalibrasyonla kontrol etmek olacak. Bu, düşünceleri okumakla aynı şey değildir.</p></div></section>
   <div id="tkMindStatus" role="status"></div>
  </div>
@@ -6394,6 +6435,9 @@ MIND_LAB_HTML = r"""
  $('tkPulseStyle').addEventListener('change',refreshSensorFocus);
  document.addEventListener('visibilitychange',()=>{if(document.hidden){if(cameraStream)stopCamera();if(pulseDevice?.gatt?.connected)disconnectPulse()}});
  window.addEventListener('beforeunload',()=>{if(cameraStream)cameraStream.getTracks().forEach(t=>t.stop());if(pulseDevice?.gatt?.connected)pulseDevice.gatt.disconnect()});
+ let typingTimes=[];let typingAdaptive=false;document.addEventListener('keydown',ev=>{if(!document.querySelector('[data-tk-panel=\"synapse\"].active'))return;if(ev.key.length!==1)return;const now=Date.now();typingTimes.push(now);typingTimes=typingTimes.filter(t=>now-t<20000);if(typingTimes.length>=5){const gaps=typingTimes.slice(1).map((t,i)=>t-typingTimes[i]);const avg=gaps.reduce((a,b)=>a+b,0)/gaps.length;$('tkTypingCue').textContent='Son yazma temposu: yaklaşık '+Math.round(60000/Math.max(avg,1))+' tuş/dakika. Bu yalnızca etkileşim ritmidir.';if($('tkAdaptiveUI').checked&&avg>1800){document.documentElement.style.setProperty('--tk-density','1.08');$('tkTypingCue').textContent+=' · Daha geniş arayüz aralığı etkin.';}else{document.documentElement.style.removeProperty('--tk-density');}}});
+ $('tkAdaptiveUI').addEventListener('change',()=>{if(!$('tkAdaptiveUI').checked)document.documentElement.style.removeProperty('--tk-density');});
+ $('tkSynapseRun').addEventListener('click',()=>runTool('tkSynapseRun','/api/mind/advanced-synapse',{feature:$('tkSynapseMode').value,material:$('tkSynapseMaterial').value,context:$('tkSynapseContext').value},'tkSynapseResult','result','Seçilen gelişmiş motor çalışıyor…','Motor çıktısı hazır. Çıktıyı inceleyip onaylayarak kullan.'));
  $('tkTranslateBtn').addEventListener('click',async()=>{const text=$('tkTranslateText').value.trim(),target_language=$('tkTargetLang').value.trim();if(!text||!target_language){status('Metni ve hedef dili gir.');return}const b=$('tkTranslateBtn');b.disabled=true;try{status('Bağlam ve nüans korunarak çevriliyor…');const d=await req('/api/mind/translate',{method:'POST',body:JSON.stringify({text,source_language:$('tkSourceLang').value.trim()||'Otomatik algıla',target_language})});show('tkTranslateResult',d.translation);status('Çeviri hazır.')}catch(e){status(e.message)}finally{b.disabled=false}});
  $('tkTwinBtn').addEventListener('click',async()=>{const incoming_message=$('tkTwinIncoming').value.trim();if(incoming_message.length<2){status('Önce yanıtlanacak mesajı gir.');return}const b=$('tkTwinBtn');b.disabled=true;try{status('Taslak hazırlanıyor…');const d=await req('/api/mind/digital-twin/draft',{method:'POST',body:JSON.stringify({incoming_message,purpose:$('tkTwinPurpose').value,preferred_tone:$('tkTwinTone').value})});show('tkTwinResult',d.draft+'\n\n[Gönderilmedi — son kontrol ve gönderim sana ait.]');status('Taslak hazır; hiçbir yere gönderilmedi.')}catch(e){status(e.message)}finally{b.disabled=false}});
  $('tkIdeaBtn').addEventListener('click',async()=>{const idea=$('tkIdea').value.trim();if(idea.length<4){status('Önce fikrini yaz.');return}const b=$('tkIdeaBtn');b.disabled=true;try{status('Fikir uygulanabilir bileşenlere ayrılıyor…');const d=await req('/api/mind/blueprint',{method:'POST',body:JSON.stringify({idea,constraints:$('tkConstraints').value})});show('tkIdeaResult',d.blueprint);status('Mimari taslağı hazır.')}catch(e){status(e.message)}finally{b.disabled=false}});
@@ -8562,3 +8606,4 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
+                                    
