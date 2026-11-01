@@ -6084,6 +6084,7 @@ HTML = r"""<!doctype html>
   .composer textarea{min-height:52px}
 }
 @media(min-width:721px){#mobileToolsMenu{display:none!important}}
+@media(max-width:720px){#tkFloatingLinks{display:none!important}}
 </style></head><body>
 <div class="layout"><aside class="sidebar"><div class="brand">Tekden <span>AI</span></div>
 <div class="sideactions"><button id="newChat">＋ Yeni sohbet</button><button id="proStudioBtn" class="secondary" style="display:none;border-color:#c5a4ff;color:#6132b8;background:linear-gradient(110deg,#f4edff,#edf5ff)" onclick="location.href='/pro-studio'">✦ Pro Stüdyo</button><button class="secondary" onclick="openSongStudio()" style="border-color:#d8c9ff;color:#6941b6;background:#faf7ff">🎤 Şarkı Stüdyosu</button></div>
@@ -6433,7 +6434,31 @@ MIND_LAB_HTML = r"""
 #tkMindStatus{font-size:12px;color:#637993;min-height:18px;margin-top:8px}
 .tkProjectItem{display:flex;justify-content:space-between;gap:8px;align-items:flex-start;padding:10px 0;border-top:1px solid #e3edf8}
 .tkProjectItem strong{display:block}.tkProjectItem small{display:block;color:#5f728b;margin-top:3px}
-@media(max-width:650px){#tkMindOpen{left:10px;bottom:74px;padding:10px 12px}#tkMindBox{padding:14px;max-height:92vh}.tkMindGrid{grid-template-columns:1fr}.tkMindTop h2{font-size:19px}}
+@media(max-width:650px){
+ #tkMindShade{padding:0;align-items:stretch}
+ #tkMindBox{width:100%;height:100dvh;max-height:100dvh;border-radius:0;padding:12px 12px calc(18px + env(safe-area-inset-bottom));overflow-y:auto;overscroll-behavior:contain}
+ .tkMindTop{align-items:flex-start;flex-wrap:wrap;gap:8px}
+ .tkMindTop>div{flex:1 1 100%;min-width:0}
+ .tkMindTop #tkMindClose{position:sticky;top:0;margin-left:auto;z-index:2}
+ .tkMindTabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+ .tkMindTabs button{min-width:0;white-space:normal;overflow-wrap:anywhere;line-height:1.25;padding:9px 7px;font-size:11px}
+ .tkMindGrid{grid-template-columns:minmax(0,1fr)}
+ #tkMindBox button{max-width:100%;min-height:40px;white-space:normal;overflow-wrap:anywhere}
+ #tkMindBox .tkPrimary,#tkMindBox .tkSecondary{margin:4px 4px 0 0}
+ .tk25Grid{grid-template-columns:minmax(0,1fr)!important}
+ .tk25Card{width:100%;min-width:0;text-align:left}
+ .tk25Runner{position:relative}
+ .tkProjectItem{flex-wrap:wrap}
+ #tkMindOpen{left:10px;bottom:calc(82px + env(safe-area-inset-bottom));max-width:calc(100vw - 20px)}
+}
+.tk25Grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:12px 0}
+.tk25Card{display:flex;flex-direction:column;gap:5px;text-align:left;min-width:0;padding:12px;border:1px solid #d5e5f7;border-radius:12px;background:linear-gradient(145deg,#f8fbff,#eef5ff);color:#18395e;cursor:pointer;white-space:normal;overflow-wrap:anywhere}
+.tk25Card b{font-size:13px;line-height:1.35}.tk25Card span{font-size:12px;line-height:1.4;color:#5d718a;font-weight:500}
+.tk25Card.selected{border-color:#0878f9;background:#e8f3ff;box-shadow:0 0 0 2px #0878f922}
+.tk25Runner{margin-top:16px;padding:14px;border:1px solid #bcd8f7;border-radius:14px;background:#f7fbff}
+.tk25Selected{font-weight:800;color:#075fc7;margin-bottom:8px}
+@media(max-width:650px){.tk25Grid{grid-template-columns:1fr}}
+
 </style>
 <button id="tkMindOpen" type="button">✦ Zihin Atölyesi</button>
 <div id="tkMindShade" role="dialog" aria-modal="true" aria-labelledby="tkMindTitle">
@@ -6457,6 +6482,7 @@ MIND_LAB_HTML = r"""
    <button type="button" data-tk-tab="evolution">Arka plan kod evrimi</button>
    <button type="button" data-tk-tab="brainware">Nöral arayüz</button>
    <button type="button" data-tk-tab="synapse">10 gelişmiş motor</button>
+   <button type="button" data-tk-tab="all25">25 yeni özellik</button>
   </div>
   <section class="tkMindPanel active" data-tk-panel="projects">
    <div class="tkMindGrid"><div class="tkMindCard">
@@ -6513,6 +6539,46 @@ MIND_LAB_HTML = r"""
   <section class="tkMindPanel" data-tk-panel="worlds"><div class="tkMindCard"><strong>Paralel olasılık motoru</strong><p>Beş farklı senaryo dalı aynı anda ayrı model çağrılarıyla incelenir. Bu, klasik sunucu paralelliğidir; kuantum işlem veya bütün olasılıkların eksiksiz taranması değildir.</p><label for="tkWorldQuestion">Hangi soruyu farklı senaryolarda değerlendirelim?</label><textarea id="tkWorldQuestion" maxlength="5000" placeholder="Örn. Bu uygulamayı mobil uygulamaya dönüştürmenin seçenekleri neler?"></textarea><label for="tkWorldContext">Bağlam ve kısıtlar</label><textarea id="tkWorldContext" maxlength="4000" placeholder="Bütçe, süre, teknoloji, hedefler..."></textarea><button class="tkPrimary" id="tkWorldBtn" type="button">5 senaryoyu paralel incele</button><pre id="tkWorldResult" hidden></pre></div></section>
   <section class="tkMindPanel" data-tk-panel="retro"><div class="tkMindCard"><strong>Proje geçmişini yeniden kurma</strong><p>Eksik kod, not veya taslaktan üç olası tamamlanmış sürüm oluşturur. Gerçek geçmişi veya kayıp niyeti okuyamaz; hangi kısımların kanıt, hangilerinin varsayım olduğunu ayırır.</p><label for="tkRetroType">Proje türü</label><input id="tkRetroType" value="HTML/JavaScript oyunu"><label for="tkRetroContext">Hatırladığın bağlam</label><textarea id="tkRetroContext" maxlength="3000" placeholder="Oyun mekaniği, tasarım, kullanmayı planladığın teknoloji..."></textarea><label for="tkRetroFragment">Elindeki kod/not/melodi tarifi</label><textarea id="tkRetroFragment" maxlength="12000" placeholder="Kalan parçayı buraya yapıştır..."></textarea><button class="tkPrimary" id="tkRetroBtn" type="button">3 olası sürümü yeniden kur</button><pre id="tkRetroResult" hidden></pre></div></section>
   <section class="tkMindPanel" data-tk-panel="evolution"><div class="tkMindCard"><strong>Arka plan kod evrimi</strong><p>Gönderdiğin kod bakım incelemesi için kuyruğa alınır. Servis çalışıyorken işçi kodu analiz eder, teknik borç ve iyileştirme yamaları önerir. Kod çalıştırılmaz, kaynak dosyan değiştirilmez ve otomatik dağıtım yapılmaz. Render servisi uykuya geçer veya yeniden başlarsa işin tamamlanması gecikebilir. Kod Ollama Cloud modeline analiz için gönderilir; gizli anahtarları ve kişisel verileri göndermeden önce sil.</p><label for="tkEvolutionName">Proje adı</label><input id="tkEvolutionName" maxlength="100" value="Tekden AI"><label for="tkEvolutionGoal">İnceleme hedefi</label><input id="tkEvolutionGoal" maxlength="800" value="Bakım risklerini bul, 6-12-36 aylık risk senaryoları ve iyileştirme yamaları öner"><label for="tkEvolutionCode">İncelenecek kod</label><textarea id="tkEvolutionCode" maxlength="24000" placeholder="İncelemek istediğin kodu buraya yapıştır..."></textarea><button class="tkPrimary" id="tkEvolutionStart" type="button">Arka plan incelemesini başlat</button><p id="tkEvolutionStatus" role="status">Henüz iş başlatılmadı.</p><pre id="tkEvolutionResult" hidden></pre></div></section>
+  <section class="tkMindPanel" data-tk-panel="all25">
+   <div class="tkMindCard">
+    <strong>25 Gelişmiş Zihin & Nöral Entegrasyon Motoru</strong>
+    <p>Bu bölüm, gönderdiğin 25 özelliğin tamamını Zihin Atölyesi içine taşır. Bir kart seç, aşağıya proje/kod/isteğini yaz ve seçili motoru çalıştır. Her araç gerçek kapasitesi ölçüsünde analiz, prototip veya plan üretir.</p>
+    <div class="tk25Grid">
+     <button type="button" class="tk25Card" data-feature="thought_physics"><b>1. Nöro-Mekanik Fizik Motoru</b><span>Fikir ve etkileşim tarifinden Canvas/JavaScript fizik prototipi üretir.</span></button>
+     <button type="button" class="tk25Card" data-feature="bio_ui"><b>2. Biyo-Ritmik Arayüz Adaptasyonu</b><span>İzinli sinyal özeti ve tercihlere göre erişilebilir arayüz önerir.</span></button>
+     <button type="button" class="tk25Card" data-feature="multiverse_compile"><b>3. Kuantum Çoklu Evren Kod Derleyicisi</b><span>10 alternatif kod yaklaşımını karşılaştırır; test edilmemiş kodu çalıştırılmış saymaz.</span></button>
+     <button type="button" class="tk25Card" data-feature="chaos"><b>4. Otonom Kriz ve Çöküş Simülatörü</b><span>Trafik, bellek, ağ ve tarayıcı riskleri için kontrollü test senaryoları üretir.</span></button>
+     <button type="button" class="tk25Card" data-feature="collective"><b>5. Kolektif Zihin Akordajı</b><span>Yalnızca anonim/toplulaştırılmış konu ve başarı özetlerinden çıkarım yapar.</span></button>
+     <button type="button" class="tk25Card" data-feature="micro_focus"><b>6. Mikro-Mimik Odak Analizi</b><span>İzinli kamera ile cihaz üzerinde yüz varlığı ve göz kırpma gibi gözlemlenebilir ipuçlarını sayar.</span></button>
+     <button type="button" class="tk25Card" data-feature="neuro_audio"><b>7. Nöro-Akustik Frekans Senkronizasyonu</b><span>Yerel, durdurulabilir ses tasarımı üretir; beyin dalgası/odak etkisi iddia etmez.</span></button>
+     <button type="button" class="tk25Card" data-feature="debug_cue"><b>8. Görünür Hata Ayıklama Asistanı</b><span>Şüpheli kod satırlarını açıkça işaretler ve düzeltme/test önerir.</span></button>
+     <button type="button" class="tk25Card" data-feature="emotional_ui"><b>9. Duygu Temelli Arayüz Uyarlaması</b><span>Kullanıcının seçtiği moda göre renk, kontrast ve görev yoğunluğunu uyarlar.</span></button>
+     <button type="button" class="tk25Card" data-feature="circadian_workflow"><b>10. Biyo-Ritmik Görev Zamanlayıcı</b><span>Kendi belirttiğin sabah/akşam tercihi ve uygun saatlere göre iş planlar.</span></button>
+     <button type="button" class="tk25Card" data-feature="acoustic_architecture"><b>11. Sesli Mimari Köprüsü</b><span>Mikrofondan cihaz üzerinde çıkarılan ritim özetini oyun/animasyon taslağına dönüştürür.</span></button>
+     <button type="button" class="tk25Card" data-feature="immortal_code"><b>12. Ölümsüz Kod Arşivi</b><span>Açıkça kaydedilen kod sürümlerini saklar, karşılaştırır ve geri yükleme taslağı sunar.</span></button>
+     <button type="button" class="tk25Card" data-feature="chaos_hacker"><b>13. Otonom Test ve Yıkıcı Hacker Simülatörü</b><span>Yalnızca kendi uygulaman için izole ve savunma amaçlı kaos testi planlar.</span></button>
+     <button type="button" class="tk25Card" data-feature="dialectic_council"><b>14. Çoklu Persona Fikir Meclisi</b><span>Yatırımcı, tasarımcı, yazılım ve pazarlama perspektiflerini simüle eder.</span></button>
+     <button type="button" class="tk25Card" data-feature="predictive_aging"><b>15. Akıllı Kod Yaşlandırma Analizi</b><span>6 ay, 1 yıl ve 3 yıl için koşullu uyumluluk ve bakım riskleri çıkarır.</span></button>
+     <button type="button" class="tk25Card" data-feature="global_synapse"><b>16. Global Anonim Akıl Havuzu</b><span>Özel sohbetlere erişmeden yalnızca anonim toplu eğilimlerden yararlanır.</span></button>
+     <button type="button" class="tk25Card" data-feature="growth_launch"><b>17. Otonom Lansman ve Büyüme Ajanı</b><span>X, LinkedIn, GitHub duyuruları, video senaryosu ve lansman planı hazırlar.</span></button>
+     <button type="button" class="tk25Card" data-feature="ip_sentinel"><b>18. Telif ve Lisans Kalkanı</b><span>Verilen kaynak/lisans bilgilerine göre riskleri işaretler; hukuki garanti vermez.</span></button>
+     <button type="button" class="tk25Card" data-feature="logic_galaxy"><b>19. Holografik Mantık Galaksisi</b><span>Proje bileşenlerini ve ilişkilerini etkileşimli mantık haritasında gösterir.</span></button>
+     <button type="button" class="tk25Card" data-feature="synthetic_twin"><b>20. Canlı Sentetik Dijital İkiz</b><span>Paylaştığın örneklerden üslup/tercih profili çıkarır; dış eylemler için onay ister.</span></button>
+     <button type="button" class="tk25Card" data-feature="retrocausal_rebuild"><b>21. Geçmişi Yeniden İnşa Etme</b><span>Eksik koddan üç olası proje sürümü üretir ve varsayımlarını açıklar.</span></button>
+     <button type="button" class="tk25Card" data-feature="direct_brainware"><b>22. Nöral Doğrudan Aktarım</b><span>EEG/BCI cihazı yoksa entegrasyon planı sunar; serbest düşünce okuyamaz.</span></button>
+     <button type="button" class="tk25Card" data-feature="organic_code"><b>23. Kendi Kendine Evrimleşen Organik Kod</b><span>Öneri, diff, test, onay ve geri alma adımlarından oluşan kontrollü iyileştirme döngüsü kurar.</span></button>
+     <button type="button" class="tk25Card" data-feature="zero_latency"><b>24. Sıfır Gecikmeli Dünya Motoru</b><span>Önbellek, streaming ve indeksleme ile ölçülebilir gecikme azaltma planı çıkarır.</span></button>
+     <button type="button" class="tk25Card" data-feature="emotional_audio"><b>25. Duygu-Melodi Eş Zamanlı Stüdyo</b><span>Seçtiğin tema ve proje içeriğine özgün müzik taslağı hazırlar.</span></button>
+    </div>
+    <div class="tk25Runner">
+     <div class="tk25Selected" id="tk25Selected">Bir motor seçerek başla.</div>
+     <label for="tk25Material">Proje, kod, fikir veya içerik</label><textarea id="tk25Material" maxlength="16000" placeholder="Seçtiğin motorun incelemesini istediğin içeriği buraya yaz..."></textarea>
+     <label for="tk25Context">Ek bağlam ve kısıtlar</label><textarea id="tk25Context" maxlength="4000" placeholder="Teknoloji, cihaz, bütçe, hedef ve sınırlar..."></textarea>
+     <button class="tkPrimary" id="tk25Run" type="button" disabled>Seçili motoru çalıştır</button>
+     <pre id="tk25Result" hidden></pre>
+    </div>
+   </div>
+  </section>
   <section class="tkMindPanel" data-tk-panel="synapse"><div class="tkMindCard"><strong>Tekden AI · Gelişmiş Synapse Motorları</strong><p>Bu araçlar verdiğin içerikten prototip, analiz, plan ve kod taslağı üretir. İzin verilmeyen cihaz verilerini okumaz; kodu onaysız biçimde canlı projene yazmaz.</p>
    <label for="tkSynapseMode">Çalıştırılacak motor</label><select id="tkSynapseMode">
     <option value="thought_physics">1 · Nöro-Mekanik Fizik Motoru</option><option value="bio_ui">2 · Biyo-Ritmik Arayüz Adaptasyonu</option><option value="multiverse_compile">3 · 10 Alternatif Kod Derleyici</option><option value="chaos">4 · Kriz ve Çöküş Simülatörü</option><option value="collective">5 · Kolektif Synapse Havuzu</option><option value="audio_mood">6 · Duygu-Melodi Çevirmeni</option><option value="ip_sentinel">7 · Dijital Telif Kalkanı</option><option value="temporal">8 · Zamanlayıcı Görev Planlayıcı</option><option value="logic_map">9 · Mantık Haritalama</option><option value="persona">10 · Öğrenen Dijital Persona</option>
@@ -6648,6 +6714,11 @@ MIND_LAB_HTML = r"""
  $('tkAdaptiveUI').addEventListener('change',()=>{if(!$('tkAdaptiveUI').checked)document.documentElement.style.removeProperty('--tk-density');});
  function renderLogicGalaxy(raw){const canvas=$('tkLogicGalaxy'),ctx=canvas.getContext('2d');let data;try{const a=raw.indexOf('{'),b=raw.lastIndexOf('}');if(a<0||b<=a)throw Error('JSON bulunamadı');data=JSON.parse(raw.slice(a,b+1));}catch(e){$('tkLogicGalaxyStatus').textContent='Harita verisi okunamadı. Model çıktısını metin olarak inceleyebilirsin.';return;}if(!Array.isArray(data.nodes)||!Array.isArray(data.edges)||!data.nodes.length){$('tkLogicGalaxyStatus').textContent='Geçerli düğüm/bağlantı verisi bulunamadı.';return;}const nodes=data.nodes.slice(0,24),edges=data.edges.slice(0,60);const pos={};nodes.forEach((n,i)=>{const phi=Math.acos(1-2*(i+.5)/nodes.length),theta=i*2.3999632297;pos[n.id]={x:Math.cos(theta)*Math.sin(phi),y:Math.sin(theta)*Math.sin(phi),z:Math.cos(phi),label:String(n.label||n.id).slice(0,42)};});let angle=0,dragging=false,lastX=0;canvas.onpointerdown=e=>{dragging=true;lastX=e.clientX;canvas.setPointerCapture(e.pointerId)};canvas.onpointermove=e=>{if(dragging){angle+=(e.clientX-lastX)*.008;lastX=e.clientX;draw()}};canvas.onpointerup=()=>dragging=false;canvas.onpointercancel=()=>dragging=false;function draw(){const w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);ctx.fillStyle='#07162b';ctx.fillRect(0,0,w,h);const projected={};nodes.forEach(n=>{const p=pos[n.id],x=p.x*Math.cos(angle)-p.z*Math.sin(angle),z=p.x*Math.sin(angle)+p.z*Math.cos(angle),scale=260/(3.1+z);projected[n.id]={x:w/2+x*scale,y:h/2+p.y*scale,z,scale};});ctx.lineWidth=1.6;edges.forEach(e=>{const a=projected[e.from],b=projected[e.to];if(!a||!b)return;ctx.strokeStyle='rgba(86,180,255,.38)';ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();});nodes.forEach(n=>{const p=projected[n.id];if(!p)return;const r=Math.max(5,Math.min(13,8+p.z*3));ctx.beginPath();ctx.arc(p.x,p.y,r,0,Math.PI*2);ctx.fillStyle=p.z>.2?'#82e6ff':'#b58cff';ctx.shadowColor=ctx.fillStyle;ctx.shadowBlur=16;ctx.fill();ctx.shadowBlur=0;ctx.font='13px system-ui';ctx.fillStyle='#ecf5ff';ctx.textAlign='center';ctx.fillText(pos[n.id].label,p.x,p.y+r+16);});}draw();$('tkLogicGalaxyStatus').textContent=nodes.length+' bileşen ve '+edges.length+' bağlantı gösteriliyor. Fareyle sürükleyerek görünümü döndürebilirsin.';}
  $('tkSynapseRun').addEventListener('click',async()=>{const b=$('tkSynapseRun');b.disabled=true;try{status('Seçilen motor çalışıyor…');const feature=$('tkSynapseMode').value;const d=await req('/api/mind/advanced-synapse',{method:'POST',body:JSON.stringify({feature,material:$('tkSynapseMaterial').value,context:$('tkSynapseContext').value})});show('tkSynapseResult',d.result||JSON.stringify(d,null,2));if(feature==='logic_galaxy')renderLogicGalaxy(d.result||'');status('Motor çıktısı hazır. Önerileri inceleyip onaylayarak kullan.');}catch(e){status(e.message)}finally{b.disabled=false}});
+ const tk25Names={thought_physics:'Nöro-Mekanik Fizik Motoru',bio_ui:'Biyo-Ritmik Arayüz Adaptasyonu',multiverse_compile:'Kuantum Çoklu Evren Kod Derleyicisi',chaos:'Otonom Kriz ve Çöküş Simülatörü',collective:'Kolektif Zihin Akordajı',micro_focus:'Mikro-Mimik Odak Analizi',neuro_audio:'Nöro-Akustik Frekans Senkronizasyonu',debug_cue:'Görünür Hata Ayıklama Asistanı',emotional_ui:'Duygu Temelli Arayüz Uyarlaması',circadian_workflow:'Biyo-Ritmik Görev Zamanlayıcı',acoustic_architecture:'Tersine Mühendislik Sesli Çevirmeni',immortal_code:'Ölümsüz Kod Arşivi',chaos_hacker:'Otonom Test ve Kaos Simülatörü',dialectic_council:'Çoklu Persona Fikir Meclisi',predictive_aging:'Akıllı Kod Yaşlandırma Analizi',global_synapse:'Global Anonim Akıl Havuzu',growth_launch:'Otonom Lansman ve Büyüme Ajanı',ip_sentinel:'Telif ve Lisans Kalkanı',logic_galaxy:'Holografik Mantık Galaksisi',synthetic_twin:'Canlı Sentetik Dijital İkiz',retrocausal_rebuild:'Geçmişi Yeniden İnşa Etme',direct_brainware:'Nöral Doğrudan Aktarım',organic_code:'Kendi Kendine Evrimleşen Organik Kod',zero_latency:'Sıfır Gecikmeli Dünya Motoru',emotional_audio:'Duygu-Melodi Eş Zamanlı Stüdyo'};
+ let tk25Feature='';
+ document.querySelectorAll('.tk25Card').forEach(card=>card.addEventListener('click',()=>{document.querySelectorAll('.tk25Card').forEach(x=>x.classList.remove('selected'));card.classList.add('selected');tk25Feature=card.dataset.feature;$('tk25Selected').textContent='Seçili motor: '+tk25Names[tk25Feature];$('tk25Run').disabled=false;$('tk25Material').focus();}));
+ $('tk25Run').addEventListener('click',async()=>{if(!tk25Feature){status('Önce bir motor seç.');return}const material=$('tk25Material').value.trim();if(material.length<5){status('Lütfen en az 5 karakterlik proje, fikir veya içerik gir.');return}const b=$('tk25Run');b.disabled=true;try{status(tk25Names[tk25Feature]+' çalışıyor…');const d=await req('/api/mind/advanced-synapse',{method:'POST',body:JSON.stringify({feature:tk25Feature,material,context:$('tk25Context').value})});show('tk25Result',d.result||JSON.stringify(d,null,2));if(tk25Feature==='logic_galaxy')renderLogicGalaxy(d.result||'');status('Sonuç hazır. Önerileri inceleyip doğrulayarak kullan.');}catch(e){status(e.message)}finally{b.disabled=false}});
+
  // Microphone: analyze approximate rhythm/pitch locally; only derived numeric features are sent.
  function estimatePitch(buf,sampleRate){let rms=0;for(let i=0;i<buf.length;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/buf.length);if(rms<0.012)return null;let bestOffset=-1,bestCorr=0;const min=Math.max(2,Math.floor(sampleRate/900)),max=Math.min(buf.length/2,Math.floor(sampleRate/70));for(let off=min;off<max;off++){let corr=0;for(let i=0;i<buf.length-off;i+=4)corr+=buf[i]*buf[i+off];corr/=Math.max(1,buf.length/4);if(corr>bestCorr){bestCorr=corr;bestOffset=off;}}return bestOffset>0&&bestCorr>0.01?Math.round(sampleRate/bestOffset):null;}
  function sampleMic(){if(!micAnalyser||!micContext)return;const data=new Float32Array(micAnalyser.fftSize);micAnalyser.getFloatTimeDomainData(data);let rms=0;for(let i=0;i<data.length;i++)rms+=data[i]*data[i];rms=Math.sqrt(rms/data.length);const pitch=estimatePitch(data,micContext.sampleRate);const now=Date.now();if(!micSamples.length||now-micSamples[micSamples.length-1].t>=100)micSamples.push({t:now-micStartedAt,rms:Number(rms.toFixed(4)),pitch_hz:pitch});if(now-micStartedAt>30000){stopMicAndGenerate();return;}micRaf=requestAnimationFrame(sampleMic);}
@@ -6721,7 +6792,7 @@ MIND_LAB_LOCKED_HTML = r"""
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
     # Monetization entry point is appended to the existing homepage; existing UI stays intact.
-    monetization_link = """<div style="position:fixed;right:14px;bottom:14px;z-index:9999;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end"><a href="/rehberler" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#fff;color:#155eef;border:1px solid #cfe0f8;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0001">Yapay zekâ rehberleri</a><a href="/hakkimizda" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#fff;color:#155eef;border:1px solid #cfe0f8;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0001">Hakkımızda</a><a href="/iletisim" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#fff;color:#155eef;border:1px solid #cfe0f8;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0001">İletişim</a><a href="/ortaklik" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#155eef;color:#fff;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0002">Tekden AI'ı destekle / İş ortaklığı</a></div>"""
+    monetization_link = """<div id="tkFloatingLinks" style="position:fixed;right:14px;bottom:14px;z-index:9999;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end"><a href="/rehberler" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#fff;color:#155eef;border:1px solid #cfe0f8;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0001">Yapay zekâ rehberleri</a><a href="/hakkimizda" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#fff;color:#155eef;border:1px solid #cfe0f8;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0001">Hakkımızda</a><a href="/iletisim" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#fff;color:#155eef;border:1px solid #cfe0f8;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0001">İletişim</a><a href="/ortaklik" style="display:inline-block;padding:10px 14px;border-radius:12px;background:#155eef;color:#fff;text-decoration:none;font:600 13px system-ui;box-shadow:0 5px 20px #0002">Tekden AI'ı destekle / İş ortaklığı</a></div>"""
     # Only Plus accounts receive the full Zihin Atölyesi interface and its client scripts.
     try:
         visitor = current_user(request)
@@ -8836,4 +8907,4 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
-    
+            
