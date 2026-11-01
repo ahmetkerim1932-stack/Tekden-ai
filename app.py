@@ -292,6 +292,27 @@ def init_db():
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_mind_idea_pulses_topic_date ON mind_idea_pulses(topic, created_at DESC)")
+        # User-owned source history. Versions are saved only when the user explicitly submits them.
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS mind_code_heritage (
+            id BIGSERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            project_name TEXT NOT NULL,
+            version_label TEXT NOT NULL DEFAULT '',
+            source_code TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mind_code_heritage_user_project ON mind_code_heritage(user_id, project_name, created_at DESC)")
+        # Anonymous opt-in aggregate: no account id, raw prompt, code, or free-text content is stored.
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS mind_success_pulses (
+            id BIGSERIAL PRIMARY KEY,
+            topic TEXT NOT NULL CHECK (topic IN ('yapay-zeka','yazilim','egitim','tasarim','oyun','robotik','diger')),
+            outcome TEXT NOT NULL CHECK (outcome IN ('cozuldu','devam_ediyor','cozulemedi')),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_mind_success_pulses_topic_date ON mind_success_pulses(topic, created_at DESC)")
         # Controlled background code-evolution jobs. Source snapshots are analyzed, never executed or auto-deployed.
         conn.execute("""
         CREATE TABLE IF NOT EXISTS mind_evolution_jobs (
@@ -347,7 +368,7 @@ PLAN_FEATURES = {
         "Uzun analiz ve çok adımlı proje desteği", "Pro araç kütüphanesi"
     ], "disclaimer": "Özellikler sunucu, model ve harici sağlayıcı yapılandırmasına bağlıdır."},
     "plus": {"title": "Tekden AI Plus", "price_try_month": 400, "features": [
-        "Pro planındaki tüm özellikler dâhil", "Zihin Atölyesi: proje hafızası, doğruluk denetimi, what-if senaryoları, uzman fikir paneli, kod otopsisi, içerik dönüştürme, anlatım uyumu, isteğe bağlı cihaz üzerinde kamera ipuçları, uyumlu Bluetooth nabız sensörü, proaktif proje incelemesi ve anonim topluluk frekansı", "Pro özelliklerine ek Plus iş akışları", "150 özel Plus çalışma şablonu",
+        "Pro planındaki tüm özellikler dâhil", "Zihin Atölyesi: proje hafızası, doğruluk denetimi, what-if senaryoları, uzman fikir paneli, kod otopsisi, içerik dönüştürme, anlatım uyumu, isteğe bağlı cihaz üzerinde kamera ipuçları, uyumlu Bluetooth nabız sensörü, proaktif proje incelemesi, kod sürüm arşivi, yerel ses-ritim analizi, görünür hata ipuçları ve anonim topluluk frekansı", "Pro özelliklerine ek Plus iş akışları", "150 özel Plus çalışma şablonu",
         "Proje planlama ve gereksinim matrisi", "Belge ve toplantı iş akışları",
         "İçerik takvimi ve kampanya planları", "Ürün ve kullanıcı araştırması şablonları",
         "Yazılım kalite kontrol ve yayın öncesi kontrol listeleri",
@@ -707,6 +728,10 @@ def product_features():
             "idea_blueprints": bool(OLLAMA_API_KEY),
             "what_if_scenarios": bool(OLLAMA_API_KEY),
             "simulated_expert_boardroom": bool(OLLAMA_API_KEY),
+            "local_microphone_rhythm_analysis": True,
+            "user_owned_code_heritage": True,
+            "visible_debug_cues": bool(OLLAMA_API_KEY),
+            "privacy_preserving_community_success": bool(DATABASE_URL),
             "code_autopsy": bool(OLLAMA_API_KEY),
             "cross_format_transfer_plans": bool(OLLAMA_API_KEY),
             "self_reported_resonance": True,
@@ -1659,6 +1684,30 @@ class EvolutionJobBody(BaseModel):
     goal: str = Field(default="Bakım risklerini bul ve iyileştirme önerileri üret", max_length=800)
     code: str = Field(min_length=20, max_length=24000)
 
+class CodeCueBody(BaseModel):
+    code: str = Field(min_length=10, max_length=18000)
+    context: str = Field(default="", max_length=3000)
+
+class AudioArchitectureBody(BaseModel):
+    concept: str = Field(default="Mırıldanılan ritimden küçük bir web oyunu prototipi oluştur", max_length=1200)
+    target: str = Field(default="HTML Canvas ve JavaScript", max_length=100)
+    features_json: str = Field(min_length=5, max_length=8000)
+
+class CodeHeritageBody(BaseModel):
+    project_name: str = Field(min_length=2, max_length=100)
+    version_label: str = Field(default="Kaydedilmiş sürüm", max_length=100)
+    source_code: str = Field(min_length=10, max_length=30000)
+
+class WorkflowScheduleBody(BaseModel):
+    tasks: str = Field(min_length=5, max_length=7000)
+    chronotype: str = Field(default="Esnek", max_length=40)
+    available_windows: str = Field(default="", max_length=1000)
+    deadline: str = Field(default="Belirtilmedi", max_length=100)
+
+class CommunitySuccessBody(BaseModel):
+    topic: str = Field(min_length=2, max_length=30)
+    outcome: str = Field(min_length=3, max_length=30)
+
 class AdvancedSynapseBody(BaseModel):
     feature: str = Field(min_length=3, max_length=50)
     material: str = Field(min_length=5, max_length=16000)
@@ -1666,7 +1715,7 @@ class AdvancedSynapseBody(BaseModel):
 
 @app.post("/api/mind/advanced-synapse")
 def mind_advanced_synapse(body: AdvancedSynapseBody, request: Request):
-    """Plus-only applied workflow hub for the ten requested creative/engineering systems."""
+    """Plus-only applied workflow hub for the extended Zihin Atölyesi engines."""
     require_plus_user(request)
     modes = {
         "thought_physics": "Kullanıcının yazdığı tasvir/etkileşim notlarından çalışan HTML Canvas veya JavaScript fizik prototipi üret. Yerçekimi, ivme, sürtünme, çarpışma, kontrol ve testleri açıkla. Zihin okuduğunu iddia etme; yalnızca sağlanan girdiyi kullan.",
@@ -1678,7 +1727,26 @@ def mind_advanced_synapse(body: AdvancedSynapseBody, request: Request):
         "ip_sentinel": "Kod, metin ve varlıklar için lisans/telif risk kontrol listesi oluştur. Kaynak ve lisans metni verilmedikçe küresel veri tabanlarını taradığını veya hukuki kesinlik sağladığını iddia etme. Şüpheli parçaları işaretle ve özgün alternatif yaz.",
         "temporal": "Görevleri süre, bağımlılık, öncelik ve kullanıcı tarafından belirtilen uygun zaman aralıklarına göre planla. Arka plan/uyku zamanı varsayma; otomatik takvim veya bilgisayar erişimin yoksa yalnızca uygulanabilir çizelge üret.",
         "logic_map": "Projeyi bileşen, veri akışı, bağımlılık ve karar noktaları halinde haritala; Mermaid flowchart kodu ve açıklama üret. Belirsiz bağlantıları varsayım olarak etiketle.",
-        "persona": "Kullanıcının bu istekte verdiği örneklerden tercih profili taslağı çıkar: üslup, ayrıntı, tasarım, kod standartları. Kalıcı kayıt veya bağımsız karar yetkisi olduğunu iddia etme; kullanıcı onayı gereken noktaları belirt."
+        "persona": "Kullanıcının bu istekte verdiği örneklerden tercih profili taslağı çıkar: üslup, ayrıntı, tasarım, kod standartları. Kalıcı kayıt veya bağımsız karar yetkisi olduğunu iddia etme; kullanıcı onayı gereken noktaları belirt.",
+        "micro_focus": "İsteğe bağlı cihaz-üzeri kamera kullanımına yönelik bir mikro-mimik/göz kırpma ölçüm tasarımı hazırla. Yüz ifadesinden iç duygu, stres, dikkat veya sağlık sonucu çıkarma; yalnızca ölçülebilir göz kırpma sayısı, görüntüde yüz bulunması ve kamera kalitesi gibi gözlemlenebilir sinyalleri raporla. Erişilebilirlik, açık izin, cihaz-üzeri işleme ve kapatma tasarımını ekle.",
+        "neuro_audio": "Kullanıcının seçtiği ses tercihine göre güvenli, düşük ses düzeyinde yerel Web Audio ses tasarımı üret. Alfa/theta beyin dalgası oluşturduğunu, EEG'yi değiştirdiğini veya tıbbi/odak etkisini garanti ettiğini iddia etme. Kulaklık, ses seviyesi, durdurma ve süre kontrolü gereksinimlerini belirt.",
+        "debug_cue": "Kod içindeki olası mantık problemlerini ve ilgili satırları incele. Subliminal/izinsiz gizli ipucu yerleştirme; önerileri görünür, etiketli ve kullanıcı tarafından kapatılabilir hata kartları olarak üret. Her bulgu için kanıt satırı, güven düzeyi, olası düzeltme ve test ver.",
+        "emotional_ui": "Kullanıcının açıkça seçtiği çalışma durumuna göre erişilebilir arayüz teması, kontrast, yazı boyutu, yoğunluk ve görev adımı öner. Kameradan duyguyu kesin çıkardığını iddia etme; otomatik uyarlama kapatılabilir ve manuel seçim her zaman öncelikli olsun.",
+        "circadian_workflow": "Kullanıcının kendisinin belirttiği sabah/akşam tercihi, uygun saat aralıkları, görev süreleri ve son tarihine göre iş planı oluştur. Biyolojik saati sensörlerden teşhis etme; takvimine erişimin yoksa görevleri gerçekten zamanladığını iddia etme.",
+        "acoustic_architecture": "Verilen yerel ses analiz özetindeki ritim aralıkları, yaklaşık perde ve enerji değişimlerinden oyun mekaniği, Canvas animasyonu veya JavaScript prototipi üret. Ham mikrofon kaydı olmadan sesin tüm ayrıntılarını bildiğini iddia etme; ölçüm belirsizliğini belirt.",
+        "immortal_code": "Kullanıcının sağladığı ve açıkça kaydettiği kaynak sürümlerini karşılaştıran sürüm arşivi planı üret. Kaydedilmemiş/silinmiş geçmiş sürümleri geri getirdiğini iddia etme; her sürüm için hash, tarih, fark özeti ve manuel geri yükleme adımları öner.",
+        "chaos_hacker": "Yalnızca kullanıcının kendi uygulaması için savunmacı, güvenli kaos mühendisliği ve tehdit modelleme planı hazırla. Gerçek sistemlere izinsiz saldırı, exploit zinciri, veri bozma veya servis çökertme talimatı verme; testleri izole staging ortamı, yedek, hız sınırı ve geri alma adımlarıyla sınırla.",
+        "dialectic_council": "Yatırımcı, tasarımcı, yazılım mimarı, güvenlik denetçisi ve pazarlamacı bakış açılarını simüle ederek fikirdeki çatışmaları görünür kıl. Bunların tek model tarafından üretilen perspektifler olduğunu belirt; gerçek birden çok bağımsız ajan gibi sunma.",
+        "predictive_aging": "Kodun mevcut bağımlılık, API, sürüm, ölçek ve bakım varsayımlarından 6 ay/1 yıl/3 yıl için koşullu risk senaryoları üret. Gelecekteki güncellemeleri bildiğini iddia etme; güncel sürüm bilgisi verilmemişse riskleri varsayım olarak etiketle ve doğrulama kaynaklarını listele.",
+        "global_synapse": "Yalnızca sunulan anonim ve toplulaştırılmış kategori/sonuç istatistiklerinden fikir üret. Başka kullanıcıların sohbet, kod, kimlik veya özel projelerine erişim iddia etme; yeterli veri yoksa anlamlı bir kolektif örüntü bulunmadığını açıkla.",
+        "growth_launch": "Proje özeti üzerinden X, LinkedIn ve GitHub duyuruları, tanıtım videosu senaryosu, hedef kitle, lansman takvimi ve ölçülebilir KPI taslağı oluştur. Platform adına kendiliğinden paylaşım yapma veya reklam başlatma.",
+        "logic_galaxy": "Projeyi 8-20 düğüm ve bağlantıdan oluşan etkileşimli mantık haritasına dönüştür. Yanıtta geçerli JSON ver: {\"nodes\":[{\"id\":\"n1\",\"label\":\"Bileşen\",\"kind\":\"module\"}],\"edges\":[{\"from\":\"n1\",\"to\":\"n2\",\"label\":\"veri akışı\"}]}. Düğüm ve bağlantıların sağlanan projeden türetilmesini, belirsizlerin varsayım diye etiketlenmesini sağla; 3B görünüm yalnızca tarayıcı görselleştirmesidir.",
+        "synthetic_twin": "Kullanıcının açıkça verdiği yazı örneklerinden üslup, tercih ve çalışma kuralı profili çıkar. Kimliği kusursuz kopyaladığını veya bağımsız karar yetkisi bulunduğunu iddia etme; hassas kararlar, dışa mesaj gönderme ve satın alma gibi eylemler için insan onayı şartı koy.",
+        "retrocausal_rebuild": "Birkaç satır kod, not veya taslaktan hedeflenmiş olabilecek üç alternatif proje sürümünü oluştur. Geçmişteki gerçek niyeti bildiğini iddia etme; her seçeneğin dayandığı ipuçlarını ve varsayımlarını ayır.",
+        "direct_brainware": "EEG/BCI cihazı yoksa yalnızca donanım-bağımsız arayüz tasarımı ve entegrasyon planı üret. Serbest düşünceleri okuyabileceğini iddia etme; cihaz, protokol, kalibrasyon ve kullanıcı izni gerektiğini belirt.",
+        "organic_code": "Kod için test odaklı iyileştirme döngüsü tasarla: öneri, diff, test, insan onayı, sürüm kaydı ve geri alma. Kodun milyonlarca kez çalıştırıldığını veya proje sahibinden habersiz değiştiğini iddia etme; otomatik canlı dağıtım yapma.",
+        "zero_latency": "Gerçek gecikmeyi ölçmeye dayalı performans planı hazırla: önbellek, lazy loading, ön hesaplama, streaming, veritabanı indeksleri ve ağ darboğazları. Sıfır milisaniye veya kuantum önbellekleme iddiası yapma; hedefleri ölçülebilir p50/p95 gecikmesi olarak yaz.",
+        "emotional_audio": "Kullanıcının açıkça seçtiği ruh hâli/tema ve proje içeriğine göre özgün bir müzik tasarım brifi, akor/ritim taslağı ve üretim promptu hazırla. Duyguyu kesin teşhis etme veya profesyonel ses dosyası üretildiğini iddia etme; gerçek ses için yapılandırılmış ses üretim sağlayıcısı gerekir."
     }
     if body.feature not in modes:
         raise HTTPException(400, "Bilinmeyen gelişmiş araç seçimi.")
@@ -1803,6 +1871,133 @@ def get_community_pulse(request: Request):
         rows = conn.execute("SELECT topic,COUNT(*) AS n FROM mind_idea_pulses WHERE created_at > NOW()-INTERVAL '30 days' GROUP BY topic ORDER BY n DESC").fetchall()
     return {"pulse": [{"topic": r["topic"], "count": r["n"]} for r in rows],
             "note": "Son 30 günde kullanıcıların açık rızayla paylaştığı genel kategori seçimleri. Ham sohbetler ve proje metinleri paylaşılmaz."}
+
+@app.post("/api/mind/code-cue")
+def mind_code_cue(body: CodeCueBody, request: Request):
+    require_plus_user(request)
+    prompt = (
+        "Kodu hızlı hata ayıklama amacıyla incele. Yalnızca kanıtlanabilir şüpheli noktaları bul; her bulgu için "
+        "satır aralığı (yaklaşık ise belirt), neden, güven düzeyi, önerilen düzeltme ve küçük test ver. "
+        "Gizli/subliminal içerik ekleme; tüm öneriler kullanıcıya görünür ve isteğe bağlıdır. Kodu çalıştırdığını iddia etme.\n"
+        f"Bağlam: {body.context}\nKod:\n{body.code}"
+    )
+    try:
+        result = call_ollama([{"role":"system","content":"Sen dikkatli, savunmacı ve kanıta dayalı kod inceleme asistanısın."},
+                              {"role":"user","content":prompt}], OLLAMA_PRO_MODEL)
+    except Exception as exc:
+        raise HTTPException(502, "Görünür hata ipuçları üretilemedi: " + str(exc)[:180])
+    return {"cues": result, "visible_suggestions": True, "code_executed": False}
+
+@app.post("/api/mind/audio-architecture")
+def mind_audio_architecture(body: AudioArchitectureBody, request: Request):
+    require_plus_user(request)
+    try:
+        features = json.loads(body.features_json)
+    except Exception:
+        raise HTTPException(400, "Ses özeti geçerli JSON değil.")
+    if not isinstance(features, dict):
+        raise HTTPException(400, "Ses özellikleri nesne biçiminde olmalı.")
+    safe_features = json.dumps(features, ensure_ascii=False)[:8000]
+    prompt = (
+        f"Hedef: {body.target}. Yaratıcı amaç: {body.concept}.\n"
+        "Aşağıdaki mikrofon verisi yalnızca tarayıcıda hesaplanmış yaklaşık ritim/perde/enerji özetidir; ham ses kaydı sunucuya gönderilmemiştir. "
+        "Bu ölçümlere dayanarak: (1) ritim/oyun mekaniği eşlemesi, (2) oynanabilir ve tek HTML dosyasında çalışan basit Canvas/JS prototipi, "
+        "(3) fizik parametreleri, (4) klavye kontrolleri ve (5) test adımları üret. Ölçümden çıkarılamayan müzikal ayrıntıları varsayım diye belirt. "
+        "Kod dış ağa istek atmasın, kullanıcı içeriğini yüklemesin, eval kullanmasın.\nYerel ses özellikleri:\n" + safe_features
+    )
+    try:
+        result = call_ollama([{"role":"system","content":"Sen ses özelliklerinden oyun ve etkileşim prototipi çıkaran yaratıcı yazılım mimarısın. Çalıştırılabilir, tek dosyalık HTML/JS üret; doğrulamadığın şeyi test edildi diye sunma."},
+                              {"role":"user","content":prompt}], OLLAMA_PRO_MODEL)
+    except Exception as exc:
+        raise HTTPException(502, "Ses taslağı üretilemedi: " + str(exc)[:180])
+    return {"architecture": result, "raw_audio_uploaded": False, "execution": "generated_code_not_executed"}
+
+@app.post("/api/mind/heritage")
+def save_code_heritage(body: CodeHeritageBody, request: Request):
+    user = require_plus_user(request)
+    code = body.source_code
+    digest = hashlib.sha256(code.encode("utf-8")).hexdigest()
+    with db() as conn:
+        row = conn.execute("""
+            INSERT INTO mind_code_heritage(user_id,project_name,version_label,source_code,source_hash)
+            VALUES(%s,%s,%s,%s,%s)
+            RETURNING id,project_name,version_label,source_hash,created_at
+        """, (user["id"], body.project_name.strip(), body.version_label.strip(), code, digest)).fetchone()
+    return {"ok": True, "version": dict(row), "note": "Bu sürüm yalnızca şimdi kaydedildi; önceden silinmiş veya kaydedilmemiş dosyalar geri getirilemez."}
+
+@app.get("/api/mind/heritage")
+def list_code_heritage(request: Request, project_name: str = ""):
+    user = require_plus_user(request)
+    with db() as conn:
+        if project_name.strip():
+            rows = conn.execute("""SELECT id,project_name,version_label,source_hash,created_at
+                                   FROM mind_code_heritage WHERE user_id=%s AND project_name=%s
+                                   ORDER BY created_at DESC LIMIT 100""", (user["id"], project_name.strip())).fetchall()
+        else:
+            rows = conn.execute("""SELECT id,project_name,version_label,source_hash,created_at
+                                   FROM mind_code_heritage WHERE user_id=%s ORDER BY created_at DESC LIMIT 100""", (user["id"],)).fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+@app.get("/api/mind/heritage/{version_id}")
+def get_code_heritage(version_id: int, request: Request):
+    user = require_plus_user(request)
+    with db() as conn:
+        row = conn.execute("""SELECT id,project_name,version_label,source_code,source_hash,created_at
+                               FROM mind_code_heritage WHERE id=%s AND user_id=%s""", (version_id, user["id"])).fetchone()
+    if not row:
+        raise HTTPException(404, "Kaydedilmiş sürüm bulunamadı.")
+    return {"version": dict(row), "restore_mode": "manual_copy_or_download"}
+
+@app.delete("/api/mind/heritage/{version_id}")
+def delete_code_heritage(version_id: int, request: Request):
+    user = require_plus_user(request)
+    with db() as conn:
+        result = conn.execute("DELETE FROM mind_code_heritage WHERE id=%s AND user_id=%s", (version_id, user["id"]))
+    if result.rowcount == 0:
+        raise HTTPException(404, "Kaydedilmiş sürüm bulunamadı.")
+    return {"ok": True}
+
+@app.post("/api/mind/workflow-plan")
+def mind_workflow_plan(body: WorkflowScheduleBody, request: Request):
+    require_plus_user(request)
+    prompt = (
+        f"Kullanıcının kendi belirttiği çalışma tercihi: {body.chronotype}.\n"
+        f"Uygun zaman aralıkları: {body.available_windows}.\n"
+        f"Son tarih: {body.deadline}.\nGörevler:\n{body.tasks}\n"
+        "Görevleri süre, bağımlılık, öncelik, mola ve uygun zaman pencerelerine göre planla. Biyolojik saati ölçtüğünü iddia etme. "
+        "Kullanıcı takvimi bağlamadıysa takvime etkinlik eklediğini söyleme. Gerçekçi bir günlük/haftalık çizelge, yedek plan ve varsayımlar ver."
+    )
+    try:
+        result = call_ollama([{"role":"system","content":"Sen kullanıcı kontrollü çalışma planlama ve zamanlama asistanısın."},
+                              {"role":"user","content":prompt}], OLLAMA_PRO_MODEL)
+    except Exception as exc:
+        raise HTTPException(502, "İş akışı planı oluşturulamadı: " + str(exc)[:180])
+    return {"plan": result, "calendar_events_created": False}
+
+@app.post("/api/mind/community-success")
+def submit_community_success(body: CommunitySuccessBody, request: Request):
+    require_plus_user(request)
+    topic = body.topic.strip().casefold()
+    outcome = body.outcome.strip().casefold()
+    allowed_topics = {"yapay-zeka", "yazilim", "egitim", "tasarim", "oyun", "robotik", "diger"}
+    allowed_outcomes = {"cozuldu", "devam_ediyor", "cozulemedi"}
+    if topic not in allowed_topics or outcome not in allowed_outcomes:
+        raise HTTPException(400, "Konu veya sonuç seçimi geçersiz.")
+    # This aggregate has no user id and no free-text/project/code content.
+    with db() as conn:
+        conn.execute("INSERT INTO mind_success_pulses(topic,outcome) VALUES(%s,%s)", (topic, outcome))
+    return {"ok": True, "message": "Yalnızca konu kategorisi ve sonuç seçimin anonim toplu havuza eklendi; kimlik, kod ve proje metni saklanmadı."}
+
+@app.get("/api/mind/community-success")
+def get_community_success(request: Request):
+    require_plus_user(request)
+    with db() as conn:
+        rows = conn.execute("""SELECT topic,outcome,COUNT(*) AS n FROM mind_success_pulses
+                               WHERE created_at > NOW()-INTERVAL '30 days'
+                               GROUP BY topic,outcome HAVING COUNT(*) >= 5
+                               ORDER BY n DESC""").fetchall()
+    return {"aggregates": [dict(r) for r in rows], "minimum_group_size": 5,
+            "note": "Yalnızca en az beş kayıt içeren anonim konu/sonuç grupları gösterilir."}
 
 # ---------------- Advanced Plus engines: sampled scenario simulation and controlled code evolution ----------------
 _MIND_EVOLUTION_WORKER_STARTED = False
@@ -6219,6 +6414,9 @@ MIND_LAB_HTML = r"""
 #tkMindShade{display:none;position:fixed;inset:0;z-index:10000;background:#071b35a8;backdrop-filter:blur(5px);align-items:center;justify-content:center;padding:16px}
 #tkMindBox{width:min(900px,100%);max-height:88vh;overflow:auto;background:#fff;color:#14233b;border:1px solid #d8e7f8;border-radius:20px;padding:20px;box-shadow:0 24px 80px #071b3550;font:14px/1.5 system-ui}
 #tkMindBox h2{margin:0 0 5px;font-size:22px}#tkMindBox p{color:#5a6e89;margin:5px 0 12px}
+#tkMindBox.tkMoodCalm{background:#f0f4f8;color:#26364a}#tkMindBox.tkMoodCalm .tkMindCard{background:#f8fafc}
+#tkMindBox.tkMoodFocus{background:#edf4ff;color:#15365b}#tkMindBox.tkMoodFocus .tkMindCard{background:#f8fbff}
+#tkMindBox.tkMoodEnergy{background:#fff8ed;color:#56330a}#tkMindBox.tkMoodEnergy .tkMindCard{background:#fffdf8}
 .tkMindTop{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px}
 .tkMindTabs{display:flex;gap:7px;flex-wrap:wrap;margin:12px 0 16px}
 .tkMindTabs button{background:#eef5ff;color:#174271;border:1px solid #d4e5f9;padding:8px 11px;border-radius:10px;font-size:12px}
@@ -6318,8 +6516,17 @@ MIND_LAB_HTML = r"""
   <section class="tkMindPanel" data-tk-panel="synapse"><div class="tkMindCard"><strong>Tekden AI · Gelişmiş Synapse Motorları</strong><p>Bu araçlar verdiğin içerikten prototip, analiz, plan ve kod taslağı üretir. İzin verilmeyen cihaz verilerini okumaz; kodu onaysız biçimde canlı projene yazmaz.</p>
    <label for="tkSynapseMode">Çalıştırılacak motor</label><select id="tkSynapseMode">
     <option value="thought_physics">1 · Nöro-Mekanik Fizik Motoru</option><option value="bio_ui">2 · Biyo-Ritmik Arayüz Adaptasyonu</option><option value="multiverse_compile">3 · 10 Alternatif Kod Derleyici</option><option value="chaos">4 · Kriz ve Çöküş Simülatörü</option><option value="collective">5 · Kolektif Synapse Havuzu</option><option value="audio_mood">6 · Duygu-Melodi Çevirmeni</option><option value="ip_sentinel">7 · Dijital Telif Kalkanı</option><option value="temporal">8 · Zamanlayıcı Görev Planlayıcı</option><option value="logic_map">9 · Mantık Haritalama</option><option value="persona">10 · Öğrenen Dijital Persona</option>
+    <option value="micro_focus">11 · Mikro-Mimik / Göz Kırpma Analizi</option><option value="neuro_audio">12 · Nöro-Akustik Ses Tasarımı</option><option value="debug_cue">13 · Görünür Hata İpuçları</option><option value="emotional_ui">14 · Duygu Tercihine Göre Arayüz</option><option value="circadian_workflow">15 · Biyolojik Saat Tercihine Göre İş Akışı</option><option value="acoustic_architecture">16 · Akustikten Oyun Mimarisi</option><option value="immortal_code">17 · Ölümsüz Kod Arşivi Tasarımı</option><option value="chaos_hacker">18 · Güvenli Hacker / Kaos Testi</option><option value="dialectic_council">19 · Çoklu Persona Fikir Meclisi</option><option value="predictive_aging">20 · Kod Yaşlandırma Analizi</option><option value="global_synapse">21 · Global Anonim Akıl Havuzu</option><option value="growth_launch">22 · Otonom Lansman ve Büyüme Ajanı</option><option value="logic_galaxy">23 · Holografik Mantık Galaksisi</option><option value="synthetic_twin">24 · Sentetik Dijital İkiz</option><option value="retrocausal_rebuild">25 · Geçmiş Proje Yeniden İnşası</option><option value="direct_brainware">26 · Nöral Doğrudan Aktarım / EEG</option><option value="organic_code">27 · Kontrollü Öz-Evrimleşen Kod</option><option value="zero_latency">28 · Gecikme ve Performans Motoru</option><option value="emotional_audio">29 · Duygu-Melodi Eş Zamanlı Stüdyo</option>
    </select><label for="tkSynapseMaterial">İçerik, kod, proje veya tarif</label><textarea id="tkSynapseMaterial" maxlength="16000" placeholder="İncelenecek proje, kod, ritim tarifi veya hedef..."></textarea><label for="tkSynapseContext">Ek bağlam ve kısıtlar</label><textarea id="tkSynapseContext" maxlength="4000" placeholder="Teknoloji, hedef cihaz, bütçe, tercih ve sınırlar..."></textarea><button class="tkPrimary" id="tkSynapseRun" type="button">Motoru çalıştır</button><pre id="tkSynapseResult" hidden></pre>
-  </div><div class="tkMindCard" style="margin-top:12px"><strong>Yerel etkileşim uyumu</strong><p>Bu sekme açıkken tuşların basılma zamanlaması ve yazma temposu yalnızca tarayıcı belleğinde özetlenir; tuş içeriği kaydedilmez veya gönderilmez. Fiziksel basma kuvveti standart klavyeden okunamaz.</p><p id="tkTypingCue" role="status">Yazma ritmi henüz ölçülmedi.</p><label><input id="tkAdaptiveUI" type="checkbox" style="width:auto"> Yazma temposu çok düştüğünde arayüzü sadeleştir (yalnızca bu sekmede)</label></div></section>
+   <div class="tkMindCard" style="margin-top:12px"><strong>Holografik Mantık Galaksisi · Etkileşimli harita</strong><p>Motor seçimini “Holografik Mantık Galaksisi” yapıp proje mimarini gönder. Model geçerli düğüm/bağlantı verisi döndürürse aşağıda dönen 3B perspektifli bir Canvas haritası gösterilir.</p><canvas id="tkLogicGalaxy" width="900" height="480" style="width:100%;height:auto;display:block;background:#07162b;border-radius:12px" aria-label="Proje bileşenlerinin etkileşimli mantık haritası"></canvas><p id="tkLogicGalaxyStatus" role="status">Henüz harita oluşturulmadı.</p></div>
+  </div><div class="tkMindCard" style="margin-top:12px"><strong>Yerel etkileşim uyumu</strong><p>Bu sekme açıkken tuşların basılma zamanlaması ve yazma temposu yalnızca tarayıcı belleğinde özetlenir; tuş içeriği kaydedilmez veya gönderilmez. Fiziksel basma kuvveti standart klavyeden okunamaz.</p><p id="tkTypingCue" role="status">Yazma ritmi henüz ölçülmedi.</p><label><input id="tkAdaptiveUI" type="checkbox" style="width:auto"> Yazma temposu çok düştüğünde arayüzü sadeleştir (yalnızca bu sekmede)</label></div>
+   <div class="tkMindCard" style="margin-top:12px"><strong>Akustikten mimariye · Mikrofon</strong><p>Mikrofon izniyle ritim, yaklaşık perde ve ses enerjisi cihaz üzerinde özetlenir. Ham ses kaydı sunucuya yüklenmez; sayısal özet oyun/fizik prototipi taslağı oluşturmak için gönderilir.</p><label for="tkAudioConcept">Sesinden ne üretelim?</label><input id="tkAudioConcept" value="Ritme göre hızlanan ve zıplayan bir web oyunu oluştur"><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="tkPrimary" id="tkAudioStart" type="button">Mikrofonu başlat</button><button class="tkSecondary" id="tkAudioStop" type="button" disabled>Ritmi bitir ve kod üret</button></div><p id="tkAudioStatus" role="status">Mikrofon kapalı.</p><pre id="tkAudioResult" hidden></pre></div>
+   <div class="tkMindCard" style="margin-top:12px"><strong>Ölümsüz Kod Arşivi · Sürüm geçmişi</strong><p>Yalnızca buraya açıkça kaydettiğin kod sürümlerini saklar. Önceden kaydedilmemiş veya silinmiş dosyaları geçmişe dönük geri getiremez.</p><label for="tkHeritageProject">Proje adı</label><input id="tkHeritageProject" maxlength="100" placeholder="Tekden AI"><label for="tkHeritageLabel">Sürüm etiketi</label><input id="tkHeritageLabel" maxlength="100" placeholder="Örn. 2026-11-01 öncesi"><label for="tkHeritageCode">Kaydedilecek kod</label><textarea id="tkHeritageCode" style="min-height:150px" placeholder="Kodunu buraya yapıştır..."></textarea><button class="tkPrimary" id="tkHeritageSave" type="button">Sürümü arşivle</button><button class="tkSecondary" id="tkHeritageRefresh" type="button">Arşiv listesini yenile</button><div id="tkHeritageList"></div></div>
+   <div class="tkMindCard" style="margin-top:12px"><strong>Subliminal Debugging değil · Görünür Hata İpuçları</strong><p>Tekden AI şüpheli kod satırlarını kullanıcıya açıkça gösterir. Gizli veya fark ettirmeden ekrana ipucu yerleştirme yapmaz.</p><label for="tkCueCode">İncelenecek kod</label><textarea id="tkCueCode" style="min-height:140px" placeholder="Kodunu yapıştır..."></textarea><label for="tkCueContext">Beklenen davranış ve hata</label><textarea id="tkCueContext" placeholder="Kod ne yapmalı, ne yanlış gidiyor?"></textarea><button class="tkPrimary" id="tkCueBtn" type="button">Görünür hata ipuçları oluştur</button><pre id="tkCueResult" hidden></pre></div>
+   <div class="tkMindCard" style="margin-top:12px"><strong>Nöro-Akustik Frekans Tasarımı · Yerel ses</strong><p>Bu araç iki kanallı, düşük seviyeli test sesleri oluşturur. Beyin dalgası, odak veya sağlık etkisi garanti etmez. Sesi rahat duyulabilir seviyede tut ve istediğin an durdur.</p><label for="tkTonePreset">Ses tasarımı</label><select id="tkTonePreset"><option value="calm">Sakin arka plan</option><option value="focus">Hafif ritmik odak tonu</option><option value="ambient">Ambient çift ton</option></select><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="tkPrimary" id="tkToneStart" type="button">Sesi başlat</button><button class="tkSecondary" id="tkToneStop" type="button" disabled>Sesi durdur</button></div><p id="tkToneStatus" role="status">Ses kapalı.</p></div>
+   <div class="tkMindCard" style="margin-top:12px"><strong>Biyo-Ritmik Görev Zamanlayıcı</strong><p>Kendi belirttiğin sabah/akşam verim tercihi ve uygun saatlere göre görev planı çıkarır; takvimine otomatik kayıt yapmaz.</p><label for="tkScheduleTasks">Görevler</label><textarea id="tkScheduleTasks" placeholder="1) Kod analizi – 45 dk&#10;2) Oyun prototipi – 60 dk"></textarea><label for="tkScheduleType">Çalışma tercihi</label><select id="tkScheduleType"><option>Sabah insanıyım</option><option>Akşam/gece daha verimliyim</option><option>Esnek</option></select><label for="tkScheduleWindows">Uygun zaman aralıkları</label><input id="tkScheduleWindows" placeholder="Örn. 17:00-19:00, 20:30-22:00"><label for="tkScheduleDeadline">Son tarih</label><input id="tkScheduleDeadline" placeholder="Örn. 10 Kasım"><button class="tkPrimary" id="tkScheduleBtn" type="button">İş akışımı planla</button><pre id="tkScheduleResult" hidden></pre></div>
+   <div class="tkMindCard" style="margin-top:12px"><strong>Global Synapse · Anonim başarı havuzu</strong><p>İsteğe bağlı olarak yalnızca konu kategorisi ve çözüm durumunu paylaşabilirsin. Kodun, proje metnin, hesabın ve serbest yazdığın içerik bu havuza gönderilmez. İstatistikler en az 5 kayıt olduğunda gösterilir.</p><label for="tkSuccessTopic">Konu</label><select id="tkSuccessTopic"><option value="yapay-zeka">Yapay zekâ</option><option value="yazilim">Yazılım</option><option value="egitim">Eğitim</option><option value="tasarim">Tasarım</option><option value="oyun">Oyun</option><option value="robotik">Robotik</option><option value="diger">Diğer</option></select><label for="tkSuccessOutcome">Sonuç</label><select id="tkSuccessOutcome"><option value="cozuldu">Çözüldü</option><option value="devam_ediyor">Devam ediyor</option><option value="cozulemedi">Henüz çözülemedi</option></select><button class="tkPrimary" id="tkSuccessShare" type="button">Anonim sonucu paylaş</button><button class="tkSecondary" id="tkSuccessRefresh" type="button">Topluluk özetini gör</button><pre id="tkSuccessResult" hidden></pre></div>
+  </section>
   <section class="tkMindPanel" data-tk-panel="brainware"><div class="tkMindCard"><strong>Nöral-akustik doğrudan aktarım · EEG bağlantısı</strong><p>Gerçek beyin-sinyali girişi için EEG/BCI başlığı, o cihaza özel veri protokolü, kalibrasyon ve eğitilmiş sinyal çözücü gerekir. Genel web tarayıcısı insanın serbest düşüncelerini okuyamaz. Güncel non-invaziv BCI sistemleri belirli, önceden tanımlanmış komutları veya görev sinyallerini sınırlı doğrulukla çözebilir; serbest düşünceyi kelimesi kelimesine aktaramaz.</p><p><b>Şimdiki durum:</b> EEG donanımı bu projeye henüz bağlanmadı. Cihaz modeli ve üretici protokolü bilinmeden gerçek bağlantı kodu yazmak mümkün değil. Rastgele EEG değerleri uydurarak bu özelliği çalışıyormuş gibi göstermeyeceğiz.</p><p>Bir EEG başlığıyla bağlantı kurulduğunda ilk hedef; örneğin seçili komutları (ileri/geri, seç/onayla/iptal) kalibrasyonla kontrol etmek olacak. Bu, düşünceleri okumakla aynı şey değildir.</p></div></section>
   <div id="tkMindStatus" role="status"></div>
  </div>
@@ -6327,8 +6534,10 @@ MIND_LAB_HTML = r"""
 <script>
 (()=>{
  const $=id=>document.getElementById(id);let focus='neutral',manualFocus='neutral';window.tkFocusState='neutral';
- let cameraStream=null,cameraRAF=0,faceLandmarker=null,lastVideoTime=-1,lastCameraProcessAt=0,faceMissingSince=0,eyesClosedSince=0,cameraBrief=false;
+ let cameraStream=null,cameraRAF=0,faceLandmarker=null,lastVideoTime=-1,lastCameraProcessAt=0,faceMissingSince=0,eyesClosedSince=0,cameraBrief=false,eyeWasClosed=false,blinkTimes=[];
  let pulseDevice=null,pulseCharacteristic=null,currentBpm=null,pulseAutoActive=false;
+ let micStream=null,micContext=null,micAnalyser=null,micRaf=0,micSamples=[],micStartedAt=0;
+ let toneContext=null,toneNodes=[];
  async function req(url,opts={}){const r=await fetch(url,{...opts,credentials:'same-origin',headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok)throw new Error(d.detail||'İşlem tamamlanamadı.');return d}
  function status(t){$('tkMindStatus').textContent=t||''}
  function show(id,text){const el=$(id);el.textContent=text;el.hidden=false}
@@ -6362,8 +6571,8 @@ MIND_LAB_HTML = r"""
    const categories=result.faceBlendshapes?.[0]?.categories||[];
    const score=name=>categories.find(x=>x.categoryName===name)?.score||0;
    const eyesClosed=score('eyeBlinkLeft')>.78&&score('eyeBlinkRight')>.78;
-   if(eyesClosed){if(!eyesClosedSince)eyesClosedSince=Date.now();cameraBrief=Date.now()-eyesClosedSince>5000;setCameraStatus(cameraBrief?'Gözler uzun süre kapalı algılandı; bu yalnızca görsel bir ipucudur.':'Yüz algılandı.');}
-   else{eyesClosedSince=0;cameraBrief=false;setCameraStatus('Yüz algılandı. Kamera ipuçları cihaz üzerinde işleniyor.');}
+   if(eyesClosed){if(!eyeWasClosed){blinkTimes.push(Date.now());blinkTimes=blinkTimes.filter(t=>Date.now()-t<60000);}eyeWasClosed=true;if(!eyesClosedSince)eyesClosedSince=Date.now();cameraBrief=Date.now()-eyesClosedSince>5000;setCameraStatus((cameraBrief?'Gözler bir süredir kapalı görünüyor. ':'Yüz algılandı. ')+ 'Son 60 saniye göz kırpma sayısı: '+blinkTimes.filter(t=>Date.now()-t<60000).length+'. Bu bir duygu/odak teşhisi değildir.');}
+   else{eyeWasClosed=false;eyesClosedSince=0;cameraBrief=false;setCameraStatus('Yüz algılandı. Son 60 saniye göz kırpma sayısı: '+blinkTimes.filter(t=>Date.now()-t<60000).length+'. İpuçları cihaz üzerinde işleniyor.');}
   }
   refreshSensorFocus();
  }
@@ -6381,7 +6590,7 @@ MIND_LAB_HTML = r"""
    const base={modelAssetPath:model};
    try{faceLandmarker=await vision.FaceLandmarker.createFromOptions(wasm,{baseOptions:{...base,delegate:'GPU'},runningMode:'VIDEO',numFaces:1,outputFaceBlendshapes:true});}
    catch(gpuError){faceLandmarker=await vision.FaceLandmarker.createFromOptions(wasm,{baseOptions:{...base,delegate:'CPU'},runningMode:'VIDEO',numFaces:1,outputFaceBlendshapes:true});}
-   lastVideoTime=-1;lastCameraProcessAt=0;faceMissingSince=0;eyesClosedSince=0;cameraBrief=false;
+   lastVideoTime=-1;lastCameraProcessAt=0;faceMissingSince=0;eyesClosedSince=0;cameraBrief=false;eyeWasClosed=false;blinkTimes=[];
    const loop=()=>{if(!cameraStream)return;updateCameraCue(performance.now());cameraRAF=requestAnimationFrame(loop)};cameraRAF=requestAnimationFrame(loop);
    setCameraStatus('Kamera açık. Görüntü bu cihazda işleniyor; sunucuya gönderilmiyor.');refreshSensorFocus();
   }catch(err){
@@ -6396,7 +6605,7 @@ MIND_LAB_HTML = r"""
   if(cameraStream)cameraStream.getTracks().forEach(t=>t.stop());cameraStream=null;
   if(faceLandmarker){try{faceLandmarker.close()}catch{}faceLandmarker=null;}
   const video=$('tkSensorVideo');if(video){video.pause();video.srcObject=null;video.style.display='none';}
-  cameraBrief=false;faceMissingSince=0;eyesClosedSince=0;lastVideoTime=-1;lastCameraProcessAt=0;setCameraStatus('Kamera kapalı.');refreshSensorFocus();
+  cameraBrief=false;faceMissingSince=0;eyesClosedSince=0;lastVideoTime=-1;lastCameraProcessAt=0;eyeWasClosed=false;blinkTimes=[];setCameraStatus('Kamera kapalı.');refreshSensorFocus();
  }
  function recalculatePulseStyle(){
   const threshold=Number($('tkPulseThreshold').value);
@@ -6437,7 +6646,27 @@ MIND_LAB_HTML = r"""
  window.addEventListener('beforeunload',()=>{if(cameraStream)cameraStream.getTracks().forEach(t=>t.stop());if(pulseDevice?.gatt?.connected)pulseDevice.gatt.disconnect()});
  let typingTimes=[];let typingAdaptive=false;document.addEventListener('keydown',ev=>{if(!document.querySelector('[data-tk-panel=\"synapse\"].active'))return;if(ev.key.length!==1)return;const now=Date.now();typingTimes.push(now);typingTimes=typingTimes.filter(t=>now-t<20000);if(typingTimes.length>=5){const gaps=typingTimes.slice(1).map((t,i)=>t-typingTimes[i]);const avg=gaps.reduce((a,b)=>a+b,0)/gaps.length;$('tkTypingCue').textContent='Son yazma temposu: yaklaşık '+Math.round(60000/Math.max(avg,1))+' tuş/dakika. Bu yalnızca etkileşim ritmidir.';if($('tkAdaptiveUI').checked&&avg>1800){document.documentElement.style.setProperty('--tk-density','1.08');$('tkTypingCue').textContent+=' · Daha geniş arayüz aralığı etkin.';}else{document.documentElement.style.removeProperty('--tk-density');}}});
  $('tkAdaptiveUI').addEventListener('change',()=>{if(!$('tkAdaptiveUI').checked)document.documentElement.style.removeProperty('--tk-density');});
- $('tkSynapseRun').addEventListener('click',()=>runTool('tkSynapseRun','/api/mind/advanced-synapse',{feature:$('tkSynapseMode').value,material:$('tkSynapseMaterial').value,context:$('tkSynapseContext').value},'tkSynapseResult','result','Seçilen gelişmiş motor çalışıyor…','Motor çıktısı hazır. Çıktıyı inceleyip onaylayarak kullan.'));
+ function renderLogicGalaxy(raw){const canvas=$('tkLogicGalaxy'),ctx=canvas.getContext('2d');let data;try{const a=raw.indexOf('{'),b=raw.lastIndexOf('}');if(a<0||b<=a)throw Error('JSON bulunamadı');data=JSON.parse(raw.slice(a,b+1));}catch(e){$('tkLogicGalaxyStatus').textContent='Harita verisi okunamadı. Model çıktısını metin olarak inceleyebilirsin.';return;}if(!Array.isArray(data.nodes)||!Array.isArray(data.edges)||!data.nodes.length){$('tkLogicGalaxyStatus').textContent='Geçerli düğüm/bağlantı verisi bulunamadı.';return;}const nodes=data.nodes.slice(0,24),edges=data.edges.slice(0,60);const pos={};nodes.forEach((n,i)=>{const phi=Math.acos(1-2*(i+.5)/nodes.length),theta=i*2.3999632297;pos[n.id]={x:Math.cos(theta)*Math.sin(phi),y:Math.sin(theta)*Math.sin(phi),z:Math.cos(phi),label:String(n.label||n.id).slice(0,42)};});let angle=0,dragging=false,lastX=0;canvas.onpointerdown=e=>{dragging=true;lastX=e.clientX;canvas.setPointerCapture(e.pointerId)};canvas.onpointermove=e=>{if(dragging){angle+=(e.clientX-lastX)*.008;lastX=e.clientX;draw()}};canvas.onpointerup=()=>dragging=false;canvas.onpointercancel=()=>dragging=false;function draw(){const w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);ctx.fillStyle='#07162b';ctx.fillRect(0,0,w,h);const projected={};nodes.forEach(n=>{const p=pos[n.id],x=p.x*Math.cos(angle)-p.z*Math.sin(angle),z=p.x*Math.sin(angle)+p.z*Math.cos(angle),scale=260/(3.1+z);projected[n.id]={x:w/2+x*scale,y:h/2+p.y*scale,z,scale};});ctx.lineWidth=1.6;edges.forEach(e=>{const a=projected[e.from],b=projected[e.to];if(!a||!b)return;ctx.strokeStyle='rgba(86,180,255,.38)';ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();});nodes.forEach(n=>{const p=projected[n.id];if(!p)return;const r=Math.max(5,Math.min(13,8+p.z*3));ctx.beginPath();ctx.arc(p.x,p.y,r,0,Math.PI*2);ctx.fillStyle=p.z>.2?'#82e6ff':'#b58cff';ctx.shadowColor=ctx.fillStyle;ctx.shadowBlur=16;ctx.fill();ctx.shadowBlur=0;ctx.font='13px system-ui';ctx.fillStyle='#ecf5ff';ctx.textAlign='center';ctx.fillText(pos[n.id].label,p.x,p.y+r+16);});}draw();$('tkLogicGalaxyStatus').textContent=nodes.length+' bileşen ve '+edges.length+' bağlantı gösteriliyor. Fareyle sürükleyerek görünümü döndürebilirsin.';}
+ $('tkSynapseRun').addEventListener('click',async()=>{const b=$('tkSynapseRun');b.disabled=true;try{status('Seçilen motor çalışıyor…');const feature=$('tkSynapseMode').value;const d=await req('/api/mind/advanced-synapse',{method:'POST',body:JSON.stringify({feature,material:$('tkSynapseMaterial').value,context:$('tkSynapseContext').value})});show('tkSynapseResult',d.result||JSON.stringify(d,null,2));if(feature==='logic_galaxy')renderLogicGalaxy(d.result||'');status('Motor çıktısı hazır. Önerileri inceleyip onaylayarak kullan.');}catch(e){status(e.message)}finally{b.disabled=false}});
+ // Microphone: analyze approximate rhythm/pitch locally; only derived numeric features are sent.
+ function estimatePitch(buf,sampleRate){let rms=0;for(let i=0;i<buf.length;i++)rms+=buf[i]*buf[i];rms=Math.sqrt(rms/buf.length);if(rms<0.012)return null;let bestOffset=-1,bestCorr=0;const min=Math.max(2,Math.floor(sampleRate/900)),max=Math.min(buf.length/2,Math.floor(sampleRate/70));for(let off=min;off<max;off++){let corr=0;for(let i=0;i<buf.length-off;i+=4)corr+=buf[i]*buf[i+off];corr/=Math.max(1,buf.length/4);if(corr>bestCorr){bestCorr=corr;bestOffset=off;}}return bestOffset>0&&bestCorr>0.01?Math.round(sampleRate/bestOffset):null;}
+ function sampleMic(){if(!micAnalyser||!micContext)return;const data=new Float32Array(micAnalyser.fftSize);micAnalyser.getFloatTimeDomainData(data);let rms=0;for(let i=0;i<data.length;i++)rms+=data[i]*data[i];rms=Math.sqrt(rms/data.length);const pitch=estimatePitch(data,micContext.sampleRate);const now=Date.now();if(!micSamples.length||now-micSamples[micSamples.length-1].t>=100)micSamples.push({t:now-micStartedAt,rms:Number(rms.toFixed(4)),pitch_hz:pitch});if(now-micStartedAt>30000){stopMicAndGenerate();return;}micRaf=requestAnimationFrame(sampleMic);}
+ async function startMic(){if(!navigator.mediaDevices?.getUserMedia){$('tkAudioStatus').textContent='Bu tarayıcı mikrofon erişimini desteklemiyor.';return;}try{micStream=await navigator.mediaDevices.getUserMedia({audio:true});micContext=new (window.AudioContext||window.webkitAudioContext)();const src=micContext.createMediaStreamSource(micStream);micAnalyser=micContext.createAnalyser();micAnalyser.fftSize=2048;src.connect(micAnalyser);micSamples=[];micStartedAt=Date.now();$('tkAudioStart').disabled=true;$('tkAudioStop').disabled=false;$('tkAudioStatus').textContent='Mikrofon açık. Mırıldan, ıslık çal veya ritim tut. En fazla 30 saniye analiz edilir.';sampleMic();}catch(e){$('tkAudioStatus').textContent='Mikrofon açılamadı: '+e.message;stopMic(false);}}
+ async function stopMicAndGenerate(){if(!micStream)return;const samples=micSamples.slice();const duration=Math.max(0,(Date.now()-micStartedAt)/1000);stopMic(false);const pitches=samples.map(x=>x.pitch_hz).filter(x=>x&&x>60&&x<1000);const levels=samples.map(x=>x.rms);const avgPitch=pitches.length?Math.round(pitches.reduce((a,b)=>a+b,0)/pitches.length):null;const peaks=[];for(let i=1;i<levels.length-1;i++)if(levels[i]>0.035&&levels[i]>=levels[i-1]&&levels[i]>levels[i+1])peaks.push(samples[i].t);const intervals=[];for(let i=1;i<peaks.length;i++){const gap=peaks[i]-peaks[i-1];if(gap>180&&gap<2000)intervals.push(gap);}const med=intervals.length?intervals.slice().sort((a,b)=>a-b)[Math.floor(intervals.length/2)]:null;const features={duration_seconds:Number(duration.toFixed(1)),sample_count:samples.length,average_detected_pitch_hz:avgPitch,valid_pitch_samples:pitches.length,average_rms:Number((levels.reduce((a,b)=>a+b,0)/Math.max(1,levels.length)).toFixed(4)),peak_intervals_ms:intervals.slice(0,40),estimated_tempo_bpm:med?Math.round(60000/med):null,measurement_note:'Browser-side estimate only; room noise, microphone and humming affect accuracy.'};$('tkAudioStatus').textContent='Ses kaydı durdu; ham ses gönderilmedi. Sayısal ritim özetiyle taslak hazırlanıyor…';try{const d=await req('/api/mind/audio-architecture',{method:'POST',body:JSON.stringify({concept:$('tkAudioConcept').value,target:'Tek HTML Canvas ve JavaScript',features_json:JSON.stringify(features)})});show('tkAudioResult',d.architecture);$('tkAudioStatus').textContent='Kod taslağı hazır. Otomatik çalıştırılmadı; kopyalayıp gözden geçirebilirsin.';}catch(e){$('tkAudioStatus').textContent=e.message;}}
+ function stopMic(closeContext=true){if(micRaf)cancelAnimationFrame(micRaf);micRaf=0;if(micStream)micStream.getTracks().forEach(t=>t.stop());micStream=null;micAnalyser=null;if(closeContext&&micContext){micContext.close().catch(()=>{});}else if(micContext){micContext.close().catch(()=>{});}micContext=null;$('tkAudioStart').disabled=false;$('tkAudioStop').disabled=true;}
+ $('tkAudioStart').addEventListener('click',startMic);$('tkAudioStop').addEventListener('click',stopMicAndGenerate);
+ // Explicitly save and retrieve user-owned versions; no invisible or inferred historical recovery.
+ async function refreshHeritage(){try{const d=await req('/api/mind/heritage?project_name='+encodeURIComponent($('tkHeritageProject').value.trim()));const root=$('tkHeritageList');root.textContent='';if(!d.items.length){root.textContent='Kaydedilmiş sürüm bulunamadı.';return;}d.items.forEach(v=>{const wrap=document.createElement('div');wrap.className='tkProjectItem';const info=document.createElement('div');const title=document.createElement('strong');title.textContent=v.version_label+' · '+v.project_name;const small=document.createElement('small');small.textContent='SHA-256: '+v.source_hash.slice(0,16)+'… · '+new Date(v.created_at).toLocaleString();info.append(title,small);const load=document.createElement('button');load.className='tkSecondary';load.textContent='Sürümü yükle';load.addEventListener('click',async()=>{try{const x=await req('/api/mind/heritage/'+v.id);$('tkCueCode').value=x.version.source_code;$('tkHeritageCode').value=x.version.source_code;status('Sürüm görünür düzenleme alanına yüklendi; otomatik çalıştırılmadı.');}catch(e){status(e.message)}});const del=document.createElement('button');del.className='tkSecondary';del.textContent='Sil';del.addEventListener('click',async()=>{if(!confirm('Bu arşiv sürümü silinsin mi?'))return;try{await req('/api/mind/heritage/'+v.id,{method:'DELETE'});refreshHeritage()}catch(e){status(e.message)}});const actions=document.createElement('div');actions.style.display='grid';actions.style.gap='5px';actions.append(load,del);wrap.append(info,actions);root.append(wrap);});}catch(e){status(e.message)}}
+ $('tkHeritageSave').addEventListener('click',async()=>{const project_name=$('tkHeritageProject').value.trim(),source_code=$('tkHeritageCode').value,version_label=$('tkHeritageLabel').value.trim()||'Kaydedilmiş sürüm';if(project_name.length<2||source_code.trim().length<10){status('Proje adı ve kod gerekli.');return;}try{const d=await req('/api/mind/heritage',{method:'POST',body:JSON.stringify({project_name,version_label,source_code})});status('Kod sürümü arşivlendi: '+d.version.id);refreshHeritage()}catch(e){status(e.message)}});
+ $('tkHeritageRefresh').addEventListener('click',refreshHeritage);
+ $('tkCueBtn').addEventListener('click',()=>runTool('tkCueBtn','/api/mind/code-cue',{code:$('tkCueCode').value,context:$('tkCueContext').value},'tkCueResult','cues','Kod satırları analiz ediliyor…','Görünür hata ipuçları hazır; öneriler uygulanmadı.'));
+ // Local generated audio tones. This is ambient sound design, not EEG or medical brainwave stimulation.
+ $('tkToneStart').addEventListener('click',async()=>{try{if(toneContext)await toneContext.close();toneContext=new (window.AudioContext||window.webkitAudioContext)();await toneContext.resume();toneNodes=[];const now=toneContext.currentTime;const preset=$('tkTonePreset').value;const freqs=preset==='focus'?[220,226]:preset==='ambient'?[174,181]:[196,200];freqs.forEach((f,i)=>{const osc=toneContext.createOscillator(),gain=toneContext.createGain(),pan=toneContext.createStereoPanner();osc.type='sine';osc.frequency.value=f;pan.pan.value=i===0?-0.7:0.7;gain.gain.value=0.018;osc.connect(gain).connect(pan).connect(toneContext.destination);osc.start(now);toneNodes.push({osc,gain,pan});});$('tkToneStart').disabled=true;$('tkToneStop').disabled=false;$('tkToneStatus').textContent='Yerel ses çalıyor. Ses düzeyini düşük tut; etkisi kişiden kişiye değişir.';}catch(e){$('tkToneStatus').textContent='Ses başlatılamadı: '+e.message;}});
+ $('tkToneStop').addEventListener('click',async()=>{toneNodes.forEach(x=>{try{x.osc.stop()}catch{}});toneNodes=[];if(toneContext){await toneContext.close().catch(()=>{});toneContext=null;}$('tkToneStart').disabled=false;$('tkToneStop').disabled=true;$('tkToneStatus').textContent='Ses durduruldu.';});
+ $('tkScheduleBtn').addEventListener('click',()=>runTool('tkScheduleBtn','/api/mind/workflow-plan',{tasks:$('tkScheduleTasks').value,chronotype:$('tkScheduleType').value,available_windows:$('tkScheduleWindows').value,deadline:$('tkScheduleDeadline').value},'tkScheduleResult','plan','Görevler uygun saatlere dağıtılıyor…','İş akışı taslağı hazır; takvime kayıt yapılmadı.'));
+ $('tkSuccessShare').addEventListener('click',async()=>{try{const d=await req('/api/mind/community-success',{method:'POST',body:JSON.stringify({topic:$('tkSuccessTopic').value,outcome:$('tkSuccessOutcome').value})});show('tkSuccessResult',d.message);status('Anonim sonuç kaydedildi.')}catch(e){status(e.message)}});
+ $('tkSuccessRefresh').addEventListener('click',async()=>{try{const d=await req('/api/mind/community-success');show('tkSuccessResult',JSON.stringify(d,null,2));status(d.note)}catch(e){status(e.message)}});
+ window.addEventListener('beforeunload',()=>{if(micStream)micStream.getTracks().forEach(t=>t.stop());if(micContext)micContext.close().catch(()=>{});if(toneContext)toneContext.close().catch(()=>{});});
  $('tkTranslateBtn').addEventListener('click',async()=>{const text=$('tkTranslateText').value.trim(),target_language=$('tkTargetLang').value.trim();if(!text||!target_language){status('Metni ve hedef dili gir.');return}const b=$('tkTranslateBtn');b.disabled=true;try{status('Bağlam ve nüans korunarak çevriliyor…');const d=await req('/api/mind/translate',{method:'POST',body:JSON.stringify({text,source_language:$('tkSourceLang').value.trim()||'Otomatik algıla',target_language})});show('tkTranslateResult',d.translation);status('Çeviri hazır.')}catch(e){status(e.message)}finally{b.disabled=false}});
  $('tkTwinBtn').addEventListener('click',async()=>{const incoming_message=$('tkTwinIncoming').value.trim();if(incoming_message.length<2){status('Önce yanıtlanacak mesajı gir.');return}const b=$('tkTwinBtn');b.disabled=true;try{status('Taslak hazırlanıyor…');const d=await req('/api/mind/digital-twin/draft',{method:'POST',body:JSON.stringify({incoming_message,purpose:$('tkTwinPurpose').value,preferred_tone:$('tkTwinTone').value})});show('tkTwinResult',d.draft+'\n\n[Gönderilmedi — son kontrol ve gönderim sana ait.]');status('Taslak hazır; hiçbir yere gönderilmedi.')}catch(e){status(e.message)}finally{b.disabled=false}});
  $('tkIdeaBtn').addEventListener('click',async()=>{const idea=$('tkIdea').value.trim();if(idea.length<4){status('Önce fikrini yaz.');return}const b=$('tkIdeaBtn');b.disabled=true;try{status('Fikir uygulanabilir bileşenlere ayrılıyor…');const d=await req('/api/mind/blueprint',{method:'POST',body:JSON.stringify({idea,constraints:$('tkConstraints').value})});show('tkIdeaResult',d.blueprint);status('Mimari taslağı hazır.')}catch(e){status(e.message)}finally{b.disabled=false}});
@@ -6446,7 +6675,8 @@ MIND_LAB_HTML = r"""
  $('tkBoardBtn').addEventListener('click',()=>runTool('tkBoardBtn','/api/mind/boardroom',{idea:$('tkBoardIdea').value,constraints:$('tkBoardConstraints').value},'tkBoardResult','boardroom','Uzman bakış açıları değerlendiriliyor…','Fikir paneli tamamlandı.'));
  $('tkAutopsyBtn').addEventListener('click',()=>runTool('tkAutopsyBtn','/api/mind/code-autopsy',{code:$('tkAutopsyCode').value,error:$('tkAutopsyError').value,context:$('tkAutopsyContext').value},'tkAutopsyResult','autopsy','Kod inceleniyor…','Kod inceleme raporu hazır.'));
  $('tkTransferBtn').addEventListener('click',()=>runTool('tkTransferBtn','/api/mind/transfer',{source_type:$('tkTransferType').value,target_format:$('tkTransferTarget').value,content:$('tkTransferContent').value},'tkTransferResult','transfer','İçerik dönüştürülüyor…','Dönüşüm taslağı hazır.'));
- $('tkResonanceBtn').addEventListener('click',async()=>{try{const d=await req('/api/mind/resonance',{method:'POST',body:JSON.stringify({self_report:$('tkResonanceState').value,response_preference:$('tkResonancePreference').value})});const pref=$('tkResonancePreference').value;manualFocus=({'kısa ve sakin':'brief','enerjik ve motive edici':'curious','adım adım ve sade':'focused','ayrıntılı ve teknik':'detailed'})[pref]||'neutral';focus=manualFocus;refreshSensorFocus();show('tkResonanceResult','Tercihin uygulandı: '+d.self_reported_state+'. Sonraki mesajlarında seçtiğin anlatım tarzı kullanılacak.');status('Anlatım tercihi güncellendi.')}catch(e){status(e.message)}});
+ function applyMoodTheme(state){const box=$('tkMindBox');box.classList.remove('tkMoodCalm','tkMoodFocus','tkMoodEnergy');if(['yorgunum','stresliyim','sakinim'].includes(state))box.classList.add('tkMoodCalm');else if(state==='odaklanmak istiyorum')box.classList.add('tkMoodFocus');else if(state==='heyecanlıyım')box.classList.add('tkMoodEnergy');}
+ $('tkResonanceBtn').addEventListener('click',async()=>{try{const state=$('tkResonanceState').value;const d=await req('/api/mind/resonance',{method:'POST',body:JSON.stringify({self_report:state,response_preference:$('tkResonancePreference').value})});const pref=$('tkResonancePreference').value;manualFocus=({'kısa ve sakin':'brief','enerjik ve motive edici':'curious','adım adım ve sade':'focused','ayrıntılı ve teknik':'detailed'})[pref]||'neutral';focus=manualFocus;applyMoodTheme(state);refreshSensorFocus();show('tkResonanceResult','Tercihin uygulandı: '+d.self_reported_state+'. Anlatımın ve Zihin Atölyesi görünümü bu seçime göre uyarlandı.');status('Anlatım ve arayüz tercihi güncellendi.')}catch(e){status(e.message)}});
  $('tkProactiveBtn').addEventListener('click',()=>runTool('tkProactiveBtn','/api/mind/proactive-review',{focus:$('tkProactiveFocus').value},'tkProactiveResult','review','Kayıtlı projeler inceleniyor…','Öneriler hazır; hiçbir işlem otomatik yapılmadı.'));
  $('tkCommunityShare').addEventListener('click',()=>runTool('tkCommunityShare','/api/mind/community-pulse',{topic:$('tkCommunityTopic').value},'tkCommunityResult','message','Yalnızca seçtiğin kategori paylaşılıyor…','Kategori paylaşıldı.'));
  $('tkCommunityRefresh').addEventListener('click',async()=>{try{const d=await req('/api/mind/community-pulse');show('tkCommunityResult',JSON.stringify(d,null,2));status(d.note)}catch(e){status(e.message)}});
@@ -6475,7 +6705,7 @@ MIND_LAB_LOCKED_HTML = r"""
 <div id="tkMindLockedBack" role="dialog" aria-modal="true" aria-labelledby="tkMindLockedTitle">
  <section id="tkMindLockedCard">
   <h2 id="tkMindLockedTitle">✦ Zihin Atölyesi · Plus'a özel</h2>
-  <p>Kalıcı proje hafızası, epistemik doğruluk denetimi, odak uyarlaması, nüanslı çeviri, dijital ikiz taslakları ve fikir mimarı araçları yalnızca aktif Tekden AI Plus üyeliğiyle kullanılabilir.</p>
+  <p>Kalıcı proje hafızası, gelişmiş Synapse motorları, yerel kamera/ses araçları, kod sürüm arşivi, görünür hata ipuçları, paralel senaryo analizleri ve proje otomasyon taslakları yalnızca aktif Tekden AI Plus üyeliğiyle kullanılabilir.</p>
   <p>Mevcut hesabında Plus üyeliği etkinleştirildiğinde bu alanın tüm araçları açılır.</p>
   <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-top:16px">
    <button id="tkMindLockedClose" type="button">Kapat</button>
@@ -8606,4 +8836,4 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
-                                    
+    
