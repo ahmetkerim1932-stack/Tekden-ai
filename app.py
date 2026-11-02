@@ -6303,7 +6303,7 @@ async function send(){
   if(file){const answer=await analyzeAttachment(text,file);bubble('assistant',answer);if(user){try{const saved=await api('/api/save-analysis',{method:'POST',body:JSON.stringify({question:text||'Ekli dosyayı analiz et.',answer,filename:file.name,chat_id:chatId})});if(saved.chat_id)chatId=saved.chat_id;loadChats()}catch(saveError){console.warn('Dosya analizi geçmişe kaydedilemedi',saveError)}}else {guestHistory.push({role:'user',content:(text||'Ekli dosyayı analiz et.')+' [Dosya: '+file.name+']'},{role:'assistant',content:answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}selectedFile=null;$('fileInput').value='';$('fileName').textContent='Dosya seçilmedi';setStatus('Dosya analizi tamamlandı');}
   else if(looksLikeGameRequest(text)){const game=await api('/api/game',{method:'POST',body:JSON.stringify({prompt:text})});gameBubble(game.html);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İsteğine göre oynanabilir bir oyun oluşturuldu.'});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Oyun hazır');}
   else if(looksLikeImageRequest(text)){await createAndShowImage(text);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İstenen görsel oluşturuldu. İstek: '+text});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Görsel hazır');}
-  else {const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus('UYARI: Bu mesaj Supabase’e kaydedilmedi. Hesabından çıkış yapıp yeniden giriş yap.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else setStatus(forceSearch?'Kaynak bulunamadı; yanıt doğrulanamadı':'Tamamlandı');}
+  else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus('UYARI: Bu mesaj Supabase’e kaydedilmedi. Hesabından çıkış yapıp yeniden giriş yap.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else setStatus(forceSearch?'Kaynak bulunamadı; yanıt doğrulanamadı':'Tamamlandı');}
  }catch(e){bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeGameRequest(text)?'Oyun oluşturulamadı: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}
  finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)'}
 }
@@ -6538,7 +6538,7 @@ MIND_LAB_HTML = r"""
   <section class="tkMindPanel" data-tk-panel="resonance"><div class="tkMindCard"><strong>Kullanıcı kontrollü anlatım uyumu</strong><p>Durumunu veya istediğin anlatım tarzını seçebilirsin. Sensörler kapalıyken hiçbir kamera ya da nabız verisi alınmaz.</p><label for="tkResonanceState">Şu an nasıl hissediyorsun?</label><select id="tkResonanceState"><option>sakinim</option><option>yorgunum</option><option>stresliyim</option><option>heyecanlıyım</option><option>odaklanmak istiyorum</option><option>normal</option></select><label for="tkResonancePreference">Yanıt tercihi</label><select id="tkResonancePreference"><option>kısa ve sakin</option><option>enerjik ve motive edici</option><option>adım adım ve sade</option><option>ayrıntılı ve teknik</option></select><button class="tkPrimary" id="tkResonanceBtn">Anlatım tercihimi uygula</button><pre id="tkResonanceResult" hidden></pre></div>
    <div class="tkMindCard" style="margin-top:12px"><strong>İsteğe bağlı kamera ve yüz ifadesi uyarlaması</strong><p>Kamera izni verdiğinde görüntü cihazında işlenir. İstersen gülümseme, şaşkınlık veya ciddi ifade gibi yaklaşık yüz ifadesi ipuçlarını algılayıp yanıt üslubunu uyarlayabilir. Örneğin gülümsemeye benzer bir ifade algılanırsa daha neşeli ve sıcak cevap verir. Bu, gerçek duygunu kesin olarak bilmek anlamına gelmez; yüz ifadesi duygu kanıtı değildir. Ham görüntü sunucuya gönderilmez; yalnızca seçilen yaklaşık ifade etiketi sohbet isteğine eklenir.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="tkPrimary" id="tkCameraStart" type="button">Kamerayı aç</button><button class="tkSecondary" id="tkCameraStop" type="button">Kamerayı kapat</button></div>
-    <video id="tkSensorVideo" muted playsinline autoplay style="display:none;width:100%;max-width:360px;margin-top:10px;border-radius:12px;background:#111"></video>
+    <p style="font-size:12px;margin:8px 0 0">Atölyeyi kapatıp sohbete dönsen de kamera çalışmayı sürdürür. Sohbet ekranının sağ altındaki küçük pencereden kamerayı görebilir ve kapatabilirsin. Sekmeden ayrıldığında kamera güvenlik için durdurulur.</p>
     <p id="tkCameraStatus" role="status">Kamera kapalı.</p>
     <label style="display:flex;align-items:center;gap:8px;font-weight:600"><input id="tkCameraAuto" type="checkbox" style="width:auto"> Yüz uzun süre görünmezse veya gözler uzun süre kapalı algılanırsa kısa yanıt moduna geç</label>
     <label style="display:flex;align-items:center;gap:8px;font-weight:600"><input id="tkExpressionAuto" type="checkbox" style="width:auto"> Yaklaşık yüz ifadesine göre yanıt üslubunu uyarla</label>
@@ -6622,10 +6622,15 @@ MIND_LAB_HTML = r"""
   <div id="tkMindStatus" role="status"></div>
  </div>
 </div>
+<div id="tkCameraPip" role="status" aria-live="polite" style="display:none;position:fixed;right:16px;bottom:82px;z-index:9997;width:190px;max-width:42vw;padding:8px;background:#10243b;color:#fff;border:1px solid #4b78a8;border-radius:12px;box-shadow:0 8px 28px #0005;font:12px system-ui">
+ <video id="tkSensorVideo" muted playsinline autoplay style="display:block;width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:8px;background:#050b13"></video>
+ <div style="display:flex;align-items:center;gap:6px;margin-top:6px"><span aria-hidden="true" style="width:8px;height:8px;flex:0 0 8px;border-radius:50%;background:#63f59b"></span><span id="tkCameraPipCue" style="line-height:1.25">Kamera etkin · yerel analiz</span></div>
+ <button id="tkCameraPipStop" type="button" style="margin-top:6px;width:100%;border:0;border-radius:7px;padding:6px;background:#dbeafe;color:#10243b;font-weight:700;cursor:pointer">Kamerayı kapat</button>
+</div>
 <script>
 (()=>{
  const $=id=>document.getElementById(id);let focus='neutral',manualFocus='neutral';window.tkFocusState='neutral';window.tkSensorContext='none';
- let cameraStream=null,cameraRAF=0,faceLandmarker=null,lastVideoTime=-1,lastCameraProcessAt=0,faceMissingSince=0,eyesClosedSince=0,cameraBrief=false,eyeWasClosed=false,blinkTimes=[];window.tkFacialExpression='none';
+ let cameraStream=null,cameraRAF=0,faceLandmarker=null,lastVideoTime=-1,lastCameraProcessAt=0,faceMissingSince=0,eyesClosedSince=0,cameraBrief=false,eyeWasClosed=false,blinkTimes=[];let expressionHistory=[],expressionCandidate='none',expressionCandidateSince=0,stableExpression='none';window.tkFacialExpression='none';
  let pulseDevice=null,pulseCharacteristic=null,currentBpm=null,pulseAutoActive=false;
  let micStream=null,micContext=null,micAnalyser=null,micRaf=0,micSamples=[],micStartedAt=0;
  let toneContext=null,toneNodes=[];
@@ -6634,8 +6639,8 @@ MIND_LAB_HTML = r"""
  function show(id,text){const el=$(id);el.textContent=text;el.hidden=false}
  function esc(t){return String(t||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
  $('tkMindOpen').addEventListener('click',()=>{$('tkMindShade').style.display='flex';loadProjects().catch(e=>status(e.message))});
- $('tkMindClose').addEventListener('click',()=>{$('tkMindShade').style.display='none';if(cameraStream)stopCamera()});
- $('tkMindShade').addEventListener('click',e=>{if(e.target===$('tkMindShade')){$('tkMindShade').style.display='none';if(cameraStream)stopCamera()}});
+ $('tkMindClose').addEventListener('click',()=>{$('tkMindShade').style.display='none';if(cameraStream)setCameraStatus('Kamera açık; sohbet ekranında da yüz ifadesi ipuçlarını izliyor. Görüntü bu cihazda kalır.')});
+ $('tkMindShade').addEventListener('click',e=>{if(e.target===$('tkMindShade')){$('tkMindShade').style.display='none';if(cameraStream)setCameraStatus('Kamera açık; sohbet ekranında da yüz ifadesi ipuçlarını izliyor. Görüntü bu cihazda kalır.')}});
  document.querySelectorAll('[data-tk-tab]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-tk-tab]').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('[data-tk-panel]').forEach(x=>x.classList.toggle('active',x.dataset.tkPanel===b.dataset.tkTab));status('')}));
  async function loadProjects(){try{const d=await req('/api/mind/projects');const root=$('tkProjectList');root.textContent='';if(!d.items.length){root.textContent='Henüz proje kaydedilmedi.';return}d.items.forEach(item=>{const wrap=document.createElement('div');wrap.className='tkProjectItem';const info=document.createElement('div');const title=document.createElement('strong');title.textContent=item.project_name;const small=document.createElement('small');small.textContent=(item.summary||'').slice(0,180);info.append(title,small);const actions=document.createElement('div');actions.style.display='grid';actions.style.gap='5px';const review=document.createElement('button');review.className='tkSecondary';review.textContent='Gözden geçir';review.addEventListener('click',async()=>{review.disabled=true;status('Proje değerlendirmesi hazırlanıyor…');try{const x=await req('/api/mind/projects/'+item.id+'/review',{method:'POST',body:'{}'});small.textContent=x.suggestion.slice(0,260);status('Sonraki adım önerisi hazır. Proje hafızasına kaydedildi.')}catch(e){status(e.message)}finally{review.disabled=false}});const del=document.createElement('button');del.className='tkSecondary';del.textContent='Sil';del.addEventListener('click',async()=>{if(!confirm('Bu proje hafızası silinsin mi?'))return;try{await req('/api/mind/projects/'+item.id,{method:'DELETE'});loadProjects()}catch(e){status(e.message)}});actions.append(review,del);wrap.append(info,actions);root.append(wrap)})}catch(e){$('tkProjectList').textContent=e.message;throw e}}
  $('tkProjectSave').addEventListener('click',async()=>{const project_name=$('tkProjectName').value.trim(),summary=$('tkProjectSummary').value.trim(),next_actions=$('tkProjectNext').value.trim();if(project_name.length<2||summary.length<5){status('Proje adı ve en az birkaç cümlelik özet gerekli.');return}try{await req('/api/mind/projects',{method:'POST',body:JSON.stringify({project_name,summary,next_actions})});status('Proje hafızası kaydedildi.');await loadProjects()}catch(e){status(e.message)}});
@@ -6653,8 +6658,9 @@ MIND_LAB_HTML = r"""
   const active=[];if(cameraStream)active.push('kamera');if(pulseDevice?.gatt?.connected)active.push('Bluetooth nabız');
   $('tkMindOpen').textContent=active.length?'✦ Zihin Atölyesi · '+active.join(' + ')+' etkin':'✦ Zihin Atölyesi';
  }
+ window.tkRefreshSensorFocus=refreshSensorFocus;
  $('tkFocusSave').addEventListener('click',()=>{focus=$('tkFocusSelect').value;manualFocus=focus;refreshSensorFocus();$('tkFocusInfo').textContent='Tercih uygulandı. Sonraki sohbet mesajlarında kullanılacak; sayfa yenilenince varsayılana döner.';status('Odak tercihi güncellendi.')});
- function setCameraStatus(message){if($('tkCameraStatus'))$('tkCameraStatus').textContent=message;}
+ function setCameraStatus(message){if($('tkCameraStatus'))$('tkCameraStatus').textContent=message;if($('tkCameraPipCue'))$('tkCameraPipCue').textContent=message;}
  function setPulseStatus(message){if($('tkPulseStatus'))$('tkPulseStatus').textContent=message;}
  function updateCameraCue(now){
   const video=$('tkSensorVideo');if(!faceLandmarker||!video||video.readyState<2)return;
@@ -6662,21 +6668,43 @@ MIND_LAB_HTML = r"""
   lastCameraProcessAt=now;lastVideoTime=video.currentTime;
   let result;try{result=faceLandmarker.detectForVideo(video,now)}catch(err){setCameraStatus('Kamera analizi durdu: '+err.message);return}
   const hasFace=!!(result.faceLandmarks&&result.faceLandmarks.length);
-  if(!hasFace){if(!faceMissingSince)faceMissingSince=Date.now();eyesClosedSince=0;cameraBrief=Date.now()-faceMissingSince>12000;window.tkFacialExpression='none';setCameraStatus(cameraBrief?'Yüz 12 saniyeden uzun süredir görüntüde algılanmıyor. Bu durumun nedeni bilinemez.':'Yüz algılanmadı veya kamera açısı uygun değil.');}
+  if(!hasFace){if(!faceMissingSince)faceMissingSince=Date.now();eyesClosedSince=0;cameraBrief=Date.now()-faceMissingSince>12000;expressionHistory=[];expressionCandidate='none';expressionCandidateSince=Date.now();stableExpression='none';window.tkFacialExpression='none';setCameraStatus(cameraBrief?'Yüz 12 saniyeden uzun süredir görüntüde algılanmıyor.':'Yüz algılanmadı; kameraya dönük ve yeterince aydınlık olduğundan emin ol.');}
   else{
    faceMissingSince=0;
    const categories=result.faceBlendshapes?.[0]?.categories||[];
    const score=name=>categories.find(x=>x.categoryName===name)?.score||0;
-   const smile=(score('mouthSmileLeft')+score('mouthSmileRight'))/2;
-   const wideEyes=(score('eyeWideLeft')+score('eyeWideRight'))/2;
-   const browDown=(score('browDownLeft')+score('browDownRight'))/2;
-   const mouthPress=(score('mouthPressLeft')+score('mouthPressRight'))/2;
-   const jawOpen=score('jawOpen');
-   // Yüz ifadesi ipucu; kişinin gerçek duygusunu veya ruh hâlini belirlemez.
-   window.tkFacialExpression=$('tkExpressionAuto')?.checked?(smile>=0.42?'expression_smiling':(wideEyes>=0.48&&jawOpen>=0.28?'expression_surprised':(browDown>=0.52&&mouthPress>=0.32?'expression_serious':'none'))):'none';
+   const sample={
+    smileL:score('mouthSmileLeft'),smileR:score('mouthSmileRight'),
+    wideL:score('eyeWideLeft'),wideR:score('eyeWideRight'),
+    browL:score('browDownLeft'),browR:score('browDownRight'),
+    pressL:score('mouthPressLeft'),pressR:score('mouthPressRight'),
+    frownL:score('mouthFrownLeft'),frownR:score('mouthFrownRight'),
+    jaw:score('jawOpen')
+   };
+   expressionHistory.push(sample);if(expressionHistory.length>8)expressionHistory.shift();
+   const avg=key=>expressionHistory.reduce((sum,item)=>sum+item[key],0)/expressionHistory.length;
+   const smileL=avg('smileL'),smileR=avg('smileR'),smile=(smileL+smileR)/2;
+   const wideEyes=(avg('wideL')+avg('wideR'))/2;
+   const browDown=(avg('browL')+avg('browR'))/2;
+   const mouthPress=(avg('pressL')+avg('pressR'))/2;
+   const mouthFrown=(avg('frownL')+avg('frownR'))/2;
+   const jawOpen=avg('jaw');
+   // Blendshape ipuçları 8 örnek üzerinden yumuşatılır; kısa anlık sıçramalar sınıflandırmayı değiştirmez.
+   let detected='none';
+   if($('tkExpressionAuto')?.checked){
+    if(smile>=0.34&&Math.min(smileL,smileR)>=0.22)detected='expression_smiling';
+    else if(wideEyes>=0.40&&jawOpen>=0.22)detected='expression_surprised';
+    else if(browDown>=0.42&&(mouthPress>=0.30||mouthFrown>=0.25))detected='expression_serious';
+   }
+   const nowMs=Date.now();
+   if(detected!==expressionCandidate){expressionCandidate=detected;expressionCandidateSince=nowMs;}
+   const stableDelay=detected==='none'?650:450;
+   if(nowMs-expressionCandidateSince>=stableDelay)stableExpression=detected;
+   // Kısa geçişleri yoksay; kararlı ipucunu sohbet mesajı gönderilene kadar sakla.
+   window.tkFacialExpression=$('tkExpressionAuto')?.checked?stableExpression:'none';
    const eyesClosed=score('eyeBlinkLeft')>.78&&score('eyeBlinkRight')>.78;
    if(eyesClosed){if(!eyeWasClosed){blinkTimes.push(Date.now());blinkTimes=blinkTimes.filter(t=>Date.now()-t<60000);}eyeWasClosed=true;if(!eyesClosedSince)eyesClosedSince=Date.now();cameraBrief=Date.now()-eyesClosedSince>5000;setCameraStatus((cameraBrief?'Gözler bir süredir kapalı görünüyor. ':'Yüz algılandı. ')+ 'Son 60 saniye göz kırpma sayısı: '+blinkTimes.filter(t=>Date.now()-t<60000).length+'. Bu bir duygu/odak teşhisi değildir.');}
-   else{eyeWasClosed=false;eyesClosedSince=0;cameraBrief=false;const exprLabel=window.tkFacialExpression==='expression_smiling'?'Gülümsemeye benzer ifade':window.tkFacialExpression==='expression_surprised'?'Şaşkınlığa benzer ifade':window.tkFacialExpression==='expression_serious'?'Ciddi ifadeye benzer ipucu':'Belirgin ifade ipucu yok';setCameraStatus('Yüz algılandı. '+exprLabel+'. Son 60 saniye göz kırpma sayısı: '+blinkTimes.filter(t=>Date.now()-t<60000).length+'. Yaklaşık sınıflandırma cihazda yapılıyor.');}
+   else{eyeWasClosed=false;eyesClosedSince=0;cameraBrief=false;const exprLabel=window.tkFacialExpression==='expression_smiling'?'Gülümsemeye benzer ifade algılandı':window.tkFacialExpression==='expression_surprised'?'Şaşkınlığa benzer ifade algılandı':window.tkFacialExpression==='expression_serious'?'Ciddi ifadeye benzer ipucu algılandı':'Yüz algılandı · belirgin ifade yok';setCameraStatus(exprLabel+'. Sohbet yanıtı bu ipucuna göre uyarlanacak.');}
   }
   refreshSensorFocus();
  }
@@ -6686,7 +6714,7 @@ MIND_LAB_HTML = r"""
   const b=$('tkCameraStart');b.disabled=true;setCameraStatus('Kamera izni bekleniyor…');
   try{
    cameraStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:'user',width:{ideal:640},height:{ideal:480}}});
-   const video=$('tkSensorVideo');video.srcObject=cameraStream;video.style.display='block';await video.play();
+   const video=$('tkSensorVideo');video.srcObject=cameraStream;video.style.display='block';$('tkCameraPip').style.display='block';await video.play();
    setCameraStatus('Yerel yüz ipuçları yükleniyor…');
    const vision=await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs');
    const wasm=await vision.FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm');
@@ -6699,7 +6727,7 @@ MIND_LAB_HTML = r"""
    setCameraStatus('Kamera açık. Görüntü bu cihazda işleniyor; sunucuya gönderilmiyor.');refreshSensorFocus();
   }catch(err){
    if(cameraStream){cameraStream.getTracks().forEach(t=>t.stop());cameraStream=null;}
-   $('tkSensorVideo').srcObject=null;$('tkSensorVideo').style.display='none';
+   $('tkSensorVideo').srcObject=null;$('tkSensorVideo').style.display='none';$('tkCameraPip').style.display='none';
    const msg=err?.name==='NotAllowedError'?'Kamera izni verilmedi. Tarayıcı izinlerinden izin verebilirsin.':(err?.message||'Kamera başlatılamadı.');
    setCameraStatus('Kamera açılamadı: '+msg);
   }finally{b.disabled=false;}
@@ -6708,8 +6736,8 @@ MIND_LAB_HTML = r"""
   if(cameraRAF)cancelAnimationFrame(cameraRAF);cameraRAF=0;
   if(cameraStream)cameraStream.getTracks().forEach(t=>t.stop());cameraStream=null;
   if(faceLandmarker){try{faceLandmarker.close()}catch{}faceLandmarker=null;}
-  const video=$('tkSensorVideo');if(video){video.pause();video.srcObject=null;video.style.display='none';}
-  cameraBrief=false;window.tkFacialExpression='none';faceMissingSince=0;eyesClosedSince=0;lastVideoTime=-1;lastCameraProcessAt=0;eyeWasClosed=false;blinkTimes=[];setCameraStatus('Kamera kapalı.');refreshSensorFocus();
+  const video=$('tkSensorVideo');if(video){video.pause();video.srcObject=null;video.style.display='none';}if($('tkCameraPip'))$('tkCameraPip').style.display='none';
+  cameraBrief=false;window.tkFacialExpression='none';faceMissingSince=0;eyesClosedSince=0;lastVideoTime=-1;lastCameraProcessAt=0;eyeWasClosed=false;blinkTimes=[];expressionHistory=[];expressionCandidate='none';stableExpression='none';setCameraStatus('Kamera kapalı.');refreshSensorFocus();
  }
  function recalculatePulseStyle(){
   const threshold=Number($('tkPulseThreshold').value);
@@ -6741,7 +6769,7 @@ MIND_LAB_HTML = r"""
   try{if(pulseDevice?.gatt?.connected)pulseDevice.gatt.disconnect()}catch{}
   pulseCharacteristic=null;pulseDevice=null;currentBpm=null;pulseAutoActive=false;setPulseStatus('Nabız cihazı bağlı değil.');refreshSensorFocus();
  }
- $('tkCameraStart').addEventListener('click',startCamera);$('tkCameraStop').addEventListener('click',stopCamera);
+ $('tkCameraStart').addEventListener('click',startCamera);$('tkCameraStop').addEventListener('click',stopCamera);$('tkCameraPipStop').addEventListener('click',stopCamera);
  $('tkPulseConnect').addEventListener('click',connectPulse);$('tkPulseDisconnect').addEventListener('click',disconnectPulse);
  $('tkCameraAuto').addEventListener('change',refreshSensorFocus);$('tkExpressionAuto').addEventListener('change',refreshSensorFocus);$('tkPulseAuto').addEventListener('change',recalculatePulseStyle);$('tkTypingAuto').addEventListener('change',()=>{window.tkTypingSignal='none';chatKeyTimes=[];refreshSensorFocus()});
  $('tkPulseThreshold').addEventListener('input',recalculatePulseStyle);
@@ -8958,3 +8986,4 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
+    
