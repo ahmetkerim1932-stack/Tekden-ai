@@ -6498,6 +6498,8 @@ def pro_studio(request: Request):
 .avatar-3d-actions{display:flex;gap:7px;flex-wrap:wrap;justify-content:center;z-index:2;margin-top:8px}
 .avatar-3d-actions button{padding:7px 10px;font-size:11px;border:1px solid #62cfff66;background:#0d2a49;color:#e9faff;border-radius:10px}
 .avatar-stage .avatar-speaking{z-index:2}
+.avatar-upload-card{z-index:2;width:min(100%,410px);margin-top:12px;padding:11px 13px;border:1px solid #6adfff55;border-radius:14px;background:#06172dcc;color:#eafaff;display:grid;gap:7px;font-size:12px}
+.avatar-upload-card small{color:#b8d9ec;line-height:1.45}.avatar-upload-card input{max-width:100%;font-size:11px;color:#dff5ff}.avatar-file-label{display:inline-block;text-align:center;padding:8px 10px;border:1px solid #67dfff88;border-radius:9px;background:#0b3152;color:#fff;font-weight:750;cursor:pointer}.avatar-upload-card button{padding:7px 9px;font-size:11px}.avatar-upload-card #tdAvatarModelStatus{color:#aee9ff;min-height:16px}
 .avatar-stage.speaking .avatar-mouth{transform-origin:center;animation:tdMouth .18s ease-in-out infinite alternate}
 @keyframes tdMouth{from{transform:scaleY(.35)}to{transform:scaleY(1.8)}}
 .avatar-speaking{font-size:12px;color:#bfefff;letter-spacing:.08em;margin-top:10px;z-index:1}
@@ -6524,6 +6526,7 @@ def pro_studio(request: Request):
     <strong class="avatar-nameplate" id="tdAvatarName">Tekden Nova</strong>
     <div class="avatar-speaking" id="tdAvatarSpeaking">● 3D AVATAR HAZIR</div>
     <div class="avatar-3d-actions"><button type="button" id="td3dReset">↺ Görünümü sıfırla</button><button type="button" id="td3dRotate">⟳ Otomatik döndür: Açık</button><button type="button" id="td3dShot">▣ PNG görüntüsü al</button></div>
+    <div class="avatar-upload-card"><b>Gerçekçi 3D modelini kullan</b><small>Dokularıyla birlikte hazırlanmış kendi lisanslı GLB modelini cihazından seç. Dosya tarayıcıda açılır; sunucuya yüklenmez.</small><label class="avatar-file-label" for="tdAvatarModelFile">⬆ 3D model seç (.glb)</label><input id="tdAvatarModelFile" type="file" accept=".glb,model/gltf-binary"/><button type="button" id="tdAvatarProcedural" class="secondary">Hazır Tekden avatarına dön</button><div id="tdAvatarModelStatus" aria-live="polite">GLB modeli seçildiğinde bu sahnede görüntülenir.</div></div>
   </div>
   <div class="avatar-controls">
     <div class="avatar-control-grid">
@@ -6545,7 +6548,7 @@ def pro_studio(request: Request):
     <div class="avatar-preset-row"><button class="secondary" type="button" data-avatar-script="Merhaba! Ben Tekden AI'ın kurgusal dijital sunucusuyum. Bugün sana nasıl yardımcı olabilirim?">👋 Tanıtım metni</button><button class="secondary" type="button" data-avatar-script="Tekden AI ile fikirlerini projelere dönüştürebilir, yeni şeyler öğrenebilir ve yaratıcı çalışmalar yapabilirsin.">✦ Tekden AI tanıtımı</button></div>
     <div class="actions"><button id="tdAvatarSpeak" type="button">▶ Avatarı konuştur</button><button class="secondary" id="tdAvatarStop" type="button">■ Durdur</button><button class="secondary" id="tdAvatarPreviewVoice" type="button">🔊 Sesi dene</button></div>
     <div id="tdAvatarStatus" class="status" role="status">Seslendirme tarayıcının konuşma motoruyla cihazında yapılır.</div>
-    <div class="avatar-help"><b>Gizlilik ve kapsam:</b> Bu sürüm selfie, yüz videosu veya ses örneği yüklemez; gerçek yüz/kişisel ses klonlamaz. 3D sahne tarayıcıda oluşturulur; Three.js kitaplığı CDN üzerinden yüklenir, bu nedenle ilk açılışta internet bağlantısı gerekir. Seçimler ve metin sunucuya gönderilmez. Bu sürüm MP4 üretmez; konuşma animasyonu tarayıcı konuşma olaylarına dayalı görsel senkronizasyondur. Kullanılabilir Türkçe sesler cihazına ve tarayıcına göre değişir.</div>
+    <div class="avatar-help"><b>Gizlilik ve kapsam:</b> Bu sürüm gerçek kişiyi fotoğraftan veya sesten klonlamaz. Daha gerçekçi görünüm için kendi kullanım hakkına sahip, dokuları gömülü .GLB 3D modelini yalnızca tarayıcıya yükleyebilirsin; dosya sunucuya gönderilmez. Three.js ve GLTFLoader CDN üzerinden yüklenir, bu nedenle internet bağlantısı gerekir. Seçimler ve metin sunucuya gönderilmez. Bu sürüm MP4 üretmez; konuşma animasyonu tarayıcı konuşma olaylarına dayalı görsel senkronizasyondur. Kullanılabilir Türkçe sesler cihazına ve tarayıcına göre değişir.</div>
   </div>
 </div>
 </section>
@@ -6586,10 +6589,12 @@ document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{$('prompt').valu
 $('generate').onclick=async()=>{const prompt=$('prompt').value.trim();if(prompt.length<3){$('status').textContent='Önce oyunu biraz tarif et.';return}const btn=$('generate');btn.disabled=true;btn.textContent='⏳ Oyun hazırlanıyor…';$('status').textContent='Pro modeli oyun kodunu oluşturuyor. Bu işlem biraz sürebilir…';try{const d=await api('/api/game',{method:'POST',body:JSON.stringify({prompt})});currentHtml=d.html;$('preview').innerHTML='';frame=document.createElement('iframe');frame.title='Oynanabilir oyun';frame.setAttribute('sandbox','allow-scripts allow-pointer-lock');frame.srcdoc=currentHtml;$('preview').appendChild(frame);$('tools').style.display='flex';$('status').textContent='Oyun hazır. Kontrolleri deneyebilir, tam ekran açabilir veya HTML indirebilirsin.'}catch(e){$('status').textContent='Oyun oluşturulamadı: '+e.message}finally{btn.disabled=false;btn.textContent='✦ Oyunu oluştur'}};
 $('fullscreen').onclick=()=>frame?.requestFullscreen?.();$('download').onclick=()=>{const a=document.createElement('a'),url=URL.createObjectURL(new Blob([currentHtml],{type:'text/html;charset=utf-8'}));a.href=url;a.download='tekden-ai-pro-oyunu.html';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};check();
 </script>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}</script>
 <script type="module">
 (async()=>{
  try{
   const THREE = await import('https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js');
+  const { GLTFLoader } = await import('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/loaders/GLTFLoader.js');
   const host=document.getElementById('tdAvatarFigure'); if(!host)return;
   const scene=new THREE.Scene();
   scene.fog=new THREE.FogExp2(0x061426,0.055);
@@ -6597,11 +6602,13 @@ $('fullscreen').onclick=()=>frame?.requestFullscreen?.();$('download').onclick=(
   const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true,preserveDrawingBuffer:true,powerPreference:'high-performance'});
   renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
   renderer.outputColorSpace=THREE.SRGBColorSpace;
-  renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.12;
+  renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.18;renderer.setClearColor(0x071626,0);
   renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
   renderer.domElement.setAttribute('aria-label','Fare veya dokunmayla döndürülebilen 3D Tekden avatarı');
   host.replaceChildren(renderer.domElement);
-  const hemi=new THREE.HemisphereLight(0xbfeaff,0x10172b,2.0);scene.add(hemi);
+  const hemi=new THREE.HemisphereLight(0xd7eaff,0x221b27,2.35);scene.add(hemi);
+  const softFill=new THREE.DirectionalLight(0xffe2cf,1.65);softFill.position.set(3.5,3.2,4.5);scene.add(softFill);
+  const topSoft=new THREE.DirectionalLight(0xd7eaff,1.05);topSoft.position.set(0,7,-1.5);scene.add(topSoft);
   const key=new THREE.DirectionalLight(0xffffff,3.2);key.position.set(-3.5,6,5);key.castShadow=true;key.shadow.mapSize.set(1024,1024);scene.add(key);
   const rim=new THREE.PointLight(0x23caff,34,9);rim.position.set(2.7,3.4,-2);scene.add(rim);
   const fill=new THREE.PointLight(0x8664ff,20,8);fill.position.set(-3,1.4,2);scene.add(fill);
@@ -6612,6 +6619,8 @@ $('fullscreen').onclick=()=>frame?.requestFullscreen?.();$('download').onclick=(
   const backRing=new THREE.Mesh(new THREE.TorusGeometry(1.85,.009,8,120),new THREE.MeshBasicMaterial({color:0x765dff,transparent:true,opacity:.8}));backRing.rotation.x=Math.PI/2;backRing.position.y=-.04;scene.add(backRing);
   const starsGeo=new THREE.BufferGeometry(), starPos=[];for(let i=0;i<220;i++){const a=Math.random()*Math.PI*2,r=2.2+Math.random()*5;starPos.push(Math.cos(a)*r,Math.random()*5-1,Math.sin(a)*r-1.5)}starsGeo.setAttribute('position',new THREE.Float32BufferAttribute(starPos,3));const stars=new THREE.Points(starsGeo,new THREE.PointsMaterial({color:0x8ce8ff,size:.025,transparent:true,opacity:.8}));scene.add(stars);
   const root=new THREE.Group();scene.add(root);let head=null,mouth=null,eyeGroups=[],body=null;
+  let importedModel=null, importedMixer=null, importedMorphTargets=[], importedSpeechTargets=[];
+  const gltfLoader=new GLTFLoader();
   const mat=(color,metalness=0,roughness=.48,emissive=0,emissiveIntensity=0)=>new THREE.MeshStandardMaterial({color,metalness,roughness,emissive,emissiveIntensity});
   const sph=(parent,scale,pos,material,seg=40)=>{const m=new THREE.Mesh(new THREE.SphereGeometry(1,seg,Math.max(24,Math.floor(seg*.75))),material);m.scale.set(...scale);m.position.set(...pos);m.castShadow=true;m.receiveShadow=true;parent.add(m);return m};
   const cylBetween=(parent,a,b,r1,r2,material,radial=28)=>{const A=new THREE.Vector3(...a),B=new THREE.Vector3(...b),d=new THREE.Vector3().subVectors(B,A);const m=new THREE.Mesh(new THREE.CylinderGeometry(r2,r1,d.length(),radial,1),material);m.position.copy(A).add(B).multiplyScalar(.5);m.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),d.normalize());m.castShadow=true;parent.add(m);return m};
@@ -6620,6 +6629,35 @@ $('fullscreen').onclick=()=>frame?.requestFullscreen?.();$('download').onclick=(
   const hairs={dark:0x182235,brown:0x513021,silver:0xadbaca,blue:0x087fc9,purple:0x673a9b};
   const eyes={blue:0x32a9ec,brown:0x75452b,green:0x32a77e,violet:0x9666e9};
   function clearRoot(){while(root.children.length){const obj=root.children.pop();obj.traverse?.(o=>{if(o.geometry)o.geometry.dispose();if(o.material){if(Array.isArray(o.material))o.material.forEach(m=>m.dispose());else o.material.dispose();}})}}
+  function disposeRoot(){
+   while(root.children.length){const obj=root.children[0];root.remove(obj);obj.traverse?.(o=>{if(o.geometry)o.geometry.dispose();if(o.material){if(Array.isArray(o.material))o.material.forEach(m=>m.dispose());else o.material.dispose?.();}})}
+   importedModel=null; importedMixer=null; importedMorphTargets=[]; importedSpeechTargets=[]; head=null;mouth=null;eyeGroups=[];body=null;
+  }
+  function fitModel(model){
+   const box=new THREE.Box3().setFromObject(model),size=box.getSize(new THREE.Vector3()),center=box.getCenter(new THREE.Vector3());
+   const height=Math.max(size.y,0.01),scale=3.35/height;model.scale.setScalar(scale);
+   model.position.set(-center.x*scale,-box.min.y*scale,-center.z*scale);
+   root.position.y=0;camera.position.set(0,1.82,6.15);camera.lookAt(0,1.72,0);
+  }
+  function loadGlbFile(file){
+   if(!file)return;
+   if(!/\.glb$/i.test(file.name)){document.getElementById('tdAvatarModelStatus').textContent='Lütfen dokularını içine alan .glb dosyası seç. .gltf yerine GLB önerilir.';return;}
+   if(file.size>80*1024*1024){document.getElementById('tdAvatarModelStatus').textContent='Dosya 80 MB sınırını aşıyor. Daha küçük/optimize bir GLB seç.';return;}
+   document.getElementById('tdAvatarModelStatus').textContent='3D model açılıyor…';
+   const reader=new FileReader();reader.onerror=()=>{document.getElementById('tdAvatarModelStatus').textContent='Dosya okunamadı.'};
+   reader.onload=()=>{try{gltfLoader.parse(reader.result,'',gltf=>{
+     disposeRoot(); importedModel=gltf.scene; importedModel.traverse(o=>{
+      if(o.isMesh){o.castShadow=true;o.receiveShadow=true;if(o.material){const mats=Array.isArray(o.material)?o.material:[o.material];mats.forEach(m=>{if(m.map)m.map.colorSpace=THREE.SRGBColorSpace;if(m.emissiveMap)m.emissiveMap.colorSpace=THREE.SRGBColorSpace;if('roughness' in m)m.roughness=THREE.MathUtils.clamp(m.roughness??.55,.18,1);if('metalness' in m)m.metalness=THREE.MathUtils.clamp(m.metalness??0,0,1);m.needsUpdate=true;});}}
+      if(o.morphTargetDictionary&&o.morphTargetInfluences){for(const [name,index] of Object.entries(o.morphTargetDictionary)){const rec={mesh:o,index,name:name.toLowerCase()};importedMorphTargets.push(rec);if(/mouth.?open|jaw.?open|viseme.?aa|viseme.?oh|mouthopen/.test(rec.name))importedSpeechTargets.push(rec);}}
+     });
+     root.add(importedModel);fitModel(importedModel);
+     if(gltf.animations&&gltf.animations.length){importedMixer=new THREE.AnimationMixer(importedModel);const clip=gltf.animations.find(c=>/idle|stand|talk|speak/i.test(c.name))||gltf.animations[0];importedMixer.clipAction(clip).play();}
+     document.getElementById('tdAvatarModelStatus').textContent='Model yüklendi: '+file.name+' · '+(importedSpeechTargets.length?'ağız morph animasyonu bulundu':'ağız morph hedefi yok; ses sürerken hafif baş/sahne hareketi kullanılacak');
+    },err=>{console.error(err);document.getElementById('tdAvatarModelStatus').textContent='GLB çözümlenemedi. Dosyanın geçerli ve dokularının gömülü olduğundan emin ol.'});}catch(e){console.error(e);document.getElementById('tdAvatarModelStatus').textContent='Model yüklenirken hata oluştu.'}};
+   reader.readAsArrayBuffer(file);
+  }
+  document.getElementById('tdAvatarModelFile').addEventListener('change',e=>loadGlbFile(e.target.files?.[0]));
+  document.getElementById('tdAvatarProcedural').addEventListener('click',()=>{disposeRoot();root.position.set(0,0,0);camera.position.set(0,1.85,6.4);camera.lookAt(0,1.65,0);buildAvatar();document.getElementById('tdAvatarModelStatus').textContent='Hazır Tekden avatarı etkin.';});
   function buildAvatar(){
    const type=document.getElementById('tdAvatarType').value,pal=palettes[document.getElementById('tdAvatarStyle').value]||palettes.blue;
    const skin=mat(skins[document.getElementById('tdAvatarSkin').value]||skins.warm,.02,.55), hairColor=mat(hairs[document.getElementById('tdAvatarHairColor').value]||hairs.dark,.08,.34), jacket=mat(pal.jacket,.52,.31,pal.glow,.12), jacketDark=mat(new THREE.Color(pal.jacket).multiplyScalar(.62),.36,.4), trim=mat(pal.trim,.52,.24,pal.glow,.45), white=mat(0xf4f8ff,.04,.22), iris=mat(eyes[document.getElementById('tdAvatarEyes').value]||eyes.blue,.3,.19), pupil=mat(0x07101f,.08,.12), mouthMat=mat(0x411b2a,.05,.36), lip=mat(0x8f4e56,.1,.35);
@@ -6685,14 +6723,16 @@ $('fullscreen').onclick=()=>frame?.requestFullscreen?.();$('download').onclick=(
   renderer.domElement.addEventListener('pointermove',e=>{if(!drag)return;root.rotation.y+=(e.clientX-lastX)*.009;camera.position.y=THREE.MathUtils.clamp(camera.position.y-(e.clientY-lastY)*.006,1.3,2.5);camera.lookAt(0,1.65,0);lastX=e.clientX;lastY=e.clientY});
   const endDrag=()=>drag=false;renderer.domElement.addEventListener('pointerup',endDrag);renderer.domElement.addEventListener('pointercancel',endDrag);
   renderer.domElement.addEventListener('wheel',e=>{e.preventDefault();camera.position.z=THREE.MathUtils.clamp(camera.position.z+e.deltaY*.004,4.8,8.4);camera.lookAt(0,1.65,0)},{passive:false});
-  window.tdUpdate3DAvatar=()=>{if(root){const ry=root.rotation.y;while(root.children.length){const obj=root.children.pop();obj.traverse?.(o=>{if(o.geometry)o.geometry.dispose();if(o.material)o.material.dispose?.()})}buildAvatar();root.rotation.y=ry;}};
+  window.tdUpdate3DAvatar=()=>{if(importedModel){document.getElementById('tdAvatarModelStatus').textContent='Yüklediğin gerçekçi GLB modeli korunuyor. Hazır karakter ayarları yalnızca hazır avatar için geçerlidir.';return;}if(root){const ry=root.rotation.y;disposeRoot();buildAvatar();root.rotation.y=ry;}};
   window.tdSet3DSpeaking=v=>{speaking=!!v};window.tdAvatarMouthPulse=ms=>{mouthPulseUntil=performance.now()+ms};
   document.getElementById('td3dReset').onclick=()=>{root.rotation.set(0,0,0);camera.position.set(0,1.85,6.4);camera.lookAt(0,1.65,0)};
   document.getElementById('td3dRotate').onclick=e=>{autoRotate=!autoRotate;e.currentTarget.textContent='⟳ Otomatik döndür: '+(autoRotate?'Açık':'Kapalı')};
   document.getElementById('td3dShot').onclick=()=>{renderer.render(scene,camera);const a=document.createElement('a');a.href=renderer.domElement.toDataURL('image/png');a.download='tekden-ai-3d-avatar.png';a.click()};
-  const clock=new THREE.Clock();function animate(){requestAnimationFrame(animate);const t=clock.getElapsedTime(),now=performance.now();if(autoRotate&&!drag)root.rotation.y+=.0018;root.position.y=Math.sin(t*1.35)*.018;head.rotation.y=Math.sin(t*.72)*.035;head.rotation.x=Math.sin(t*.9)*.012;body.rotation.z=Math.sin(t*.65)*.008;ring.rotation.z=t*.12;backRing.rotation.z=-t*.075;stars.rotation.y=t*.012;
+  const clock=new THREE.Clock();function animate(){requestAnimationFrame(animate);const delta=clock.getDelta(),t=clock.elapsedTime,now=performance.now();if(autoRotate&&!drag)root.rotation.y+=.0018;if(importedMixer)importedMixer.update(delta);if(!importedModel){root.position.y=Math.sin(t*1.35)*.018;if(head){head.rotation.y=Math.sin(t*.72)*.035;head.rotation.x=Math.sin(t*.9)*.012;}if(body)body.rotation.z=Math.sin(t*.65)*.008;}ring.rotation.z=t*.12;backRing.rotation.z=-t*.075;stars.rotation.y=t*.012;
    if(now>blinkAt){blinkEnd=now+135;blinkAt=now+2600+Math.random()*2400}const blink=now<blinkEnd?Math.sin((now-(blinkEnd-135))/135*Math.PI):0;eyeGroups.forEach(e=>e.scale.y=1-.91*blink);
-   if(mouth){const active=speaking||now<mouthPulseUntil;mouth.scale.y=active?.045+Math.abs(Math.sin(t*17))*.075:.025;}
+   const active=speaking||now<mouthPulseUntil;
+   if(mouth){mouth.scale.y=active?.045+Math.abs(Math.sin(t*17))*.075:.025;}
+   if(importedSpeechTargets.length){const level=active?(0.10+Math.abs(Math.sin(t*13))*.28):0;importedSpeechTargets.forEach(x=>{x.mesh.morphTargetInfluences[x.index]=level;});}
    renderer.render(scene,camera)}animate();
  }catch(err){console.error('3D avatar yüklenemedi',err);const status=document.getElementById('tdAvatarStatus');if(status)status.textContent='3D motor yüklenemedi. İnternet bağlantısını ve WebGL desteğini kontrol et; eski avatar görüntüsüne geri dönülüyor.';}
 })();
@@ -9292,4 +9332,3 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
-    
