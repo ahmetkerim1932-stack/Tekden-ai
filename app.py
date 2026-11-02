@@ -6472,20 +6472,32 @@ def discover_page():
     return HTMLResponse("""<!doctype html><html lang='tr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Keşfet · Tekden AI</title><style>body{font:16px/1.6 system-ui;max-width:900px;margin:32px auto;padding:0 18px;color:#172b46}a,button{color:#0878f9}li{margin:8px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{border:1px solid #d8e6f6;border-radius:14px;padding:16px}</style><h1>Tekden AI ile daha fazlasını keşfet</h1><p><b>175 çalışma aracı:</b> öğrenme, yazı, kodlama, araştırma, proje yönetimi, tasarım, verimlilik, veri analizi ve kalite kontrolü için hazır iş akışları ana sayfadaki araç kutusunda bulunur.</p><p>Sohbetten kişisel çalışma alanına kadar mevcut araçları keşfet.</p><div class='grid'><div class='card'><h2>✦ Akıllı sohbet</h2><p>Çalışma tarzına göre yanıtlar, hazır prompt kütüphanesi ve kaynaklı araştırma.</p></div><div class='card'><h2>📝 Kişisel çalışma alanı</h2><p>Notlar, kaydedilen yanıtlar ve kullanıcı tercihleri.</p></div><div class='card'><h2>📂 Sohbet düzeni</h2><p>Geçmişi ara, sohbetleri arşivle ve dışa aktar.</p></div><div class='card'><h2>♿ Erişilebilir arayüz</h2><p>Koyu tema, odak görünümü, yazı boyutu ve klavye kısayolları.</p></div><div class='card'><h2>🧩 Hazır promptlar</h2><p>Eğitim, yazı, kodlama, araştırma, planlama ve yaratıcılık için şablonlar.</p></div><div class='card'><h2>⚡ Araç kütüphanesi</h2><p>175 çalışma akışı ve hazır görev şablonunu keşfet.</p></div></div><p><a href='/'>← Tekden AI'a dön</a></p></html>""")
 
 @app.get("/pro-studio", response_class=HTMLResponse)
-def pro_studio():
+def pro_studio(request: Request):
+    # Enforce plan access on the server as well as in the page UI.
+    studio_user = current_user(request)
+    if not studio_user:
+        raise HTTPException(401, "Pro Stüdyo için önce giriş yapmalısın.")
+    studio_plan = "plus" if studio_user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else studio_user.get("plan", "free")
+    if studio_plan not in ("pro", "plus"):
+        raise HTTPException(403, "Pro Stüdyo yalnızca Pro ve Plus üyelerine açıktır.")
     return HTMLResponse(r'''<!doctype html>
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tekden AI · Pro Stüdyo</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top left,#eaf4ff 0,transparent 42%),#f8fbff;color:#122744;font:15px/1.5 Inter,system-ui,sans-serif}button,textarea{font:inherit}button{cursor:pointer;border:0;border-radius:12px;padding:11px 15px;background:#0878f9;color:white;font-weight:750}button:disabled{opacity:.55;cursor:wait}.secondary{background:#fff;color:#24466e;border:1px solid #d7e6f8}.shell{max-width:1250px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.brand{font-weight:900;font-size:22px}.brand span{color:#0878f9}.pill{background:#efe6ff;color:#6834bd;padding:5px 10px;border-radius:99px;font-size:12px;font-weight:850}.hero{padding:35px 0 24px}.hero h1{font-size:clamp(30px,4vw,48px);letter-spacing:-1.4px;margin:0 0 8px}.hero p{color:#607590;max-width:700px;margin:0}.grid{display:grid;grid-template-columns:minmax(280px,370px) minmax(0,1fr);gap:18px;align-items:start}.card{background:#fff;border:1px solid #dce9f8;border-radius:20px;padding:20px;box-shadow:0 12px 34px #254c7c0b}.card h2{margin:0 0 5px;font-size:18px}.muted{color:#607590;font-size:13px}.presets{display:flex;gap:7px;flex-wrap:wrap;margin:15px 0}.presets button{font-size:12px;padding:8px 10px}.textarea{width:100%;min-height:190px;resize:vertical;border:1px solid #d6e5f8;border-radius:13px;padding:13px;outline:none}.textarea:focus{border-color:#76b7ff;box-shadow:0 0 0 3px #e3f1ff}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.status{min-height:22px;color:#526784;font-size:13px;margin-top:10px}.preview{min-height:530px;border:1px dashed #bdd5f0;border-radius:15px;background:linear-gradient(135deg,#f5f9ff,#fff);display:grid;place-items:center;overflow:hidden}.preview iframe{width:100%;height:650px;border:0;background:#07111f}.empty{text-align:center;padding:30px;color:#69809b}.empty .icon{font-size:42px}.smallnote{font-size:12px;color:#7386a0;margin-top:10px}@media(max-width:850px){.shell{padding:14px}.grid{grid-template-columns:1fr}.preview{min-height:350px}.preview iframe{height:65vh}}
 .garage-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}.garage-item{border:1px solid #355b79;border-radius:12px;padding:10px;background:#0b1b2d;color:#eaf6ff;text-align:left;cursor:pointer}.garage-item:disabled{opacity:.45;cursor:not-allowed}.garage-item strong{display:block;margin-bottom:4px}.toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:3;background:#061423ed;border:1px solid #4de8ff;border-radius:999px;padding:8px 13px;color:#fff;pointer-events:none;white-space:nowrap}.badge-row{display:flex;gap:6px;flex-wrap:wrap;justify-content:center} .mini-badge{background:#172c43;border:1px solid #375675;border-radius:8px;padding:6px 8px;font-size:12px}
 .avatar-layout{display:grid;grid-template-columns:minmax(280px,430px) minmax(280px,1fr);gap:18px;align-items:start}
-.avatar-stage{position:relative;min-height:430px;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;border-radius:20px;background:radial-gradient(circle at 50% 22%,#1d5590 0,#0c2446 42%,#061426 100%);color:white;padding:20px}
+.avatar-stage{position:relative;min-height:560px;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;border-radius:20px;background:radial-gradient(ellipse at 50% 18%,#2468a7 0,#102f56 42%,#040c1b 100%);color:white;padding:16px;isolation:isolate}
 .avatar-stage:before,.avatar-stage:after{content:"";position:absolute;border:1px solid #62d9ff35;border-radius:50%;width:310px;height:310px;pointer-events:none}
 .avatar-stage:after{width:390px;height:390px}
 .avatar-orbit{position:absolute;width:260px;height:260px;border:1px dashed #71e5ff45;border-radius:50%;animation:tdOrbit 22s linear infinite}
 @keyframes tdOrbit{to{transform:rotate(360deg)}}
-.avatar-figure{width:min(88%,300px);height:280px;position:relative;z-index:1;display:grid;place-items:center;filter:drop-shadow(0 18px 25px #0008)}
-.avatar-figure svg{width:100%;height:100%;overflow:visible}
+.avatar-figure{width:100%;height:430px;max-width:560px;position:relative;z-index:1;display:block;filter:drop-shadow(0 18px 25px #0008);touch-action:none}
+.avatar-figure canvas{display:block;width:100%;height:100%;outline:none;cursor:grab}
+.avatar-figure canvas:active{cursor:grabbing}
+.avatar-stage .avatar-nameplate{z-index:2;padding:7px 14px;border:1px solid #75dcff55;border-radius:999px;background:#06172d99;box-shadow:0 0 24px #20baff28;letter-spacing:.04em}
+.avatar-3d-actions{display:flex;gap:7px;flex-wrap:wrap;justify-content:center;z-index:2;margin-top:8px}
+.avatar-3d-actions button{padding:7px 10px;font-size:11px;border:1px solid #62cfff66;background:#0d2a49;color:#e9faff;border-radius:10px}
+.avatar-stage .avatar-speaking{z-index:2}
 .avatar-stage.speaking .avatar-mouth{transform-origin:center;animation:tdMouth .18s ease-in-out infinite alternate}
 @keyframes tdMouth{from{transform:scaleY(.35)}to{transform:scaleY(1.8)}}
 .avatar-speaking{font-size:12px;color:#bfefff;letter-spacing:.08em;margin-top:10px;z-index:1}
@@ -6498,25 +6510,31 @@ def pro_studio():
 .avatar-help{padding:11px 13px;border-radius:12px;background:#f1f7ff;border:1px solid #dbeaff;color:#355879;font-size:12px;line-height:1.55}
 .avatar-preset-row{display:flex;gap:7px;flex-wrap:wrap}
 .avatar-preset-row button{padding:8px 10px;font-size:12px}
-@media(max-width:850px){.avatar-layout{grid-template-columns:1fr}.avatar-stage{min-height:360px}.avatar-control-grid{grid-template-columns:1fr 1fr}}
-@media(max-width:480px){.avatar-control-grid{grid-template-columns:1fr}.avatar-stage{min-height:330px}}
+@media(max-width:850px){.avatar-layout{grid-template-columns:1fr}.avatar-stage{min-height:500px}.avatar-figure{height:390px}.avatar-control-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:480px){.avatar-control-grid{grid-template-columns:1fr}.avatar-stage{min-height:440px}.avatar-figure{height:340px}}
 </style></head><body><div class="shell"><header class="top"><div class="brand">Tekden <span>AI</span> <span class="pill">✦ PRO STÜDYO</span></div><div style="display:flex;gap:8px"><button class="secondary" onclick="location.href='/'">← Sohbete dön</button></div></header>
 <section class="hero"><h1>Fikrini <span style="color:#0878f9">oyuna, şarkıya veya avatara</span> dönüştür.</h1><p>Pro Stüdyo oyun, müzik ve kurgusal avatar sunucusu üretim araçlarını bir araya getirir. Avatarın seslendirmesi cihazındaki tarayıcı motoruyla yapılır; kişisel yüz veya ses klonlaması içermez. Müzik motoru eroq Music API üzerinden bağlanır (Render Environment: EROQ_API_KEY).</p></section><div class="actions" style="margin:0 0 18px"><button id="gameMode">🎮 Oyun stüdyosu</button><button class="secondary" id="songMode">🎵 Şarkı stüdyosu</button><button class="secondary" id="avatarMode">🧑‍🚀 Avatar stüdyosu</button></div>
 <section id="avatarPanel" class="card" style="display:none;margin-bottom:18px">
 <h2>🧑‍🚀 Tekden AI Kurgusal Avatar Stüdyosu</h2>
-<p class="muted">Kendi tasarladığın, gerçek bir kişiyi taklit etmeyen sanal sunucular oluştur. Avatar seçtiğin metni cihazındaki Türkçe yapay sesle okur; konuşma sırasında yüz ve ağız animasyonu oynatılır.</p>
+<p class="muted">Gerçek bir kişiyi taklit etmeyen, ışıklandırılmış ve döndürülebilir 3D sanal sunucu tasarla. Yüz materyalini, saçını, gözlerini, kıyafetini ve sahne ışığını özelleştir; avatar metnini Türkçe yapay sesle okurken baş ve ağız animasyonlarını izle.</p>
 <div class="avatar-layout">
   <div class="avatar-stage" id="tdAvatarStage">
     <div class="avatar-orbit"></div>
-    <div class="avatar-figure" id="tdAvatarFigure" aria-label="Kurgusal Tekden AI avatarı"></div>
-    <strong id="tdAvatarName">Tekden Nova</strong>
-    <div class="avatar-speaking" id="tdAvatarSpeaking">● HAZIR · KURGUSAL AVATAR</div>
+    <div class="avatar-figure" id="tdAvatarFigure" aria-label="Döndürülebilir 3 boyutlu kurgusal Tekden AI avatarı"></div>
+    <strong class="avatar-nameplate" id="tdAvatarName">Tekden Nova</strong>
+    <div class="avatar-speaking" id="tdAvatarSpeaking">● 3D AVATAR HAZIR</div>
+    <div class="avatar-3d-actions"><button type="button" id="td3dReset">↺ Görünümü sıfırla</button><button type="button" id="td3dRotate">⟳ Otomatik döndür: Açık</button><button type="button" id="td3dShot">▣ PNG görüntüsü al</button></div>
   </div>
   <div class="avatar-controls">
     <div class="avatar-control-grid">
       <div><label for="tdAvatarNameInput">Avatar adı</label><input id="tdAvatarNameInput" maxlength="32" value="Tekden Nova"></div>
       <div><label for="tdAvatarType">Karakter</label><select id="tdAvatarType"><option value="nova">Neon sunucu</option><option value="robot">Tekden robotu</option><option value="astro">Uzay kaşifi</option><option value="pixel">Sevimli dijital yardımcı</option></select></div>
-      <div><label for="tdAvatarStyle">Renk teması</label><select id="tdAvatarStyle"><option value="blue">Tekden mavi</option><option value="violet">Mor gelecek</option><option value="mint">Mint teknoloji</option><option value="sunset">Gün batımı</option></select></div>
+      <div><label for="tdAvatarStyle">Işık / renk teması</label><select id="tdAvatarStyle"><option value="blue">Tekden mavi</option><option value="violet">Mor gelecek</option><option value="mint">Mint teknoloji</option><option value="sunset">Gün batımı</option></select></div>
+      <div><label for="tdAvatarSkin">Ten / yüz materyali</label><select id="tdAvatarSkin"><option value="warm">Sıcak</option><option value="light">Açık</option><option value="tan">Bronz</option><option value="deep">Koyu</option><option value="chrome">Sedefli robot</option></select></div>
+      <div><label for="tdAvatarHair">Saç modeli</label><select id="tdAvatarHair"><option value="short">Kısa modern</option><option value="curly">Kıvırcık</option><option value="long">Uzun</option><option value="spiky">Hareketli</option><option value="bob">Katlı</option></select></div>
+      <div><label for="tdAvatarHairColor">Saç rengi</label><select id="tdAvatarHairColor"><option value="dark">Gece siyahı</option><option value="brown">Kestane</option><option value="silver">Gümüş</option><option value="blue">Elektrik mavisi</option><option value="purple">Mor</option></select></div>
+      <div><label for="tdAvatarEyes">Göz rengi</label><select id="tdAvatarEyes"><option value="blue">Mavi</option><option value="brown">Kahverengi</option><option value="green">Yeşil</option><option value="violet">Menekşe</option></select></div>
+      <div><label for="tdAvatarOutfit">Kıyafet</label><select id="tdAvatarOutfit"><option value="tech">Tekden teknoloji ceketi</option><option value="suit">Modern takım</option><option value="hoodie">Günlük hoodie</option><option value="explorer">Uzay kaşifi</option></select></div>
       <div><label for="tdAvatarVoice">Yapay ses (cihazında mevcut)</label><select id="tdAvatarVoice"><option value="">Türkçe varsayılan ses</option></select></div>
     </div>
     <div class="avatar-control-grid">
@@ -6527,7 +6545,7 @@ def pro_studio():
     <div class="avatar-preset-row"><button class="secondary" type="button" data-avatar-script="Merhaba! Ben Tekden AI'ın kurgusal dijital sunucusuyum. Bugün sana nasıl yardımcı olabilirim?">👋 Tanıtım metni</button><button class="secondary" type="button" data-avatar-script="Tekden AI ile fikirlerini projelere dönüştürebilir, yeni şeyler öğrenebilir ve yaratıcı çalışmalar yapabilirsin.">✦ Tekden AI tanıtımı</button></div>
     <div class="actions"><button id="tdAvatarSpeak" type="button">▶ Avatarı konuştur</button><button class="secondary" id="tdAvatarStop" type="button">■ Durdur</button><button class="secondary" id="tdAvatarPreviewVoice" type="button">🔊 Sesi dene</button></div>
     <div id="tdAvatarStatus" class="status" role="status">Seslendirme tarayıcının konuşma motoruyla cihazında yapılır.</div>
-    <div class="avatar-help"><b>Gizlilik ve kapsam:</b> Bu sürüm selfie, yüz videosu veya ses örneği yüklemez; gerçek yüz/kişisel ses klonlamaz. Seçimler ve metin sunucuya gönderilmez. Video dosyası/MP4 üretimi ve fotogerçekçi dudak senkronizasyonu içermez. Kullanılabilir sesler cihazına ve tarayıcına göre değişir.</div>
+    <div class="avatar-help"><b>Gizlilik ve kapsam:</b> Bu sürüm selfie, yüz videosu veya ses örneği yüklemez; gerçek yüz/kişisel ses klonlamaz. 3D sahne tarayıcıda oluşturulur; Three.js kitaplığı CDN üzerinden yüklenir, bu nedenle ilk açılışta internet bağlantısı gerekir. Seçimler ve metin sunucuya gönderilmez. Bu sürüm MP4 üretmez; konuşma animasyonu tarayıcı konuşma olaylarına dayalı görsel senkronizasyondur. Kullanılabilir Türkçe sesler cihazına ve tarayıcına göre değişir.</div>
   </div>
 </div>
 </section>
@@ -6553,13 +6571,13 @@ function tdSvgAvatar(type){
  if(type==='pixel')return `<svg viewBox="0 0 280 280" role="img" aria-label="Kurgusal dijital yardımcı"><path d="M82 46H198V62H218V202H198V222H82V202H62V62H82Z" fill="${p.b}" stroke="${p.a}" stroke-width="8"/><path d="M91 83H189V173H91Z" fill="#e6fbff"/><ellipse cx="116" cy="120" rx="8" ry="11" fill="#122b4d"/><ellipse cx="164" cy="120" rx="8" ry="11" fill="#122b4d"/><g class="avatar-mouth" transform-origin="140px 151px"><path d="M119 151H161V161H119Z" fill="#8e365d"/></g><path d="M99 222L80 254M181 222L200 254" stroke="${p.a}" stroke-width="12" stroke-linecap="round"/><rect x="117" y="20" width="46" height="18" rx="9" fill="${p.glow}"/></svg>`;
  return `<svg viewBox="0 0 280 280" role="img" aria-label="Kurgusal çizgi film sunucu"><defs><linearGradient id="faceG" x2="1" y2="1"><stop stop-color="${p.a}"/><stop offset="1" stop-color="${p.b}"/></linearGradient></defs><path d="M67 108Q62 30 140 28Q218 30 213 108L206 194Q196 242 140 244Q84 242 74 194Z" fill="url(#faceG)" stroke="#d6f6ff" stroke-width="5"/><path d="M73 94Q79 31 144 35Q191 27 213 88Q180 65 150 72Q105 83 73 94Z" fill="#132b55"/><path d="M78 106Q91 85 111 101M169 101Q190 85 202 106" stroke="#132b55" stroke-width="7" stroke-linecap="round" fill="none"/>${eye}${mouth}<path d="M64 216Q140 183 216 216L241 280H39Z" fill="${p.b}" stroke="${p.a}" stroke-width="5"/><path d="M127 226L140 248L153 226" fill="none" stroke="#e5f8ff" stroke-width="5"/></svg>`;
 }
-function tdRenderAvatar(){const fig=$('tdAvatarFigure');if(fig)fig.innerHTML=tdSvgAvatar($('tdAvatarType').value);$('tdAvatarName').textContent=$('tdAvatarNameInput').value.trim()||'Tekden Avatar';}
-function tdSetSpeaking(on){$('tdAvatarStage').classList.toggle('speaking',!!on);$('tdAvatarSpeaking').textContent=on?'● KONUŞUYOR':'● HAZIR · KURGUSAL AVATAR';if(tdMouthFallback){clearInterval(tdMouthFallback);tdMouthFallback=null;}}
+function tdRenderAvatar(){if(window.tdUpdate3DAvatar)window.tdUpdate3DAvatar();else{const fig=$('tdAvatarFigure');if(fig&&!fig.querySelector('canvas'))fig.innerHTML=tdSvgAvatar($('tdAvatarType').value);}$('tdAvatarName').textContent=$('tdAvatarNameInput').value.trim()||'Tekden Avatar';}
+function tdSetSpeaking(on){$('tdAvatarStage').classList.toggle('speaking',!!on);$('tdAvatarSpeaking').textContent=on?'● KONUŞUYOR · 3D ANİMASYON':'● 3D AVATAR HAZIR';window.tdSet3DSpeaking?.(!!on);if(tdMouthFallback){clearInterval(tdMouthFallback);tdMouthFallback=null;}}
 function tdLoadVoices(){tdVoices=tdSynth?tdSynth.getVoices():[];const sel=$('tdAvatarVoice');if(!sel)return;const old=sel.value;sel.innerHTML='<option value="">Türkçe varsayılan ses</option>';const tr=tdVoices.filter(v=>/^tr(?:-|_)/i.test(v.lang));tr.forEach(v=>{const o=document.createElement('option');o.value=v.voiceURI||v.name;o.textContent=v.name+' · '+v.lang;sel.appendChild(o)});if(old&&[...sel.options].some(o=>o.value===old))sel.value=old;if(!tr.length)$('tdAvatarStatus').textContent='Bu cihazda Türkçe ses görünmüyor. Tarayıcı/işletim sistemi ses ayarlarından Türkçe ses eklenirse burada listelenebilir.';}
 if(tdSynth){tdLoadVoices();tdSynth.onvoiceschanged=tdLoadVoices;}
 function tdSelectedVoice(){const key=$('tdAvatarVoice').value;return tdVoices.find(v=>(v.voiceURI||v.name)===key)||tdVoices.find(v=>/^tr(?:-|_)/i.test(v.lang))||null;}
-function tdSpeakAvatar(text){if(!text.trim()){$('tdAvatarStatus').textContent='Önce konuşma metnini yaz.';return;}if(!tdSynth){$('tdAvatarStatus').textContent='Bu tarayıcı konuşma sentezini desteklemiyor.';return;}tdSynth.cancel();tdSetSpeaking(false);const u=new SpeechSynthesisUtterance(text);tdUtterance=u;u.lang='tr-TR';u.rate=Number($('tdAvatarRate').value)||1;u.pitch=Number($('tdAvatarPitch').value)||1;u.volume=1;const voice=tdSelectedVoice();if(voice)u.voice=voice;let sawBoundary=false;u.onstart=()=>{$('tdAvatarStatus').textContent='Avatar konuşuyor. Seslendirme cihazında gerçekleşiyor.';tdSetSpeaking(true);};u.onboundary=(ev)=>{sawBoundary=true;const f=$('tdAvatarFigure');f.classList.add('mouth-active');setTimeout(()=>f.classList.remove('mouth-active'),Math.max(90,Math.min(230,ev.charLength*18||130)));};u.onend=()=>{tdSetSpeaking(false);$('tdAvatarStatus').textContent='Konuşma tamamlandı.';tdUtterance=null;};u.onerror=()=>{tdSetSpeaking(false);$('tdAvatarStatus').textContent='Seslendirme tamamlanamadı. Farklı bir ses seçip tekrar dene.';tdUtterance=null;};tdSynth.speak(u);}
-$('tdAvatarNameInput').addEventListener('input',tdRenderAvatar);['tdAvatarType','tdAvatarStyle'].forEach(id=>$(id).addEventListener('change',tdRenderAvatar));$('tdAvatarRate').addEventListener('input',()=>$('tdAvatarRateLabel').textContent=Number($('tdAvatarRate').value).toFixed(2)+'×');$('tdAvatarPitch').addEventListener('input',()=>$('tdAvatarPitchLabel').textContent=Number($('tdAvatarPitch').value).toFixed(2));
+function tdSpeakAvatar(text){if(!text.trim()){$('tdAvatarStatus').textContent='Önce konuşma metnini yaz.';return;}if(!tdSynth){$('tdAvatarStatus').textContent='Bu tarayıcı konuşma sentezini desteklemiyor.';return;}tdSynth.cancel();tdSetSpeaking(false);const u=new SpeechSynthesisUtterance(text);tdUtterance=u;u.lang='tr-TR';u.rate=Number($('tdAvatarRate').value)||1;u.pitch=Number($('tdAvatarPitch').value)||1;u.volume=1;const voice=tdSelectedVoice();if(voice)u.voice=voice;let sawBoundary=false;u.onstart=()=>{$('tdAvatarStatus').textContent='Avatar konuşuyor. Seslendirme cihazında gerçekleşiyor.';tdSetSpeaking(true);};u.onboundary=(ev)=>{sawBoundary=true;window.tdAvatarMouthPulse?.(Math.max(90,Math.min(230,ev.charLength*18||130)));};u.onend=()=>{tdSetSpeaking(false);$('tdAvatarStatus').textContent='Konuşma tamamlandı.';tdUtterance=null;};u.onerror=()=>{tdSetSpeaking(false);$('tdAvatarStatus').textContent='Seslendirme tamamlanamadı. Farklı bir ses seçip tekrar dene.';tdUtterance=null;};tdSynth.speak(u);}
+$('tdAvatarNameInput').addEventListener('input',()=>{$('tdAvatarName').textContent=$('tdAvatarNameInput').value.trim()||'Tekden Avatar';});['tdAvatarType','tdAvatarStyle','tdAvatarSkin','tdAvatarHair','tdAvatarHairColor','tdAvatarEyes','tdAvatarOutfit'].forEach(id=>$(id).addEventListener('change',tdRenderAvatar));$('tdAvatarRate').addEventListener('input',()=>$('tdAvatarRateLabel').textContent=Number($('tdAvatarRate').value).toFixed(2)+'×');$('tdAvatarPitch').addEventListener('input',()=>$('tdAvatarPitchLabel').textContent=Number($('tdAvatarPitch').value).toFixed(2));
 document.querySelectorAll('[data-avatar-script]').forEach(b=>b.addEventListener('click',()=>{$('tdAvatarText').value=b.dataset.avatarScript;}));
 $('tdAvatarSpeak').onclick=()=>tdSpeakAvatar($('tdAvatarText').value);$('tdAvatarPreviewVoice').onclick=()=>tdSpeakAvatar('Merhaba! Ben '+($('tdAvatarNameInput').value.trim()||'Tekden Avatar')+'. Ses denemesi yapıyorum.');$('tdAvatarStop').onclick=()=>{tdSynth?.cancel();tdSetSpeaking(false);$('tdAvatarStatus').textContent='Konuşma durduruldu.';};tdRenderAvatar();
 async function api(url,opts={}){const r=await fetch(url,{...opts,credentials:'same-origin',headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.detail||'İstek başarısız oldu.');return d}
@@ -6567,7 +6585,119 @@ async function check(){try{const d=await api('/api/me');if(!d.user){location.hre
 document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{$('prompt').value=b.dataset.p;$('prompt').focus()});$('clear').onclick=()=>{$('prompt').value='';$('prompt').focus()};
 $('generate').onclick=async()=>{const prompt=$('prompt').value.trim();if(prompt.length<3){$('status').textContent='Önce oyunu biraz tarif et.';return}const btn=$('generate');btn.disabled=true;btn.textContent='⏳ Oyun hazırlanıyor…';$('status').textContent='Pro modeli oyun kodunu oluşturuyor. Bu işlem biraz sürebilir…';try{const d=await api('/api/game',{method:'POST',body:JSON.stringify({prompt})});currentHtml=d.html;$('preview').innerHTML='';frame=document.createElement('iframe');frame.title='Oynanabilir oyun';frame.setAttribute('sandbox','allow-scripts allow-pointer-lock');frame.srcdoc=currentHtml;$('preview').appendChild(frame);$('tools').style.display='flex';$('status').textContent='Oyun hazır. Kontrolleri deneyebilir, tam ekran açabilir veya HTML indirebilirsin.'}catch(e){$('status').textContent='Oyun oluşturulamadı: '+e.message}finally{btn.disabled=false;btn.textContent='✦ Oyunu oluştur'}};
 $('fullscreen').onclick=()=>frame?.requestFullscreen?.();$('download').onclick=()=>{const a=document.createElement('a'),url=URL.createObjectURL(new Blob([currentHtml],{type:'text/html;charset=utf-8'}));a.href=url;a.download='tekden-ai-pro-oyunu.html';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};check();
-</script></body></html>''')
+</script>
+<script type="module">
+(async()=>{
+ try{
+  const THREE = await import('https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js');
+  const host=document.getElementById('tdAvatarFigure'); if(!host)return;
+  const scene=new THREE.Scene();
+  scene.fog=new THREE.FogExp2(0x061426,0.055);
+  const camera=new THREE.PerspectiveCamera(32,1,0.1,80);camera.position.set(0,1.85,6.4);camera.lookAt(0,1.65,0);
+  const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true,preserveDrawingBuffer:true,powerPreference:'high-performance'});
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+  renderer.outputColorSpace=THREE.SRGBColorSpace;
+  renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.12;
+  renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+  renderer.domElement.setAttribute('aria-label','Fare veya dokunmayla döndürülebilen 3D Tekden avatarı');
+  host.replaceChildren(renderer.domElement);
+  const hemi=new THREE.HemisphereLight(0xbfeaff,0x10172b,2.0);scene.add(hemi);
+  const key=new THREE.DirectionalLight(0xffffff,3.2);key.position.set(-3.5,6,5);key.castShadow=true;key.shadow.mapSize.set(1024,1024);scene.add(key);
+  const rim=new THREE.PointLight(0x23caff,34,9);rim.position.set(2.7,3.4,-2);scene.add(rim);
+  const fill=new THREE.PointLight(0x8664ff,20,8);fill.position.set(-3,1.4,2);scene.add(fill);
+  const stageMat=new THREE.MeshStandardMaterial({color:0x0a1e36,metalness:.65,roughness:.34});
+  const platform=new THREE.Mesh(new THREE.CylinderGeometry(1.65,1.85,.12,80),stageMat);platform.position.y=-.1;platform.receiveShadow=true;scene.add(platform);
+  const ringMat=new THREE.MeshStandardMaterial({color:0x36d8ff,emissive:0x0874a8,emissiveIntensity:1.8,metalness:.65,roughness:.24});
+  const ring=new THREE.Mesh(new THREE.TorusGeometry(1.36,.018,10,120),ringMat);ring.rotation.x=Math.PI/2;ring.position.y=-.025;scene.add(ring);
+  const backRing=new THREE.Mesh(new THREE.TorusGeometry(1.85,.009,8,120),new THREE.MeshBasicMaterial({color:0x765dff,transparent:true,opacity:.8}));backRing.rotation.x=Math.PI/2;backRing.position.y=-.04;scene.add(backRing);
+  const starsGeo=new THREE.BufferGeometry(), starPos=[];for(let i=0;i<220;i++){const a=Math.random()*Math.PI*2,r=2.2+Math.random()*5;starPos.push(Math.cos(a)*r,Math.random()*5-1,Math.sin(a)*r-1.5)}starsGeo.setAttribute('position',new THREE.Float32BufferAttribute(starPos,3));const stars=new THREE.Points(starsGeo,new THREE.PointsMaterial({color:0x8ce8ff,size:.025,transparent:true,opacity:.8}));scene.add(stars);
+  const root=new THREE.Group();scene.add(root);let head=null,mouth=null,eyeGroups=[],body=null;
+  const mat=(color,metalness=0,roughness=.48,emissive=0,emissiveIntensity=0)=>new THREE.MeshStandardMaterial({color,metalness,roughness,emissive,emissiveIntensity});
+  const sph=(parent,scale,pos,material,seg=40)=>{const m=new THREE.Mesh(new THREE.SphereGeometry(1,seg,Math.max(24,Math.floor(seg*.75))),material);m.scale.set(...scale);m.position.set(...pos);m.castShadow=true;m.receiveShadow=true;parent.add(m);return m};
+  const cylBetween=(parent,a,b,r1,r2,material,radial=28)=>{const A=new THREE.Vector3(...a),B=new THREE.Vector3(...b),d=new THREE.Vector3().subVectors(B,A);const m=new THREE.Mesh(new THREE.CylinderGeometry(r2,r1,d.length(),radial,1),material);m.position.copy(A).add(B).multiplyScalar(.5);m.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0),d.normalize());m.castShadow=true;parent.add(m);return m};
+  const palettes={blue:{jacket:0x1162ba,glow:0x25caff,trim:0x8cecff},violet:{jacket:0x5734a5,glow:0xc48aff,trim:0xe3c2ff},mint:{jacket:0x117f75,glow:0x54ffe0,trim:0xb1ffec},sunset:{jacket:0xb94d70,glow:0xffa56d,trim:0xffd0a7}};
+  const skins={warm:0xc98462,light:0xf0c7a7,tan:0xa96d4e,deep:0x70442f,chrome:0xa9c8d8};
+  const hairs={dark:0x182235,brown:0x513021,silver:0xadbaca,blue:0x087fc9,purple:0x673a9b};
+  const eyes={blue:0x32a9ec,brown:0x75452b,green:0x32a77e,violet:0x9666e9};
+  function clearRoot(){while(root.children.length){const obj=root.children.pop();obj.traverse?.(o=>{if(o.geometry)o.geometry.dispose();if(o.material){if(Array.isArray(o.material))o.material.forEach(m=>m.dispose());else o.material.dispose();}})}}
+  function buildAvatar(){
+   const type=document.getElementById('tdAvatarType').value,pal=palettes[document.getElementById('tdAvatarStyle').value]||palettes.blue;
+   const skin=mat(skins[document.getElementById('tdAvatarSkin').value]||skins.warm,.02,.55), hairColor=mat(hairs[document.getElementById('tdAvatarHairColor').value]||hairs.dark,.08,.34), jacket=mat(pal.jacket,.52,.31,pal.glow,.12), jacketDark=mat(new THREE.Color(pal.jacket).multiplyScalar(.62),.36,.4), trim=mat(pal.trim,.52,.24,pal.glow,.45), white=mat(0xf4f8ff,.04,.22), iris=mat(eyes[document.getElementById('tdAvatarEyes').value]||eyes.blue,.3,.19), pupil=mat(0x07101f,.08,.12), mouthMat=mat(0x411b2a,.05,.36), lip=mat(0x8f4e56,.1,.35);
+   const robot=type==='robot',astro=type==='astro',pixel=type==='pixel';
+   const faceMat=robot?mat(0x9db8cb,.72,.22,0x164b72,.3):skin;
+   // Torso and clothing, shaped as layered 3D garments.
+   body=new THREE.Group();root.add(body);
+   sph(body,[.72,.79,.42],[0,.92,0],jacket,52);
+   sph(body,[.32,.57,.13],[0,1.0,.405],mat(0xe9f5ff,.06,.48),36);
+   sph(body,[.24,.34,.12],[0,.76,.50],jacketDark,36);
+   sph(body,[.085,.43,.045],[0,.98,.53],trim,24);
+   // Shoulders and sleeves.
+   sph(body,[.43,.34,.39],[-.68,1.27,0],jacket,36);sph(body,[.43,.34,.39],[.68,1.27,0],jacket,36);
+   cylBetween(body,[-.73,1.25,0],[-.96,.35,.04],.23,.19,jacket);cylBetween(body,[.73,1.25,0],[.96,.35,.04],.23,.19,jacket);
+   sph(body,[.19,.2,.19],[-.96,.29,.04],skin,28);sph(body,[.19,.2,.19],[.96,.29,.04],skin,28);
+   // Neck and head.
+   cylBetween(root,[0,1.48,0],[0,1.94,0],.22,.19,faceMat);
+   head=new THREE.Group();root.add(head);
+   sph(head,[.67,.83,.59],[0,2.48,0],faceMat,64);
+   // Jaw contour for a softly sculpted silhouette.
+   sph(head,[.53,.43,.49],[0,2.12,.10],faceMat,56);
+   sph(head,[.105,.17,.105],[-.66,2.42,0],faceMat,32);sph(head,[.105,.17,.105],[.66,2.42,0],faceMat,32);
+   // Eyes, iris, pupils and highlights.
+   eyeGroups=[];
+   for(const x of [-.245,.245]){const eye=new THREE.Group();eye.position.set(x,2.52,.515);head.add(eye);sph(eye,[.135,.16,.075],[0,0,0],white,36);sph(eye,[.073,.096,.042],[0,-.005,.066],iris,32);sph(eye,[.035,.06,.025],[0,-.004,.101],pupil,28);sph(eye,[.022,.025,.012],[-.022,.035,.124],mat(0xffffff,0,.05),18);eyeGroups.push(eye);}
+   // Nose and expressive mouth.
+   sph(head,[.085,.14,.11],[0,2.30,.60],faceMat,32);sph(head,[.10,.065,.09],[0,2.24,.64],faceMat,32);
+   mouth=sph(head,[.16,.047,.035],[0,2.04,.565],mouthMat,32);mouth.scale.set(.16,.025,.028);
+   const lipCurve=new THREE.CatmullRomCurve3([new THREE.Vector3(-.16,2.045,.587),new THREE.Vector3(-.08,2.015,.60),new THREE.Vector3(0,2.012,.605),new THREE.Vector3(.08,2.015,.60),new THREE.Vector3(.16,2.045,.587)]);
+   const lipMesh=new THREE.Mesh(new THREE.TubeGeometry(lipCurve,24,.012,8,false),lip);head.add(lipMesh);
+   // Eyebrows and hair silhouette.
+   const browMat=hairColor;
+   for(const x of [-.25,.25]){const brow=new THREE.Mesh(new THREE.CapsuleGeometry(.026,.22,4,10),browMat);brow.position.set(x,2.77,.53);brow.rotation.z=x<0?-.12:.12; brow.scale.set(1,.82,1);head.add(brow);}
+   sph(head,[.69,.34,.60],[0,3.02,-.01],hairColor,52);
+   const hairStyle=document.getElementById('tdAvatarHair').value;
+   if(hairStyle==='curly'){
+    for(let i=0;i<17;i++){const a=(i/17)*Math.PI*2;sph(head,[.16,.17,.16],[Math.cos(a)*.52,2.98+Math.sin(a)*.16,Math.sin(a)*.30-.02],hairColor,22)}
+    for(let i=0;i<7;i++)sph(head,[.14,.15,.14],[-.42+i*.14,3.16+Math.sin(i)*.035,.38],hairColor,22);
+   }else if(hairStyle==='long'||hairStyle==='bob'){
+    sph(head,[.16,.66,.25],[-.54,2.45,-.02],hairColor,32);sph(head,[.16,.66,.25],[.54,2.45,-.02],hairColor,32);
+    if(hairStyle==='bob'){sph(head,[.56,.14,.24],[0,2.04,-.02],hairColor,32)}else{for(const x of [-.55,.55]){const strand=new THREE.Mesh(new THREE.CylinderGeometry(.09,.12,.45,20),hairColor);strand.position.set(x,1.94,-.03);head.add(strand)}}
+    sph(head,[.53,.15,.18],[0,2.91,.45],hairColor,32);
+   }else if(hairStyle==='spiky'){
+    for(let i=0;i<7;i++){const spike=new THREE.Mesh(new THREE.ConeGeometry(.13,.42,20),hairColor);spike.position.set(-.47+i*.155,3.19+Math.sin(i*1.4)*.07,.05);spike.rotation.z=(i-3)*-.13;head.add(spike)}
+    sph(head,[.56,.19,.32],[0,2.94,.23],hairColor,32);
+   }else{
+    sph(head,[.55,.17,.25],[0,2.88,.39],hairColor,38);
+    sph(head,[.22,.18,.14],[-.37,2.82,.45],hairColor,28);sph(head,[.18,.16,.14],[.30,2.82,.46],hairColor,28);
+   }
+   // Character-specific accessories.
+   if(astro){const glass= new THREE.Mesh(new THREE.SphereGeometry(.78,48,40,0,Math.PI*2,0,Math.PI*.53),new THREE.MeshPhysicalMaterial({color:0x7cdfff,metalness:.2,roughness:.08,transparent:true,opacity:.16,transmission:.35,clearcoat:1,side:THREE.DoubleSide}));glass.position.set(0,2.48,0);head.add(glass);sph(body,[.20,.20,.10],[0,1.26,.43],trim,28)}
+   if(robot){for(const x of [-.7,.7]){const ear=new THREE.Mesh(new THREE.CylinderGeometry(.12,.12,.12,32),trim);ear.rotation.z=Math.PI/2;ear.position.set(x,2.43,0);head.add(ear)}sph(head,[.48,.06,.035],[0,2.25,.60],trim,32)}
+   if(pixel){for(let i=0;i<4;i++){const stud=sph(head,[.08,.08,.08],[-.42+i*.28,3.05,.25],trim,16);stud.scale.multiplyScalar(1.0)}}
+   // Chest emblem and subtle seams.
+   const emblem=new THREE.Mesh(new THREE.TorusGeometry(.105,.018,8,40),trim);emblem.position.set(0,1.20,.41);body.add(emblem);sph(body,[.045,.045,.035],[0,1.20,.43],trim,18);
+   const seamMat=mat(pal.trim,.35,.3,pal.glow,.22);
+   for(const side of [-1,1]){const seam=new THREE.Mesh(new THREE.CylinderGeometry(.009,.009,.65,8),seamMat);seam.position.set(side*.49,.92,.31);seam.rotation.z=side*.1;body.add(seam)}
+  }
+  buildAvatar();
+  let autoRotate=true,speaking=false,drag=false,lastX=0,lastY=0,mouthPulseUntil=0,blinkAt=performance.now()+1800,blinkEnd=0;
+  const resize=()=>{const w=Math.max(1,host.clientWidth),h=Math.max(1,host.clientHeight);renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();};new ResizeObserver(resize).observe(host);resize();
+  renderer.domElement.addEventListener('pointerdown',e=>{drag=true;lastX=e.clientX;lastY=e.clientY;renderer.domElement.setPointerCapture(e.pointerId)});
+  renderer.domElement.addEventListener('pointermove',e=>{if(!drag)return;root.rotation.y+=(e.clientX-lastX)*.009;camera.position.y=THREE.MathUtils.clamp(camera.position.y-(e.clientY-lastY)*.006,1.3,2.5);camera.lookAt(0,1.65,0);lastX=e.clientX;lastY=e.clientY});
+  const endDrag=()=>drag=false;renderer.domElement.addEventListener('pointerup',endDrag);renderer.domElement.addEventListener('pointercancel',endDrag);
+  renderer.domElement.addEventListener('wheel',e=>{e.preventDefault();camera.position.z=THREE.MathUtils.clamp(camera.position.z+e.deltaY*.004,4.8,8.4);camera.lookAt(0,1.65,0)},{passive:false});
+  window.tdUpdate3DAvatar=()=>{if(root){const ry=root.rotation.y;while(root.children.length){const obj=root.children.pop();obj.traverse?.(o=>{if(o.geometry)o.geometry.dispose();if(o.material)o.material.dispose?.()})}buildAvatar();root.rotation.y=ry;}};
+  window.tdSet3DSpeaking=v=>{speaking=!!v};window.tdAvatarMouthPulse=ms=>{mouthPulseUntil=performance.now()+ms};
+  document.getElementById('td3dReset').onclick=()=>{root.rotation.set(0,0,0);camera.position.set(0,1.85,6.4);camera.lookAt(0,1.65,0)};
+  document.getElementById('td3dRotate').onclick=e=>{autoRotate=!autoRotate;e.currentTarget.textContent='⟳ Otomatik döndür: '+(autoRotate?'Açık':'Kapalı')};
+  document.getElementById('td3dShot').onclick=()=>{renderer.render(scene,camera);const a=document.createElement('a');a.href=renderer.domElement.toDataURL('image/png');a.download='tekden-ai-3d-avatar.png';a.click()};
+  const clock=new THREE.Clock();function animate(){requestAnimationFrame(animate);const t=clock.getElapsedTime(),now=performance.now();if(autoRotate&&!drag)root.rotation.y+=.0018;root.position.y=Math.sin(t*1.35)*.018;head.rotation.y=Math.sin(t*.72)*.035;head.rotation.x=Math.sin(t*.9)*.012;body.rotation.z=Math.sin(t*.65)*.008;ring.rotation.z=t*.12;backRing.rotation.z=-t*.075;stars.rotation.y=t*.012;
+   if(now>blinkAt){blinkEnd=now+135;blinkAt=now+2600+Math.random()*2400}const blink=now<blinkEnd?Math.sin((now-(blinkEnd-135))/135*Math.PI):0;eyeGroups.forEach(e=>e.scale.y=1-.91*blink);
+   if(mouth){const active=speaking||now<mouthPulseUntil;mouth.scale.y=active?.045+Math.abs(Math.sin(t*17))*.075:.025;}
+   renderer.render(scene,camera)}animate();
+ }catch(err){console.error('3D avatar yüklenemedi',err);const status=document.getElementById('tdAvatarStatus');if(status)status.textContent='3D motor yüklenemedi. İnternet bağlantısını ve WebGL desteğini kontrol et; eski avatar görüntüsüne geri dönülüyor.';}
+})();
+</script>
+</body></html>''')
 
 
 MIND_LAB_HTML = r"""
