@@ -111,8 +111,26 @@ PROFANITY_RE = re.compile(
 )
 
 
+def normalize_moderation_text(value: str) -> str:
+    value = (value or "").casefold().translate(str.maketrans({"ı":"i", "ş":"s", "ğ":"g", "ü":"u", "ö":"o", "ç":"c", "0":"o", "1":"i", "3":"e", "4":"a", "@":"a", "$":"s"}))
+    # Collapse punctuation/spacing between letters to catch common obfuscation without storing message contents.
+    return re.sub(r"[^a-z]+", "", value)
+
+NORMALIZED_PROFANITY = tuple("amk aq oc orospu siktir sikik sikerim yarrak pic kahpe pezevenk got bok ibne gerizekali fuck shit bitch asshole motherfucker".split())
+
+def contains_profanity(value: str) -> bool:
+    value = (value or "").casefold().translate(str.maketrans({"ı":"i", "ş":"s", "ğ":"g", "ü":"u", "ö":"o", "ç":"c", "0":"o", "1":"i", "3":"e", "4":"a", "@":"a", "$":"s"}))
+    if PROFANITY_RE.search(value):
+        return True
+    # Detect common punctuation/space obfuscation while preserving word boundaries.
+    for term in NORMALIZED_PROFANITY:
+        pattern = r"(?<![a-z])" + r"[^a-z]{0,2}".join(map(re.escape, term)) + r"(?![a-z])"
+        if re.search(pattern, value):
+            return True
+    return False
+
 def client_ip(request: Request) -> str:
-    # Prefer the address exposed by the ASGI server/proxy integration; do not trust arbitrary X-Forwarded-For input.
+    # Do not trust arbitrary X-Forwarded-For input; this is a network address, not a unique device ID.
     return request.client.host if request.client else "unknown"
 
 
@@ -129,6 +147,13 @@ def active_ip_ban(ip: str):
         conn.execute("DELETE FROM moderation_bans WHERE ip_address=%s AND expires_at <= NOW()", (ip,))
     return None
 
+def active_user_ban(user_id: int):
+    if not DATABASE_URL or not user_id:
+        return None
+    with db() as conn:
+        row = conn.execute("SELECT expires_at FROM moderation_bans WHERE user_id=%s AND expires_at>NOW() ORDER BY expires_at DESC LIMIT 1", (user_id,)).fetchone()
+        return row["expires_at"] if row else None
+
 
 @app.middleware("http")
 async def enforce_moderation_ban(request: Request, call_next):
@@ -136,6 +161,13 @@ async def enforce_moderation_ban(request: Request, call_next):
     if request.url.path not in ("/health", "/api/health/db", "/api/health/deep"):
         try:
             expires = active_ip_ban(client_ip(request))
+            if not expires:
+                try:
+                    session_user = current_user(request)
+                    if session_user:
+                        expires = active_user_ban(session_user["id"])
+                except Exception:
+                    expires = None
             if expires:
                 return JSONResponse(
                     status_code=403,
@@ -148,16 +180,26 @@ async def enforce_moderation_ban(request: Request, call_next):
     return await call_next(request)
 
 
-def ban_ip_for_month(ip: str):
-    if not DATABASE_URL or ip == "unknown":
+def ban_ip_for_month(ip: str, user_id: int | None = None):
+    if not DATABASE_URL or (ip == "unknown" and not user_id):
         return
     with db() as conn:
-        conn.execute("""
-            INSERT INTO moderation_bans(ip_address, reason, banned_at, expires_at)
-            VALUES(%s, 'Hakaret/küfür içeren mesaj', NOW(), NOW() + INTERVAL '30 days')
-            ON CONFLICT(ip_address) DO UPDATE SET
-                reason=EXCLUDED.reason, banned_at=NOW(), expires_at=NOW() + INTERVAL '30 days'
-        """, (ip,))
+        if ip != "unknown":
+            conn.execute("""
+                INSERT INTO moderation_bans(ip_address, user_id, reason, banned_at, expires_at)
+                VALUES(%s, %s, 'Hakaret/küfür içeren mesaj', NOW(), NOW() + INTERVAL '30 days')
+                ON CONFLICT(ip_address) DO UPDATE SET
+                    user_id=COALESCE(EXCLUDED.user_id, moderation_bans.user_id),
+                    reason=EXCLUDED.reason, banned_at=NOW(), expires_at=NOW() + INTERVAL '30 days'
+            """, (ip, user_id))
+        elif user_id:
+            # The account-level record also blocks the account from every route after sign-in.
+            conn.execute("""
+                INSERT INTO moderation_bans(ip_address, user_id, reason, banned_at, expires_at)
+                VALUES('account:' || %s::text, %s, 'Hakaret/küfür içeren mesaj', NOW(), NOW() + INTERVAL '30 days')
+                ON CONFLICT(ip_address) DO UPDATE SET user_id=EXCLUDED.user_id, reason=EXCLUDED.reason,
+                    banned_at=NOW(), expires_at=NOW() + INTERVAL '30 days'
+            """, (user_id, user_id))
 
 
 def init_db():
@@ -205,7 +247,9 @@ def init_db():
             expires_at TIMESTAMPTZ NOT NULL,
             UNIQUE(ip_address)
         )""")
+        conn.execute("ALTER TABLE moderation_bans ADD COLUMN IF NOT EXISTS user_id BIGINT REFERENCES users(id) ON DELETE CASCADE")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_moderation_bans_expiry ON moderation_bans(expires_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_moderation_bans_user ON moderation_bans(user_id, expires_at)")
         # Optional account features are stored separately so older accounts migrate safely.
         conn.execute("""
         CREATE TABLE IF NOT EXISTS user_preferences (
@@ -1034,6 +1078,12 @@ def login(body: AuthBody):
         row = conn.execute("SELECT id, username, password_hash, plan FROM users WHERE lower(username)=lower(%s)", (body.username.strip(),)).fetchone()
     if not row or not verify_password(body.password, row["password_hash"]):
         raise HTTPException(401, "Kullanıcı adı veya şifre hatalı.")
+    try:
+        banned_until = active_user_ban(row["id"])
+    except Exception:
+        banned_until = None
+    if banned_until:
+        raise HTTPException(403, "Bu hesap için moderasyon nedeniyle geçici erişim engeli var. Bitiş: " + banned_until.isoformat())
     out = JSONResponse({"ok": True, "user": {"id": row["id"], "username": row["username"], "plan": ("plus" if row["username"].lower()==OWNER_USERNAME.lower() and OWNER_PASSWORD else row.get("plan", "free"))}})
     out.set_cookie(COOKIE_NAME, make_session(row["id"]), httponly=True, secure=True, samesite="lax", max_age=SESSION_DAYS*86400)
     return out
@@ -1290,16 +1340,16 @@ def epistemic_audit(user_question: str, answer: str, sources: list, model: str |
 @app.post("/api/chat")
 def chat(body: ChatBody, request: Request):
     user_message = body.message.strip()
-    if PROFANITY_RE.search(user_message):
+    user = current_user(request)
+    if contains_profanity(user_message):
         try:
-            ban_ip_for_month(client_ip(request))
+            ban_ip_for_month(client_ip(request), user["id"] if user else None)
         except Exception as exc:
             print("[Tekden AI] Moderasyon banı kaydedilemedi:", type(exc).__name__)
         raise HTTPException(
             status_code=403,
             detail="Mesajında küfür veya hakaret tespit edildi. Tekden AI erişimin 30 gün boyunca engellendi."
         )
-    user = current_user(request)
     plan = "plus" if user and user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else (user or {}).get("plan", "free")
     account_preferences = None
     if user:
@@ -1359,6 +1409,18 @@ Yazım ve anlatım kuralları:
         "expression_serious": "Kamerada kaş çatmaya benzer yüz hareketleri algılandı. Bu, kullanıcının kesinlikle kızgın olduğu anlamına gelmez. Suçlayıcı veya sorgulayıcı olmadan sakin, nazik ve açık bir üslup kullan; kullanıcıya duygu atfetme. ",
         "expression_furrowed_brows": "Kamerada kaşların çatılmasına benzeyen mimik ipuçları algılandı. Bunun öfke olduğunu kesin kabul etme; kullanıcıya kızgın olduğunu söyleme. Sakin, anlayışlı ve doğrudan bir üslup kullan.",
         "expression_yawning": "Kamerada bir süre devam eden ağız açılması/esneme hareketine benzeyen ipuçları algılandı. Bunun kesin yorgunluk kanıtı olmadığını unut. Yanıtı daha kısa, sade ve kolay takip edilir tut; kullanıcıya yorgun olduğunu kesinmiş gibi söyleme.",
+        "expression_sad_like": "Yüzde ağız köşelerinin aşağı yönelmesi ve iç kaşların yükselmesi gibi üzgün ifadeye benzeyen ipuçları algılandı. Kullanıcının üzgün olduğunu varsayma. Uygunsa nazik ve destekleyici bir üslup kullan.",
+        "expression_fear_like": "Yüzde gözlerin açılması ve kaşların yükselmesi gibi ürkme ifadesine benzeyen ipuçları algılandı. Gerçek korku olduğunu varsayma; sakin ve açık bir üslup kullan.",
+        "expression_disgust_like": "Burun kırıştırma ve üst dudak hareketi gibi hoşnutsuzluk ifadesine benzeyen ipuçları algılandı. Duygu atfetme; nötr ve saygılı yanıt ver.",
+        "expression_contempt_like": "Tek taraflı ağız hareketi gibi bir mimik ipucu algılandı. Bunu küçümseme olarak yorumlama; nötr ve nazik yanıt ver.",
+        "expression_confused_like": "Kaş asimetrisi/çatılması ve dudak hareketi gibi düşünme ifadesine benzeyen ipuçları algılandı. Açıklamayı adım adım ve net ver; kullanıcının kafasının karıştığını kesin söyleme.",
+        "expression_neutral": "Belirgin yüz hareketi sınıflandırılmadı; normal üslupla yanıt ver.",
+        "expression_sad_like": "Yüzde ağız köşelerinin aşağı yönelmesi ve iç kaşların yükselmesi gibi üzgün ifadeye benzeyen ipuçları algılandı. Kullanıcının üzgün olduğunu varsayma veya bunu söyleme. Uygunsa nazik, destekleyici ve yargılamayan bir üslup kullan.",
+        "expression_fear_like": "Yüzde gözlerin açılması ve kaşların yükselmesi gibi korku/ürkme ifadesine benzeyen ipuçları algılandı. Gerçek korku olduğunu varsayma. Sakin, açık ve güven verici bir anlatım kullan; acil bir konuysa ciddiyetini koru.",
+        "expression_disgust_like": "Burun kırıştırma ve üst dudak kaldırma gibi hoşnutsuzluk ifadesine benzeyen ipuçları algılandı. Kullanıcının tiksindiğini varsayma. Nötr, saygılı ve doğrudan yanıt ver.",
+        "expression_contempt_like": "Yüzün bir tarafında ağız köşesi hareketi gibi tek taraflı mimik ipucu algılandı. Bunu küçümseme veya alay olarak yorumlama; nötr ve nazik yanıt ver.",
+        "expression_confused_like": "Kaşlarda asimetri veya çatılma ve dudak sıkma gibi düşünme/kararsızlık ifadesine benzeyen ipuçları algılandı. Kullanıcının kafasının karıştığını kesin kabul etme; açıklamayı adım adım ve net ver.",
+        "expression_neutral": "Belirgin yüz hareketi sınıflandırılmadı. Normal, doğal üslupla yanıt ver.",
         "pulse_style_selected": "Kullanıcının yerel cihazında kendi belirlediği nabız eşiği aşılmış ve kendi seçtiği anlatım tercihi etkinleşmiş. Nabız değerini bilmiyorsun; sağlık yorumu yapma. Yalnızca seçilen anlatım tercihini uygula.",
         "typing_slow": "Kullanıcının yazma alanındaki son tuş zamanlamaları yavaş bir yazma temposu gösteriyor. Bunun nedenini çıkarma. Daha kısa, adım adım ve kolay düzenlenebilir yanıt ver.",
         "typing_fast": "Kullanıcının yazma alanındaki son tuş zamanlamaları hızlı bir yazma temposu gösteriyor. Duygu veya kişilik çıkarımı yapma. Yanıtı doğrudan ve düzenli sun.",
@@ -1767,7 +1829,12 @@ def mind_advanced_synapse(body: AdvancedSynapseBody, request: Request):
         "schrodinger_code": "Aynı kod tabanının iki zıt mimari adayını ayrı alternatifler olarak üret; her birinin güçlü/zayıf yönlerini, başarısızlık modlarını ve testlerini karşılaştır. Aynı çalışan kodun aynı anda çelişkili iki gerçek durumda olduğunu veya gözlemcinin fiziksel gerçekliği seçtiğini iddia etme. Varsayılan olarak hiçbir adayı ana projeye yazma.",
         "causality_loop": "Kod yazılırken statik analiz, tip kontrolü, lint, bağımlılık politikası ve testlerden gelen erken uyarıları tasarla. Gelecekten veri aldığını iddia etme; yalnızca mevcut koddaki örüntülerden olası hataları önceden işaretle. Uyarıların kanıtını ve yanlış pozitif olasılığını belirt.",
         "neural_telepathy": "İki kullanıcının ortak proje üzerinde eşzamanlı çalışması için izinli gerçek zamanlı işbirliği protokolü tasarla: açıkça paylaşılan proje durumu, presence, değişiklik akışı, çatışma çözümü ve erişim kontrolleri. Zihin okuma veya düşünce telepatisi iddia etme; yalnızca kullanıcıların gönderdiği veriyi eşitle.",
-        "mass_matter": "Dijital donanım tasarımını üretilebilir çıktılara dönüştür: blok şema, PCB/HDL taslağı, BOM, 3B baskı dosyası gereksinimleri ve prototip doğrulama planı. Bilgiden fiziksel madde ürettiğini iddia etme; gerçek üretim için fabrika, malzeme ve donanım gerekir."
+        "mass_matter": "Dijital donanım tasarımını üretilebilir çıktılara dönüştür: blok şema, PCB/HDL taslağı, BOM, 3B baskı dosyası gereksinimleri ve prototip doğrulama planı. Bilgiden fiziksel madde ürettiğini iddia etme; gerçek üretim için fabrika, malzeme ve donanım gerekir.",
+        "ex_nihilo": "Kullanıcının hedefinden hareketle sıfırdan tasarlanmış küçük bir biçimsel dil, gramer, sözdizimi, tip sistemi, örnek programlar ve Python/JavaScript üzerinde çalışan bir yorumlayıcı prototipi tasarla. Bunun evrenin boşluğundan veya insanlık bilgisinden bağımsız yaratım olmadığını; mevcut bilgisayar bilimi ilkelerinden yararlanan özgün bir tasarım olduğunu açıkça belirt. Çıktıda dil adı, EBNF grameri, 5 örnek komut, yorumlayıcı taslağı, testler ve sınırlamalar bulunsun.",
+        "subjective_reality": "Kullanıcının tercih ettiği tür ve temaya göre tarih çizelgesi, coğrafya, kültür, ekonomi, fizik kuralları, karakterler, çatışmalar ve olay simülasyonu olan etkileşimli bir alternatif evren oluştur. Bunu metin/oyun simülasyonu olarak sun; kullanıcının zihnine bağlanma, gerçek 50 yıl yaşatma veya dış zamandan bağımsız bilinç deneyimi iddia etme. Başlangıç sahnesi, dünya ansiklopedisi, karakter kartları, seçim sistemi ve devamlılık kaydı üret.",
+        "chronos_rewrite": "Bir yazılım veya kararın 1, 3, 5 ve 10 yıllık koşullu etki senaryolarını üret. Her senaryoda varsayımlar, olası zincirleme etkiler, belirsizlikler, erken uyarı göstergeleri, istenmeyen sonuçlar ve bugünden alınabilecek önlemler bulunsun. Geleceği kesin bildiğini veya tarihi değiştirdiğini iddia etme; senaryoları olasılık ve varsayım olarak etiketle.",
+        "digital_bio_transcoder": "Dijital algoritma ile DNA/biyoloji arasındaki kavramsal ilişkiyi yalnızca güvenli, teorik ve laboratuvar dışı düzeyde açıkla. Biyolojik sistemlerde bilgi kodlama, biyoinformatik veri temsili, etik, biyogüvenlik ve yasal gözetim başlıklarını içeren üst düzey mimari/öğrenme planı hazırla. Canlı organizma, virüs, bakteri veya genetik materyal üretme/değiştirme talimatı, dizisi, protokolü ya da deney adımı verme; dijital kodun doğrudan hücreye yüklenebileceğini iddia etme.",
+        "omniscience_core": "Kullanıcının sorusu için mevcut bilgi kaynaklarından araştırma planı, bilinenler, bilinmeyenler, kaynak güvenilirliği, çelişkiler ve doğrulama adımları oluştur. Erişilemeyen, henüz keşfedilmemiş veya gelecekteki bilgiyi bildiğini; ışık hızını aştığını veya tüm evrenin bilgisine eriştiğini iddia etme. Kaynak verilmediyse hangi kaynak türlerinin gerekli olduğunu açıkla."
     }
     if body.feature not in modes:
         raise HTTPException(400, "Bilinmeyen gelişmiş araç seçimi.")
@@ -6412,16 +6479,22 @@ def pro_studio():
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top left,#eaf4ff 0,transparent 42%),#f8fbff;color:#122744;font:15px/1.5 Inter,system-ui,sans-serif}button,textarea{font:inherit}button{cursor:pointer;border:0;border-radius:12px;padding:11px 15px;background:#0878f9;color:white;font-weight:750}button:disabled{opacity:.55;cursor:wait}.secondary{background:#fff;color:#24466e;border:1px solid #d7e6f8}.shell{max-width:1250px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.brand{font-weight:900;font-size:22px}.brand span{color:#0878f9}.pill{background:#efe6ff;color:#6834bd;padding:5px 10px;border-radius:99px;font-size:12px;font-weight:850}.hero{padding:35px 0 24px}.hero h1{font-size:clamp(30px,4vw,48px);letter-spacing:-1.4px;margin:0 0 8px}.hero p{color:#607590;max-width:700px;margin:0}.grid{display:grid;grid-template-columns:minmax(280px,370px) minmax(0,1fr);gap:18px;align-items:start}.card{background:#fff;border:1px solid #dce9f8;border-radius:20px;padding:20px;box-shadow:0 12px 34px #254c7c0b}.card h2{margin:0 0 5px;font-size:18px}.muted{color:#607590;font-size:13px}.presets{display:flex;gap:7px;flex-wrap:wrap;margin:15px 0}.presets button{font-size:12px;padding:8px 10px}.textarea{width:100%;min-height:190px;resize:vertical;border:1px solid #d6e5f8;border-radius:13px;padding:13px;outline:none}.textarea:focus{border-color:#76b7ff;box-shadow:0 0 0 3px #e3f1ff}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.status{min-height:22px;color:#526784;font-size:13px;margin-top:10px}.preview{min-height:530px;border:1px dashed #bdd5f0;border-radius:15px;background:linear-gradient(135deg,#f5f9ff,#fff);display:grid;place-items:center;overflow:hidden}.preview iframe{width:100%;height:650px;border:0;background:#07111f}.empty{text-align:center;padding:30px;color:#69809b}.empty .icon{font-size:42px}.smallnote{font-size:12px;color:#7386a0;margin-top:10px}@media(max-width:850px){.shell{padding:14px}.grid{grid-template-columns:1fr}.preview{min-height:350px}.preview iframe{height:65vh}}
 .garage-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}.garage-item{border:1px solid #355b79;border-radius:12px;padding:10px;background:#0b1b2d;color:#eaf6ff;text-align:left;cursor:pointer}.garage-item:disabled{opacity:.45;cursor:not-allowed}.garage-item strong{display:block;margin-bottom:4px}.toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:3;background:#061423ed;border:1px solid #4de8ff;border-radius:999px;padding:8px 13px;color:#fff;pointer-events:none;white-space:nowrap}.badge-row{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}.mini-badge{background:#172c43;border:1px solid #375675;border-radius:8px;padding:6px 8px;font-size:12px}
 </style></head><body><div class="shell"><header class="top"><div class="brand">Tekden <span>AI</span> <span class="pill">✦ PRO STÜDYO</span></div><div style="display:flex;gap:8px"><button class="secondary" onclick="location.href='/'">← Sohbete dön</button></div></header>
-<section class="hero"><h1>Fikrini <span style="color:#0878f9">oyuna veya şarkıya</span> dönüştür.</h1><p>Pro Stüdyo oyun tasarlamanı ve yapılandırılmış müzik motoruyla vokalli şarkı üretmeni sağlar. Üretim Tekden AI arayüzünde gerçekleşir; ses motoru eroq Music API üzerinden bağlanır (Render Environment: EROQ_API_KEY).</p></section><div class="actions" style="margin:0 0 18px"><button id="gameMode">🎮 Oyun stüdyosu</button><button class="secondary" id="songMode">🎵 Şarkı stüdyosu</button></div>
+<section class="hero"><h1>Fikrini <span style="color:#0878f9">oyuna, şarkıya veya avatara</span> dönüştür.</h1><p>Pro Stüdyo oyun tasarlamanı ve yapılandırılmış müzik motoruyla vokalli şarkı üretmeni sağlar. Üretim Tekden AI arayüzünde gerçekleşir; ses motoru eroq Music API üzerinden bağlanır (Render Environment: EROQ_API_KEY).</p></section><div class="actions" style="margin:0 0 18px"><button id="gameMode">🎮 Oyun stüdyosu</button><button class="secondary" id="songMode">🎵 Şarkı stüdyosu</button><button class="secondary" id="avatarMode">🧑‍🚀 Avatar stüdyosu</button></div>
+<section id="avatarPanel" class="card" style="display:none;margin-bottom:18px"><h2>🧑‍🚀 Tekden AI Avatar Stüdyosu</h2><p class="muted">Metnini seçtiğin stilize avatar, tarayıcının seslendirme motoruyla konuşur. Bu sürüm gerçek yüz/voice cloning veya HeyGen tarzı fotogerçekçi video üretimi değildir; bunlar için ayrı, izinli bir avatar-video sağlayıcısı ve API anahtarı gerekir.</p><div style="display:grid;grid-template-columns:minmax(220px,320px) 1fr;gap:18px;align-items:start"><div style="background:radial-gradient(circle at 50% 25%,#2856a0,#07152d);border-radius:20px;padding:20px;text-align:center;color:white;min-height:300px"><div id="tdAvatar" style="width:170px;height:190px;margin:10px auto 16px;position:relative;border-radius:90px 90px 60px 60px;background:linear-gradient(145deg,#c6e9ff,#6c9be9);box-shadow:0 0 35px #45c9ff66"><div style="position:absolute;top:76px;left:35px;width:100px;display:flex;justify-content:space-between"><i style="width:18px;height:9px;border-radius:50%;background:#12294c"></i><i style="width:18px;height:9px;border-radius:50%;background:#12294c"></i></div><div id="tdAvatarMouth" style="position:absolute;left:68px;top:120px;width:34px;height:8px;border-radius:0 0 20px 20px;background:#8d3156;transition:height .08s"></div></div><b id="tdAvatarName">Tekden Avatar</b><div class="muted" style="color:#c8d8f0">Konuşmaya hazır</div></div><div><label for="tdAvatarNameInput">Avatar adı</label><input id="tdAvatarNameInput" class="textarea" style="min-height:42px;width:100%" maxlength="40" value="Benim Avatarım"><label for="tdAvatarStyle">Görünüm</label><select id="tdAvatarStyle" class="textarea" style="min-height:44px;width:100%"><option value="blue">Tekden mavi</option><option value="violet">Mor gelecek</option><option value="mint">Mint teknoloji</option></select><label for="tdAvatarVoice">Ses</label><select id="tdAvatarVoice" class="textarea" style="min-height:44px;width:100%"><option value="">Varsayılan Türkçe ses</option></select><label for="tdAvatarText">Konuşma metni</label><textarea id="tdAvatarText" class="textarea" placeholder="Avatarın söylemesini istediğin metni yaz…"></textarea><div class="actions"><button id="tdAvatarSpeak">▶ Avatarı konuştur</button><button class="secondary" id="tdAvatarStop">■ Durdur</button></div><div id="tdAvatarStatus" class="status">Seslendirme tarayıcının yerel konuşma motoruyla yapılır.</div></div></div></section>
 <section id="songPanel" class="card" style="display:none;margin-bottom:18px"><h2>🎵 Şarkı oluştur</h2><p class="muted">Bu araç yalnızca Pro üyelerine açıktır. Şarkı sözlerini ve tarzını gir; EROQ_API_KEY yapılandırıldığında vokalli ses dosyası Tekden AI ekranında oynatılır. 90 saniyelik tek üretim yaklaşık 9 kredi kullanır.</p><div class="presets"><button class="secondary" data-song="Motivasyon veren modern pop şarkısı, Türkçe, umutlu ve enerjik, 110 BPM.">✨ Pop</button><button class="secondary" data-song="Sinematik epik film müziği için söz ve aranjman taslağı; güçlü koro hissi, Türkçe.">🎬 Epik</button><button class="secondary" data-song="Sakin akustik gitar eşlikli, dostluk ve umut üzerine duygusal Türkçe şarkı.">🎸 Akustik</button><button class="secondary" data-song="Neşeli çocuk şarkısı; kolay nakarat, pozitif mesaj ve basit akorlar.">🌈 Neşeli</button></div><input id="songPrompt" class="textarea" placeholder="Şarkı adı / konusu" style="width:100%;margin:8px 0;padding:12px"><input id="songStylePro" class="textarea" value="Turkish arabesk, emotional male-female duet, bağlama, piano, expressive vocals" style="width:100%;margin:8px 0;padding:12px"><textarea id="songLyricsPro" class="textarea" placeholder="Şarkı sözleri" style="width:100%;margin:8px 0;padding:12px"></textarea><div class="actions"><button id="makeSong">🎵 Vokalli şarkı üret</button></div><audio id="proSongAudio" controls style="display:none;width:100%;margin-top:12px"></audio><a id="proSongDownload" style="display:none" download="tekden-ai-sarki.mp3">Şarkıyı indir ↓</a><div id="songResult" style="white-space:pre-wrap;overflow-wrap:anywhere"></div><div id="songStatus" class="status">Pro üyelerine özel · eroq API anahtarı EROQ_API_KEY ortam değişkeninde saklanmalıdır.</div></section><div id="gamePanel" class="grid"><section class="card"><h2>🎮 Oyun tasarım briefi</h2><div class="muted">Ne kadar ayrıntılı tarif edersen oyun hedefin o kadar net olur.</div><div class="presets"><button class="secondary" data-p="3D hissiyatlı neon araba yarışı; trafik, çarpışma, nitro, puan ve seviye sistemi olsun.">🏎️ Yarış</button><button class="secondary" data-p="Animasyonlu 2.5D orman platform oyunu; zıplama, düşmanlar, altın toplama ve 3 bölüm olsun.">🌲 Platform</button><button class="secondary" data-p="Dalga dalga gelen düşmanlara karşı savunma oyunu; hareket, atış, can, güçlendirmeler ve boss olsun.">⚔️ Aksiyon</button><button class="secondary" data-p="Bulmacalı keşif oyunu; etkileşimli nesneler, envanter, ipuçları ve kazanma koşulu olsun.">🧩 Bulmaca</button></div><textarea id="prompt" class="textarea" placeholder="Örnek: Gün batımındaki İstanbul'da geçen, üçüncü şahıs kameralı bir araba oyunu. Trafik, drift, nitro, görevler, para ve garaj sistemi olsun..."></textarea><div class="actions"><button id="generate">✦ Oyunu oluştur</button><button class="secondary" id="clear">Temizle</button></div><div id="status" class="status">Hazır · Pro oyun üretimi</div><div class="smallnote">Üretim, yapılandırılmış Pro modelinin kullanılabilirliğine ve servis limitlerine bağlıdır. Üretilen oyunu çalıştırıp kontrol etmen önerilir.</div></section>
 <section class="card"><div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px"><div><h2>Oyun önizlemesi</h2><div class="muted">Oyun hazır olduğunda burada oynayabilirsin.</div></div><div id="tools" style="display:none;gap:8px"><button class="secondary" id="fullscreen">⛶ Tam ekran</button><button class="secondary" id="download">↓ HTML indir</button></div></div><div id="preview" class="preview"><div class="empty"><div class="icon">✧</div><b>Yeni bir oyun tasarla</b><p class="muted">Oluşturduğun oyun bu alanda açılacak.</p></div></div></section></div></div>
 <script>
 const $=id=>document.getElementById(id);let currentHtml='';let frame=null;
 $('gameMode').onclick=()=>{$('gamePanel').style.display='grid';$('songPanel').style.display='none';$('gameMode').className='';$('songMode').className='secondary'};
 $('songMode').onclick=()=>{$('gamePanel').style.display='none';$('songPanel').style.display='block';$('songMode').className='';$('gameMode').className='secondary'};
+$('avatarMode').onclick=()=>{$('gamePanel').style.display='none';$('songPanel').style.display='none';$('avatarPanel').style.display='block';$('avatarMode').className='';$('gameMode').className='secondary';$('songMode').className='secondary'};
+$('gameMode').onclick=()=>{$('gamePanel').style.display='grid';$('songPanel').style.display='none';$('avatarPanel').style.display='none';$('gameMode').className='';$('songMode').className='secondary';$('avatarMode').className='secondary'};
+$('songMode').onclick=()=>{$('gamePanel').style.display='none';$('songPanel').style.display='block';$('avatarPanel').style.display='none';$('songMode').className='';$('gameMode').className='secondary';$('avatarMode').className='secondary'};
 document.querySelectorAll('[data-song]').forEach(b=>b.onclick=()=>{$('songPrompt').value=b.dataset.song;$('songPrompt').focus()});
 async function waitForVocalSong(generationId,statusEl,player,download){const deadline=Date.now()+15*60*1000;let transientFailures=0;while(Date.now()<deadline){await new Promise(r=>setTimeout(r,6000));try{const s=await api('/api/studio/song/status/'+encodeURIComponent(generationId));transientFailures=0;if(s.status==='succeeded'&&s.audio_url){player.src=s.audio_url;player.style.display='block';download.href=s.audio_url;download.style.display='inline-block';download.style.marginTop='10px';statusEl.textContent='Şarkı hazır! Buradan dinleyebilir veya indirebilirsin.';player.load();return}if(s.status==='failed')throw new Error('Müzik motoru üretimi başarısız olarak bildirdi. eroq panelini kontrol et.');statusEl.textContent=(s.temporary_issue||'Vokalli şarkı oluşturuluyor… Durum: '+(s.status||'processing')+'.')+' Biraz sürebilir.'}catch(e){if(String(e.message||e).includes('Müzik motoru üretimi başarısız'))throw e;transientFailures++;statusEl.textContent='Müzik sunucusu geç yanıt veriyor. Otomatik tekrar deniyorum ('+transientFailures+'); aynı şarkı için yeniden üretim başlatmıyorum.';}}throw new Error('Şarkı hâlâ hazırlanıyor veya servis yavaş yanıt veriyor. Aynı şarkı için yeniden üretim başlatmadan eroq panelindeki Music geçmişini kontrol et.')}
 $('makeSong').onclick=async()=>{const title=$('songPrompt').value.trim()||'Tekden AI şarkısı';const style=$('songStylePro').value.trim();const lyrics=$('songLyricsPro').value.trim();const b=$('makeSong');if(lyrics.length<5){$('songStatus').textContent='Önce şarkı sözlerini gir.';return}b.disabled=true;b.textContent='⏳ Şarkı üretiliyor…';$('songStatus').textContent='eroq müzik motoruna istek gönderiliyor. 90 saniyelik tek üretim yaklaşık 9 kredi kullanır.';$('proSongAudio').style.display='none';$('proSongDownload').style.display='none';try{const d=await api('/api/studio/song/generate',{method:'POST',body:JSON.stringify({title,style,lyrics,language:'tr',duration:90})});if(!d.generation_id)throw new Error('Müzik servisi görev kimliği döndürmedi.');if(d.credits_remaining!==null&&d.credits_remaining!==undefined)$('songStatus').textContent='Üretim başladı. Kalan eroq kredisi: '+d.credits_remaining+'.';await waitForVocalSong(d.generation_id,$('songStatus'),$('proSongAudio'),$('proSongDownload'))}catch(e){$('songStatus').textContent=e.message}finally{b.disabled=false;b.textContent='🎵 Vokalli şarkı üret'}};
+const tdSynth=window.speechSynthesis;let tdVoices=[];function tdLoadVoices(){tdVoices=tdSynth?tdSynth.getVoices():[];const sel=$('tdAvatarVoice');if(!sel)return;const old=sel.value;sel.innerHTML='<option value="">Varsayılan Türkçe ses</option>';tdVoices.filter(v=>/^tr/i.test(v.lang)).forEach((v,i)=>{const o=document.createElement('option');o.value=String(i);o.textContent=v.name+' · '+v.lang;sel.appendChild(o)});if(old)sel.value=old;}if(tdSynth){tdLoadVoices();tdSynth.onvoiceschanged=tdLoadVoices;}
+$('tdAvatarNameInput').addEventListener('input',()=>{$('tdAvatarName').textContent=$('tdAvatarNameInput').value||'Tekden Avatar'});$('tdAvatarStyle').addEventListener('change',()=>{const c={blue:['#c6e9ff','#6c9be9'],violet:['#ead7ff','#9671db'],mint:['#d2fff0','#58b9a0']}[$('tdAvatarStyle').value];$('tdAvatar').style.background='linear-gradient(145deg,'+c[0]+','+c[1]+')'});$('tdAvatarSpeak').onclick=()=>{const text=$('tdAvatarText').value.trim();if(!text){$('tdAvatarStatus').textContent='Önce konuşma metnini yaz.';return}if(!tdSynth){$('tdAvatarStatus').textContent='Bu tarayıcı konuşma sentezini desteklemiyor.';return}tdSynth.cancel();const u=new SpeechSynthesisUtterance(text);u.lang='tr-TR';u.rate=1;u.pitch=1;const selectedVoice=$('tdAvatarVoice').value;const v=selectedVoice!==''?tdVoices[Number(selectedVoice)]:tdVoices.find(x=>/^tr/i.test(x.lang));if(v)u.voice=v;let mouthTimer=null;u.onstart=()=>{$('tdAvatarStatus').textContent='Avatar konuşuyor…';let open=false;mouthTimer=setInterval(()=>{open=!open;$('tdAvatarMouth').style.height=open?'24px':'7px'},110)};u.onend=()=>{clearInterval(mouthTimer);$('tdAvatarMouth').style.height='7px';$('tdAvatarStatus').textContent='Konuşma tamamlandı.'};u.onerror=()=>{clearInterval(mouthTimer);$('tdAvatarMouth').style.height='7px';$('tdAvatarStatus').textContent='Seslendirme tamamlanamadı.'};tdSynth.speak(u)};$('tdAvatarStop').onclick=()=>{tdSynth?.cancel();$('tdAvatarMouth').style.height='7px';$('tdAvatarStatus').textContent='Konuşma durduruldu.'};
 async function api(url,opts={}){const r=await fetch(url,{...opts,credentials:'same-origin',headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.detail||'İstek başarısız oldu.');return d}
 async function check(){try{const d=await api('/api/me');if(!d.user){location.href='/?login=1';return}if(!['pro','plus'].includes(d.user.plan)){document.body.innerHTML=`<main style="max-width:700px;margin:12vh auto;padding:24px;font:16px system-ui"><h1>Bu alan Pro ve Plus üyelerine özel</h1><p>Pro veya Plus üyeliğinle giriş yaparak bu stüdyoyu kullanabilirsin.</p><button onclick="location.href='/'">Ana sayfaya dön</button></main>`;return}}catch(e){location.href='/?login=1'}}
 document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{$('prompt').value=b.dataset.p;$('prompt').focus()});$('clear').onclick=()=>{$('prompt').value='';$('prompt').focus()};
@@ -6544,7 +6617,8 @@ MIND_LAB_HTML = r"""
     <p id="tkCameraStatus" role="status">Kamera kapalı.</p>
     <label style="display:flex;align-items:center;gap:8px;font-weight:600"><input id="tkCameraAuto" type="checkbox" style="width:auto"> Yüz uzun süre görünmezse veya gözler uzun süre kapalı algılanırsa kısa yanıt moduna geç</label>
     <label style="display:flex;align-items:center;gap:8px;font-weight:600"><input id="tkExpressionAuto" type="checkbox" style="width:auto"> Yaklaşık yüz ifadesine göre yanıt üslubunu uyarla</label>
-    <p style="font-size:12px">Örnek: gülümsemeye benzer ifade → daha neşeli yanıt; şaşkınlığa benzer ifade → daha canlı ve açıklayıcı yanıt; ciddi ifade → sakin ve nazik yanıt. Bu sonuçlar tahmindir; üzgünlük, öfke, stres veya başka bir ruh hâli teşhisi yapılmaz. Işık, açı, gözlük ve kişisel mimikler sonucu etkileyebilir.</p><label style="display:flex;align-items:center;gap:8px;font-weight:600"><input id="tkTypingAuto" type="checkbox" style="width:auto"> Sohbet yazma ritmimi ölç ve yanıt biçimini uyarla</label><p style="font-size:12px">Sohbet kutusunda yalnızca tuş zamanları ölçülür; hangi tuşa bastığın veya yazdığın metin analiz edilmez. Bu sinyaller yalnızca o anki yanıt biçimini ayarlamak için kullanılır.</p>
+    <p style="font-size:12px">Örnek: gülümsemeye benzer ifade → daha neşeli yanıt; şaşkınlığa benzer ifade → daha canlı ve açıklayıcı yanıt; ciddi ifade → sakin ve nazik yanıt. Sistem gülümseme, şaşkınlık, kaş çatma, üzgün/ürkme/hoşnutsuzluk benzeri mimik ipuçlarını ve esneme hareketini ayrı ayrı sınıflandırmayı dener. Bunlar gerçek duygu teşhisi değildir; yüz kası hareketi tahminidir. Işık, açı, gözlük ve kişisel mimikler sonucu etkileyebilir. Her zaman manuel üslup seçimi önceliklidir.</p>
+    <details style="margin-top:8px"><summary style="cursor:pointer;font-weight:700">Algılanmaya çalışılan mimik türlerini tek tek gör</summary><ul style="font-size:12px;line-height:1.6;padding-left:20px"><li><b>Gülümseme:</b> ağız köşelerinin iki tarafta yükselmesi, yanak/göz çevresi hareketi. Üslup daha sıcak olabilir.</li><li><b>Üzüntü benzeri:</b> ağız köşelerinin aşağı yönelmesi ve iç kaş hareketi. Üslup daha nazik olabilir.</li><li><b>Öfke/kaş çatma benzeri:</b> kaşların aşağı yaklaşması, gözlerin kısılması ve dudakların sıkılması. Üslup sakinleşir.</li><li><b>Şaşkınlık:</b> gözlerin açılması ve kısa süreli ağız açılması. Yanıt daha açıklayıcı olabilir.</li><li><b>Ürkme/korku benzeri:</b> gözlerin açılması ve kaşların yükselmesi. Yanıt daha sakin olabilir.</li><li><b>Hoşnutsuzluk/tiksinme benzeri:</b> burun kırıştırma ve üst dudak hareketi. Yanıt nötr kalır.</li><li><b>Küçümseme benzeri tek taraflı mimik:</b> ağız köşelerinden birinin diğerinden farklı hareket etmesi. Sistem bunu kesin küçümseme saymaz.</li><li><b>Düşünme/kararsızlık benzeri:</b> kaş asimetrisi veya çatılmasıyla dudak sıkma/hareketi. Açıklama adım adım olur.</li><li><b>Nötr:</b> belirgin blendshape ipucu yoksa normal üslup kullanılır.</li><li><b>Esneme benzeri:</b> ağız uzun süre açık kalırsa kısa yanıt modu önerilir; tek başına yorgunluk kanıtı değildir.</li></ul><p style="font-size:12px">Önemli: MediaPipe yüz kası hareketlerini ölçer; insanın gerçek duygusunu okuyamaz. Aynı mimik farklı nedenlerle oluşabilir. Bu nedenle bu liste yaklaşık görsel sınıflandırmadır, psikolojik/sağlık değerlendirmesi değildir.</p></details><label style="display:flex;align-items:center;gap:8px;font-weight:600"><input id="tkTypingAuto" type="checkbox" style="width:auto"> Sohbet yazma ritmimi ölç ve yanıt biçimini uyarla</label><p style="font-size:12px">Sohbet kutusunda yalnızca tuş zamanları ölçülür; hangi tuşa bastığın veya yazdığın metin analiz edilmez. Bu sinyaller yalnızca o anki yanıt biçimini ayarlamak için kullanılır.</p>
    </div>
    <div class="tkMindCard" style="margin-top:12px"><strong>Bluetooth nabız cihazı</strong><p>Destekleyen Bluetooth kalp ritmi sensörüne veya akıllı saate bağlanabilirsin. Nabız cihazda okunur; ham BPM değeri sunucuya, sohbete veya veritabanına gönderilmez. Yalnızca senin seçtiğin eşik aşıldığında seçtiğin yanıt tarzı uygulanır; bu bir sağlık değerlendirmesi değildir.</p>
     <button class="tkPrimary" id="tkPulseConnect" type="button">Bluetooth cihazını bağla</button><button class="tkSecondary" id="tkPulseDisconnect" type="button">Bağlantıyı kes</button>
@@ -6596,6 +6670,11 @@ MIND_LAB_HTML = r"""
      <button type="button" class="tk25Card" data-feature="causality_loop"><b>28. Nedensellik Döngüsü Derleyicisi</b><span>Yazım sırasında mevcut koddan erken hata uyarıları çıkarır.</span></button>
      <button type="button" class="tk25Card" data-feature="neural_telepathy"><b>29. Eşzamanlı Zihin Köprüsü</b><span>Gerçek zamanlı ortak proje ve değişiklik senkronizasyonu tasarlar.</span></button>
      <button type="button" class="tk25Card" data-feature="mass_matter"><b>30. Dijitalden Donanıma Tasarımcı</b><span>Donanım fikrini PCB/HDL, parça listesi ve prototip planına dönüştürür.</span></button>
+     <button type="button" class="tk25Card" data-feature="ex_nihilo"><b>31. Yoktan Vareden Evren Motoru</b><span>Yeni bir mini programlama dili, yorumlayıcı ve dijital evren prototipi tasarlar.</span></button>
+     <button type="button" class="tk25Card" data-feature="subjective_reality"><b>32. Zihinsel Alternatif Evren</b><span>Tarihi, coğrafyası, kuralları ve karakterleri olan etkileşimli metin evreni kurar.</span></button>
+     <button type="button" class="tk25Card" data-feature="chronos_rewrite"><b>33. Chronos Senaryo Motoru</b><span>Gelecek tahmini değil; koşullu etki senaryoları ve bugünden önlem planı üretir.</span></button>
+     <button type="button" class="tk25Card" data-feature="digital_bio_transcoder"><b>34. Dijital-Biyolojik Tasarımcı</b><span>Biyoinformatik kavramlarını güvenli, teorik ve laboratuvar dışı tasarım notlarına dönüştürür.</span></button>
+     <button type="button" class="tk25Card" data-feature="omniscience_core"><b>35. Mutlak Bilgi Araştırma Merkezi</b><span>Bilinen kaynakları tarar, belirsizlikleri ve doğrulanamayan iddiaları ayırır.</span></button>
     </div>
     <div class="tk25Runner">
      <div class="tk25Selected" id="tk25Selected">Bir motor seçerek başla.</div>
@@ -6683,6 +6762,11 @@ MIND_LAB_HTML = r"""
     pressL:score('mouthPressLeft'),pressR:score('mouthPressRight'),
     frownL:score('mouthFrownLeft'),frownR:score('mouthFrownRight'),
     sneerL:score('noseSneerLeft'),sneerR:score('noseSneerRight'),
+    innerBrow:score('browInnerUp'),outerBrowL:score('browOuterUpLeft'),outerBrowR:score('browOuterUpRight'),
+    cheekSquintL:score('cheekSquintLeft'),cheekSquintR:score('cheekSquintRight'),
+    upperUpL:score('mouthUpperUpLeft'),upperUpR:score('mouthUpperUpRight'),
+    lowerDownL:score('mouthLowerDownLeft'),lowerDownR:score('mouthLowerDownRight'),
+    dimpleL:score('mouthDimpleLeft'),dimpleR:score('mouthDimpleRight'),
     jaw:score('jawOpen'), funnel:score('mouthFunnel'), stretchL:score('mouthStretchLeft'),stretchR:score('mouthStretchRight')
    };
    expressionHistory.push(sample);if(expressionHistory.length>8)expressionHistory.shift();
@@ -6694,6 +6778,11 @@ MIND_LAB_HTML = r"""
    const mouthPress=(avg('pressL')+avg('pressR'))/2;
    const mouthFrown=(avg('frownL')+avg('frownR'))/2;
    const noseSneer=(avg('sneerL')+avg('sneerR'))/2;
+   const innerBrow=avg('innerBrow'),outerBrow=(avg('outerBrowL')+avg('outerBrowR'))/2;
+   const cheekSquint=(avg('cheekSquintL')+avg('cheekSquintR'))/2;
+   const upperLip=(avg('upperUpL')+avg('upperUpR'))/2;
+   const lowerLip=(avg('lowerDownL')+avg('lowerDownR'))/2;
+   const dimple=(avg('dimpleL')+avg('dimpleR'))/2;
    const jawOpen=avg('jaw');
    const nowMs=Date.now();
    // Uzun süre açık kalan ağız esneme ipucu olabilir; kısa açılma şaşkınlık olarak değerlendirilebilir.
@@ -6703,10 +6792,17 @@ MIND_LAB_HTML = r"""
    // 8 karelik yumuşatma + süre eşiği: tek karelik mimik değişimleri atlanır.
    let detected='none';
    if($('tkExpressionAuto')?.checked){
+    // Blendshape cues are facial movements, not proof of an inner emotional state.
     if(sustainedOpen && nowMs>=yawnCooldownUntil)detected='expression_yawning';
     else if(wideEyes>=0.38&&jawOpen>=0.22&&!sustainedOpen)detected='expression_surprised';
-    else if(browDown>=0.34&&(mouthPress>=0.22||mouthFrown>=0.20||eyeSquint>=0.30||noseSneer>=0.24))detected='expression_furrowed_brows';
-    else if(smile>=0.34&&Math.min(smileL,smileR)>=0.22)detected='expression_smiling';
+    else if(smile>=0.32&&Math.min(smileL,smileR)>=0.20&&(cheekSquint>=0.10||dimple>=0.10))detected='expression_smiling';
+    else if(browDown>=0.28&&(mouthPress>=0.18||mouthFrown>=0.16||eyeSquint>=0.24))detected='expression_furrowed_brows';
+    else if((mouthFrown>=0.24||lowerLip>=0.24)&&(innerBrow>=0.16||browDown<0.20))detected='expression_sad_like';
+    else if(noseSneer>=0.28&&upperLip>=0.18)detected='expression_disgust_like';
+    else if(wideEyes>=0.30&&outerBrow>=0.25&&jawOpen<0.18)detected='expression_fear_like';
+    else if(Math.abs(avg('dimpleL')-avg('dimpleR'))>=0.18&&Math.max(avg('dimpleL'),avg('dimpleR'))>=0.22)detected='expression_contempt_like';
+    else if((browDown>=0.20||Math.abs(avg('browL')-avg('browR'))>=0.16)&&(mouthPress>=0.16||mouthFunnel>=0.22))detected='expression_confused_like';
+    else if(smile<0.20&&jawOpen<0.18&&browDown<0.20&&mouthFrown<0.18)detected='expression_neutral';
    }
    
    if(detected!==expressionCandidate){expressionCandidate=detected;expressionCandidateSince=nowMs;}
@@ -6717,7 +6813,7 @@ MIND_LAB_HTML = r"""
    if(window.tkFacialExpression==='expression_yawning' && jawOpen<0.30){yawnCooldownUntil=Date.now()+1800;jawOpenSince=0;}
    const eyesClosed=score('eyeBlinkLeft')>.78&&score('eyeBlinkRight')>.78;
    if(eyesClosed){if(!eyeWasClosed){blinkTimes.push(Date.now());blinkTimes=blinkTimes.filter(t=>Date.now()-t<60000);}eyeWasClosed=true;if(!eyesClosedSince)eyesClosedSince=Date.now();cameraBrief=Date.now()-eyesClosedSince>5000;setCameraStatus((cameraBrief?'Gözler bir süredir kapalı görünüyor. ':'Yüz algılandı. ')+ 'Son 60 saniye göz kırpma sayısı: '+blinkTimes.filter(t=>Date.now()-t<60000).length+'. Bu bir duygu/odak teşhisi değildir.');}
-   else{eyeWasClosed=false;eyesClosedSince=0;cameraBrief=false;const exprLabel=window.tkFacialExpression==='expression_smiling'?'Gülümsemeye benzer ifade algılandı':window.tkFacialExpression==='expression_surprised'?'Şaşkınlığa benzer ifade algılandı':window.tkFacialExpression==='expression_furrowed_brows'?'Kaş çatmaya benzer mimik algılandı':window.tkFacialExpression==='expression_yawning'?'Uzun ağız açılması / esneme ipucu algılandı':'Yüz algılandı · belirgin ifade yok';setCameraStatus(exprLabel+'. Sohbet yanıtı bu ipucuna göre uyarlanacak.');}
+   else{eyeWasClosed=false;eyesClosedSince=0;cameraBrief=false;const exprLabels={expression_smiling:'Gülümseme benzeri',expression_surprised:'Şaşkınlık benzeri',expression_furrowed_brows:'Kaş çatma benzeri',expression_yawning:'Esneme / uzun ağız açılması',expression_sad_like:'Üzgün ifade benzeri',expression_fear_like:'Ürkme / korku ifadesi benzeri',expression_disgust_like:'Hoşnutsuzluk ifadesi benzeri',expression_contempt_like:'Tek taraflı ağız hareketi',expression_confused_like:'Düşünme / kararsızlık ifadesi benzeri',expression_neutral:'Nötr ifade'};const exprLabel=exprLabels[window.tkFacialExpression]||'Yüz algılandı · belirgin ifade yok';setCameraStatus(exprLabel+'. Sohbet yanıtı bu ipucuna göre uyarlanacak.');}
   }
   refreshSensorFocus();
  }
@@ -6806,7 +6902,7 @@ MIND_LAB_HTML = r"""
  $('tkAdaptiveUI').addEventListener('change',()=>{if(!$('tkAdaptiveUI').checked)document.documentElement.style.removeProperty('--tk-density');});
  function renderLogicGalaxy(raw){const canvas=$('tkLogicGalaxy'),ctx=canvas.getContext('2d');let data;try{const a=raw.indexOf('{'),b=raw.lastIndexOf('}');if(a<0||b<=a)throw Error('JSON bulunamadı');data=JSON.parse(raw.slice(a,b+1));}catch(e){$('tkLogicGalaxyStatus').textContent='Harita verisi okunamadı. Model çıktısını metin olarak inceleyebilirsin.';return;}if(!Array.isArray(data.nodes)||!Array.isArray(data.edges)||!data.nodes.length){$('tkLogicGalaxyStatus').textContent='Geçerli düğüm/bağlantı verisi bulunamadı.';return;}const nodes=data.nodes.slice(0,24),edges=data.edges.slice(0,60);const pos={};nodes.forEach((n,i)=>{const phi=Math.acos(1-2*(i+.5)/nodes.length),theta=i*2.3999632297;pos[n.id]={x:Math.cos(theta)*Math.sin(phi),y:Math.sin(theta)*Math.sin(phi),z:Math.cos(phi),label:String(n.label||n.id).slice(0,42)};});let angle=0,dragging=false,lastX=0;canvas.onpointerdown=e=>{dragging=true;lastX=e.clientX;canvas.setPointerCapture(e.pointerId)};canvas.onpointermove=e=>{if(dragging){angle+=(e.clientX-lastX)*.008;lastX=e.clientX;draw()}};canvas.onpointerup=()=>dragging=false;canvas.onpointercancel=()=>dragging=false;function draw(){const w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);ctx.fillStyle='#07162b';ctx.fillRect(0,0,w,h);const projected={};nodes.forEach(n=>{const p=pos[n.id],x=p.x*Math.cos(angle)-p.z*Math.sin(angle),z=p.x*Math.sin(angle)+p.z*Math.cos(angle),scale=260/(3.1+z);projected[n.id]={x:w/2+x*scale,y:h/2+p.y*scale,z,scale};});ctx.lineWidth=1.6;edges.forEach(e=>{const a=projected[e.from],b=projected[e.to];if(!a||!b)return;ctx.strokeStyle='rgba(86,180,255,.38)';ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();});nodes.forEach(n=>{const p=projected[n.id];if(!p)return;const r=Math.max(5,Math.min(13,8+p.z*3));ctx.beginPath();ctx.arc(p.x,p.y,r,0,Math.PI*2);ctx.fillStyle=p.z>.2?'#82e6ff':'#b58cff';ctx.shadowColor=ctx.fillStyle;ctx.shadowBlur=16;ctx.fill();ctx.shadowBlur=0;ctx.font='13px system-ui';ctx.fillStyle='#ecf5ff';ctx.textAlign='center';ctx.fillText(pos[n.id].label,p.x,p.y+r+16);});}draw();$('tkLogicGalaxyStatus').textContent=nodes.length+' bileşen ve '+edges.length+' bağlantı gösteriliyor. Fareyle sürükleyerek görünümü döndürebilirsin.';}
  $('tkSynapseRun').addEventListener('click',async()=>{const b=$('tkSynapseRun');b.disabled=true;try{status('Seçilen motor çalışıyor…');const feature=$('tkSynapseMode').value;const d=await req('/api/mind/advanced-synapse',{method:'POST',body:JSON.stringify({feature,material:$('tkSynapseMaterial').value,context:$('tkSynapseContext').value})});show('tkSynapseResult',d.result||JSON.stringify(d,null,2));if(feature==='logic_galaxy')renderLogicGalaxy(d.result||'');status('Motor çıktısı hazır. Önerileri inceleyip onaylayarak kullan.');}catch(e){status(e.message)}finally{b.disabled=false}});
- const tk25Names={thought_physics:'Nöro-Mekanik Fizik Motoru',bio_ui:'Biyo-Ritmik Arayüz Adaptasyonu',multiverse_compile:'Kuantum Çoklu Evren Kod Derleyicisi',chaos:'Otonom Kriz ve Çöküş Simülatörü',collective:'Kolektif Zihin Akordajı',micro_focus:'Mikro-Mimik Odak Analizi',neuro_audio:'Nöro-Akustik Frekans Senkronizasyonu',debug_cue:'Görünür Hata Ayıklama Asistanı',emotional_ui:'Duygu Temelli Arayüz Uyarlaması',circadian_workflow:'Biyo-Ritmik Görev Zamanlayıcı',acoustic_architecture:'Tersine Mühendislik Sesli Çevirmeni',immortal_code:'Ölümsüz Kod Arşivi',chaos_hacker:'Otonom Test ve Kaos Simülatörü',dialectic_council:'Çoklu Persona Fikir Meclisi',predictive_aging:'Akıllı Kod Yaşlandırma Analizi',global_synapse:'Global Anonim Akıl Havuzu',growth_launch:'Otonom Lansman ve Büyüme Ajanı',ip_sentinel:'Telif ve Lisans Kalkanı',logic_galaxy:'Holografik Mantık Galaksisi',synthetic_twin:'Canlı Sentetik Dijital İkiz',retrocausal_rebuild:'Geçmişi Yeniden İnşa Etme',direct_brainware:'Nöral Doğrudan Aktarım',organic_code:'Kendi Kendine Evrimleşen Organik Kod',zero_latency:'Sıfır Gecikmeli Dünya Motoru',emotional_audio:'Duygu-Melodi Eş Zamanlı Stüdyo'};
+ const tk25Names={thought_physics:'Nöro-Mekanik Fizik Motoru',bio_ui:'Biyo-Ritmik Arayüz Adaptasyonu',multiverse_compile:'Kuantum Çoklu Evren Kod Derleyicisi',chaos:'Otonom Kriz ve Çöküş Simülatörü',collective:'Kolektif Zihin Akordajı',micro_focus:'Mikro-Mimik Odak Analizi',neuro_audio:'Nöro-Akustik Frekans Senkronizasyonu',debug_cue:'Görünür Hata Ayıklama Asistanı',emotional_ui:'Duygu Temelli Arayüz Uyarlaması',circadian_workflow:'Biyo-Ritmik Görev Zamanlayıcı',acoustic_architecture:'Tersine Mühendislik Sesli Çevirmeni',immortal_code:'Ölümsüz Kod Arşivi',chaos_hacker:'Otonom Test ve Kaos Simülatörü',dialectic_council:'Çoklu Persona Fikir Meclisi',predictive_aging:'Akıllı Kod Yaşlandırma Analizi',global_synapse:'Global Anonim Akıl Havuzu',growth_launch:'Otonom Lansman ve Büyüme Ajanı',ip_sentinel:'Telif ve Lisans Kalkanı',logic_galaxy:'Holografik Mantık Galaksisi',synthetic_twin:'Canlı Sentetik Dijital İkiz',retrocausal_rebuild:'Geçmişi Yeniden İnşa Etme',direct_brainware:'Nöral Doğrudan Aktarım',organic_code:'Kendi Kendine Evrimleşen Organik Kod',zero_latency:'Sıfır Gecikmeli Dünya Motoru',emotional_audio:'Duygu-Melodi Eş Zamanlı Stüdyo',ex_nihilo:'Yoktan Vareden Evren Motoru',subjective_reality:'Zihinsel Alternatif Evren',chronos_rewrite:'Chronos Senaryo Motoru',digital_bio_transcoder:'Dijital-Biyolojik Tasarımcı',omniscience_core:'Mutlak Bilgi Araştırma Merkezi'};
  let tk25Feature='';
  document.querySelectorAll('.tk25Card').forEach(card=>card.addEventListener('click',()=>{document.querySelectorAll('.tk25Card').forEach(x=>x.classList.remove('selected'));card.classList.add('selected');tk25Feature=card.dataset.feature;$('tk25Selected').textContent='Seçili motor: '+tk25Names[tk25Feature];$('tk25Run').disabled=false;$('tk25Material').focus();}));
  $('tk25Run').addEventListener('click',async()=>{if(!tk25Feature){status('Önce bir motor seç.');return}const material=$('tk25Material').value.trim();if(material.length<5){status('Lütfen en az 5 karakterlik proje, fikir veya içerik gir.');return}const b=$('tk25Run');b.disabled=true;try{status(tk25Names[tk25Feature]+' çalışıyor…');const d=await req('/api/mind/advanced-synapse',{method:'POST',body:JSON.stringify({feature:tk25Feature,material,context:$('tk25Context').value})});show('tk25Result',d.result||JSON.stringify(d,null,2));if(tk25Feature==='logic_galaxy')renderLogicGalaxy(d.result||'');status('Sonuç hazır. Önerileri inceleyip doğrulayarak kullan.');}catch(e){status(e.message)}finally{b.disabled=false}});
@@ -8999,4 +9095,3 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
-        
