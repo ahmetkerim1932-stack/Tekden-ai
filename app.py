@@ -607,6 +607,7 @@ class ChatBody(BaseModel):
     force_search: bool = False
     # Temporary style-only hint; raw camera frames and heart-rate values are never sent here.
     focus_state: str = Field(default="neutral", max_length=20)
+    sensor_context: str = Field(default="none", max_length=40)
 
 class ImageBody(BaseModel):
     prompt: str = Field(min_length=2, max_length=2000)
@@ -1350,6 +1351,19 @@ Yazım ve anlatım kuralları:
         "neutral": "Yanıt tarzını normal bağlama göre ayarla.",
     }
     system += "\n\nGeçici kullanıcı tercihi: " + focus_rules.get(focus_state, focus_rules["neutral"])
+    sensor_context = (body.sensor_context or "none").strip().lower()
+    sensor_rules = {
+        "camera_accessibility": "Kullanıcının cihazında yüzün görünmemesi veya gözlerin bir süre kapalı görünmesi gibi yalnızca görsel erişilebilirlik ipuçları algılandı. Bu durumun nedenini, duyguyu, stresi, yorgunluğu veya dikkati teşhis etme. Yanıtı daha kısa ve kolay takip edilir parçalara böl; kullanıcıya durum atfetme.",
+        "expression_smiling": "Kamerada gülümsemeye benzeyen bir yüz ifadesi yaklaşık olarak algılandı. Kullanıcının kesinlikle mutlu olduğunu varsayma. Uygunsa sıcak, pozitif ve biraz daha neşeli bir üslup kullan; konunun ciddiyetini koru ve yapay biçimde aşırı coşkulu olma.",
+        "expression_surprised": "Kamerada şaşkınlık ifadesine benzeyen görsel ipuçları yaklaşık olarak algılandı. Kullanıcının ne hissettiğini kesin bildiğini iddia etme. Uygunsa merak uyandıran, açıklayıcı ve canlı bir üslup kullan.",
+        "expression_serious": "Kamerada ciddi veya kaşları çatık bir ifadeye benzeyen görsel ipuçları yaklaşık olarak algılandı. Kullanıcının kızgın, üzgün veya stresli olduğunu varsayma. Sakin, nazik ve açık bir üslup kullan; kullanıcıya duygu atfetme.",
+        "pulse_style_selected": "Kullanıcının yerel cihazında kendi belirlediği nabız eşiği aşılmış ve kendi seçtiği anlatım tercihi etkinleşmiş. Nabız değerini bilmiyorsun; sağlık yorumu yapma. Yalnızca seçilen anlatım tercihini uygula.",
+        "typing_slow": "Kullanıcının yazma alanındaki son tuş zamanlamaları yavaş bir yazma temposu gösteriyor. Bunun nedenini çıkarma. Daha kısa, adım adım ve kolay düzenlenebilir yanıt ver.",
+        "typing_fast": "Kullanıcının yazma alanındaki son tuş zamanlamaları hızlı bir yazma temposu gösteriyor. Duygu veya kişilik çıkarımı yapma. Yanıtı doğrudan ve düzenli sun.",
+        "typing_pauses": "Yazma alanında uzun duraklamalar gözlendi. Bunun nedenini tahmin etme. Yanıtı küçük adımlara ayır ve gerektiğinde seçenekleri sadeleştir.",
+        "none": "Sensör/etkileşim ipucu yok; normal yanıt ver."
+    }
+    system += "\n\nCihazda hesaplanan geçici etkileşim ipucu: " + sensor_rules.get(sensor_context, sensor_rules["none"])
     if account_preferences:
         style = account_preferences.get("response_style", "balanced")
         style_rules = {
@@ -1746,7 +1760,12 @@ def mind_advanced_synapse(body: AdvancedSynapseBody, request: Request):
         "direct_brainware": "EEG/BCI cihazı yoksa yalnızca donanım-bağımsız arayüz tasarımı ve entegrasyon planı üret. Serbest düşünceleri okuyabileceğini iddia etme; cihaz, protokol, kalibrasyon ve kullanıcı izni gerektiğini belirt.",
         "organic_code": "Kod için test odaklı iyileştirme döngüsü tasarla: öneri, diff, test, insan onayı, sürüm kaydı ve geri alma. Kodun milyonlarca kez çalıştırıldığını veya proje sahibinden habersiz değiştiğini iddia etme; otomatik canlı dağıtım yapma.",
         "zero_latency": "Gerçek gecikmeyi ölçmeye dayalı performans planı hazırla: önbellek, lazy loading, ön hesaplama, streaming, veritabanı indeksleri ve ağ darboğazları. Sıfır milisaniye veya kuantum önbellekleme iddiası yapma; hedefleri ölçülebilir p50/p95 gecikmesi olarak yaz.",
-        "emotional_audio": "Kullanıcının açıkça seçtiği ruh hâli/tema ve proje içeriğine göre özgün bir müzik tasarım brifi, akor/ritim taslağı ve üretim promptu hazırla. Duyguyu kesin teşhis etme veya profesyonel ses dosyası üretildiğini iddia etme; gerçek ses için yapılandırılmış ses üretim sağlayıcısı gerekir."
+        "emotional_audio": "Kullanıcının açıkça seçtiği ruh hâli/tema ve proje içeriğine göre özgün bir müzik tasarım brifi, akor/ritim taslağı ve üretim promptu hazırla. Duyguyu kesin teşhis etme veya profesyonel ses dosyası üretildiğini iddia etme; gerçek ses için yapılandırılmış ses üretim sağlayıcısı gerekir.",
+        "entropy_reset": "Bozulmuş/eski kodu dijital entropiyi fiziksel olarak geri çevirdiğini iddia etmeden yeniden düzenle: önce mevcut davranış varsayımlarını çıkar, statik sorunları listele, modern ve bakımı kolay bir sürüm öner, değişiklikleri diff halinde ver ve test planı ekle. Kaybolmuş kaynakları veya ilk yazıldığı andaki gerçek halini geri getirdiğini iddia etme.",
+        "schrodinger_code": "Aynı kod tabanının iki zıt mimari adayını ayrı alternatifler olarak üret; her birinin güçlü/zayıf yönlerini, başarısızlık modlarını ve testlerini karşılaştır. Aynı çalışan kodun aynı anda çelişkili iki gerçek durumda olduğunu veya gözlemcinin fiziksel gerçekliği seçtiğini iddia etme. Varsayılan olarak hiçbir adayı ana projeye yazma.",
+        "causality_loop": "Kod yazılırken statik analiz, tip kontrolü, lint, bağımlılık politikası ve testlerden gelen erken uyarıları tasarla. Gelecekten veri aldığını iddia etme; yalnızca mevcut koddaki örüntülerden olası hataları önceden işaretle. Uyarıların kanıtını ve yanlış pozitif olasılığını belirt.",
+        "neural_telepathy": "İki kullanıcının ortak proje üzerinde eşzamanlı çalışması için izinli gerçek zamanlı işbirliği protokolü tasarla: açıkça paylaşılan proje durumu, presence, değişiklik akışı, çatışma çözümü ve erişim kontrolleri. Zihin okuma veya düşünce telepatisi iddia etme; yalnızca kullanıcıların gönderdiği veriyi eşitle.",
+        "mass_matter": "Dijital donanım tasarımını üretilebilir çıktılara dönüştür: blok şema, PCB/HDL taslağı, BOM, 3B baskı dosyası gereksinimleri ve prototip doğrulama planı. Bilgiden fiziksel madde ürettiğini iddia etme; gerçek üretim için fabrika, malzeme ve donanım gerekir."
     }
     if body.feature not in modes:
         raise HTTPException(400, "Bilinmeyen gelişmiş araç seçimi.")
@@ -6284,7 +6303,7 @@ async function send(){
   if(file){const answer=await analyzeAttachment(text,file);bubble('assistant',answer);if(user){try{const saved=await api('/api/save-analysis',{method:'POST',body:JSON.stringify({question:text||'Ekli dosyayı analiz et.',answer,filename:file.name,chat_id:chatId})});if(saved.chat_id)chatId=saved.chat_id;loadChats()}catch(saveError){console.warn('Dosya analizi geçmişe kaydedilemedi',saveError)}}else {guestHistory.push({role:'user',content:(text||'Ekli dosyayı analiz et.')+' [Dosya: '+file.name+']'},{role:'assistant',content:answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}selectedFile=null;$('fileInput').value='';$('fileName').textContent='Dosya seçilmedi';setStatus('Dosya analizi tamamlandı');}
   else if(looksLikeGameRequest(text)){const game=await api('/api/game',{method:'POST',body:JSON.stringify({prompt:text})});gameBubble(game.html);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İsteğine göre oynanabilir bir oyun oluşturuldu.'});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Oyun hazır');}
   else if(looksLikeImageRequest(text)){await createAndShowImage(text);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İstenen görsel oluşturuldu. İstek: '+text});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Görsel hazır');}
-  else {const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus('UYARI: Bu mesaj Supabase’e kaydedilmedi. Hesabından çıkış yapıp yeniden giriş yap.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else setStatus(forceSearch?'Kaynak bulunamadı; yanıt doğrulanamadı':'Tamamlandı');}
+  else {const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus('UYARI: Bu mesaj Supabase’e kaydedilmedi. Hesabından çıkış yapıp yeniden giriş yap.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else setStatus(forceSearch?'Kaynak bulunamadı; yanıt doğrulanamadı':'Tamamlandı');}
  }catch(e){bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeGameRequest(text)?'Oyun oluşturulamadı: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}
  finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)'}
 }
@@ -6517,14 +6536,15 @@ MIND_LAB_HTML = r"""
   <section class="tkMindPanel" data-tk-panel="autopsy"><div class="tkMindCard"><strong>Tersine mühendislik ve hata avcısı</strong><p>Kodu çalıştırmadan inceler; olası hataları ve test önerilerini raporlar.</p><label for="tkAutopsyCode">Kod</label><textarea id="tkAutopsyCode" style="min-height:180px" placeholder="İncelenecek kodu yapıştır..."></textarea><label for="tkAutopsyError">Hata mesajı (varsa)</label><textarea id="tkAutopsyError"></textarea><label for="tkAutopsyContext">Proje bağlamı</label><textarea id="tkAutopsyContext"></textarea><button class="tkPrimary" id="tkAutopsyBtn">Kodu incele</button><pre id="tkAutopsyResult" hidden></pre></div></section>
   <section class="tkMindPanel" data-tk-panel="transfer"><div class="tkMindCard"><strong>Ekosistemler arası içerik dönüşümü</strong><p>Metin, kod veya veriyi müzik, oyun sahnesi ya da görsel tasarım için üretim planına dönüştürür. Gerçek ses/görsel dosyası üretimi bu araçtan yapılmaz.</p><label for="tkTransferType">Kaynak türü</label><select id="tkTransferType"><option>metin</option><option>kod</option><option>veri</option></select><label for="tkTransferTarget">Hedef biçim</label><select id="tkTransferTarget"><option>oyun sahnesi</option><option>müzik kompozisyonu</option><option>görsel tasarım</option></select><label for="tkTransferContent">İçerik</label><textarea id="tkTransferContent"></textarea><button class="tkPrimary" id="tkTransferBtn">Dönüştür</button><pre id="tkTransferResult" hidden></pre></div></section>
   <section class="tkMindPanel" data-tk-panel="resonance"><div class="tkMindCard"><strong>Kullanıcı kontrollü anlatım uyumu</strong><p>Durumunu veya istediğin anlatım tarzını seçebilirsin. Sensörler kapalıyken hiçbir kamera ya da nabız verisi alınmaz.</p><label for="tkResonanceState">Şu an nasıl hissediyorsun?</label><select id="tkResonanceState"><option>sakinim</option><option>yorgunum</option><option>stresliyim</option><option>heyecanlıyım</option><option>odaklanmak istiyorum</option><option>normal</option></select><label for="tkResonancePreference">Yanıt tercihi</label><select id="tkResonancePreference"><option>kısa ve sakin</option><option>enerjik ve motive edici</option><option>adım adım ve sade</option><option>ayrıntılı ve teknik</option></select><button class="tkPrimary" id="tkResonanceBtn">Anlatım tercihimi uygula</button><pre id="tkResonanceResult" hidden></pre></div>
-   <div class="tkMindCard" style="margin-top:12px"><strong>İsteğe bağlı kamera ipuçları</strong><p>Kamera izni verdiğinde görüntü tarayıcıda işlenir. Yalnızca yüzün ekranda algılanıp algılanmadığı ve gözlerin uzun süre kapalı kalıp kalmadığı gibi sınırlı ipuçları kullanılır. Yüz görüntüsü veya kareler Tekden AI sunucusuna gönderilmez ve kaydedilmez. Bu ipuçları ruh hâlini, stresi veya yorgunluğu teşhis etmez.</p>
+   <div class="tkMindCard" style="margin-top:12px"><strong>İsteğe bağlı kamera ve yüz ifadesi uyarlaması</strong><p>Kamera izni verdiğinde görüntü cihazında işlenir. İstersen gülümseme, şaşkınlık veya ciddi ifade gibi yaklaşık yüz ifadesi ipuçlarını algılayıp yanıt üslubunu uyarlayabilir. Örneğin gülümsemeye benzer bir ifade algılanırsa daha neşeli ve sıcak cevap verir. Bu, gerçek duygunu kesin olarak bilmek anlamına gelmez; yüz ifadesi duygu kanıtı değildir. Ham görüntü sunucuya gönderilmez; yalnızca seçilen yaklaşık ifade etiketi sohbet isteğine eklenir.</p>
     <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="tkPrimary" id="tkCameraStart" type="button">Kamerayı aç</button><button class="tkSecondary" id="tkCameraStop" type="button">Kamerayı kapat</button></div>
     <video id="tkSensorVideo" muted playsinline autoplay style="display:none;width:100%;max-width:360px;margin-top:10px;border-radius:12px;background:#111"></video>
     <p id="tkCameraStatus" role="status">Kamera kapalı.</p>
     <label style="display:flex;align-items:center;gap:8px;font-weight:600"><input id="tkCameraAuto" type="checkbox" style="width:auto"> Yüz uzun süre görünmezse veya gözler uzun süre kapalı algılanırsa kısa yanıt moduna geç</label>
-    <p style="font-size:12px">Algılama hatalı olabilir; gözlük, ışık, kamera açısı ve cihaz performansı sonucu etkileyebilir. Göz bebeği çapı ölçülmez.</p>
+    <label style="display:flex;align-items:center;gap:8px;font-weight:600"><input id="tkExpressionAuto" type="checkbox" style="width:auto"> Yaklaşık yüz ifadesine göre yanıt üslubunu uyarla</label>
+    <p style="font-size:12px">Örnek: gülümsemeye benzer ifade → daha neşeli yanıt; şaşkınlığa benzer ifade → daha canlı ve açıklayıcı yanıt; ciddi ifade → sakin ve nazik yanıt. Bu sonuçlar tahmindir; üzgünlük, öfke, stres veya başka bir ruh hâli teşhisi yapılmaz. Işık, açı, gözlük ve kişisel mimikler sonucu etkileyebilir.</p><label style="display:flex;align-items:center;gap:8px;font-weight:600"><input id="tkTypingAuto" type="checkbox" style="width:auto"> Sohbet yazma ritmimi ölç ve yanıt biçimini uyarla</label><p style="font-size:12px">Sohbet kutusunda yalnızca tuş zamanları ölçülür; hangi tuşa bastığın veya yazdığın metin analiz edilmez. Bu sinyaller yalnızca o anki yanıt biçimini ayarlamak için kullanılır.</p>
    </div>
-   <div class="tkMindCard" style="margin-top:12px"><strong>Bluetooth nabız cihazı</strong><p>Destekleyen Bluetooth kalp ritmi sensörüne veya akıllı saate bağlanabilirsin. Nabız değeri yalnızca bu sayfada gösterilir; sunucuya, sohbete veya veritabanına gönderilmez.</p>
+   <div class="tkMindCard" style="margin-top:12px"><strong>Bluetooth nabız cihazı</strong><p>Destekleyen Bluetooth kalp ritmi sensörüne veya akıllı saate bağlanabilirsin. Nabız cihazda okunur; ham BPM değeri sunucuya, sohbete veya veritabanına gönderilmez. Yalnızca senin seçtiğin eşik aşıldığında seçtiğin yanıt tarzı uygulanır; bu bir sağlık değerlendirmesi değildir.</p>
     <button class="tkPrimary" id="tkPulseConnect" type="button">Bluetooth cihazını bağla</button><button class="tkSecondary" id="tkPulseDisconnect" type="button">Bağlantıyı kes</button>
     <p id="tkPulseStatus" role="status">Nabız cihazı bağlı değil.</p>
     <label for="tkPulseThreshold">Kendi seçtiğin anlatım eşiği (atım/dakika)</label><input id="tkPulseThreshold" type="number" min="40" max="220" step="1" placeholder="Örn. 105">
@@ -6541,8 +6561,8 @@ MIND_LAB_HTML = r"""
   <section class="tkMindPanel" data-tk-panel="evolution"><div class="tkMindCard"><strong>Arka plan kod evrimi</strong><p>Gönderdiğin kod bakım incelemesi için kuyruğa alınır. Servis çalışıyorken işçi kodu analiz eder, teknik borç ve iyileştirme yamaları önerir. Kod çalıştırılmaz, kaynak dosyan değiştirilmez ve otomatik dağıtım yapılmaz. Render servisi uykuya geçer veya yeniden başlarsa işin tamamlanması gecikebilir. Kod Ollama Cloud modeline analiz için gönderilir; gizli anahtarları ve kişisel verileri göndermeden önce sil.</p><label for="tkEvolutionName">Proje adı</label><input id="tkEvolutionName" maxlength="100" value="Tekden AI"><label for="tkEvolutionGoal">İnceleme hedefi</label><input id="tkEvolutionGoal" maxlength="800" value="Bakım risklerini bul, 6-12-36 aylık risk senaryoları ve iyileştirme yamaları öner"><label for="tkEvolutionCode">İncelenecek kod</label><textarea id="tkEvolutionCode" maxlength="24000" placeholder="İncelemek istediğin kodu buraya yapıştır..."></textarea><button class="tkPrimary" id="tkEvolutionStart" type="button">Arka plan incelemesini başlat</button><p id="tkEvolutionStatus" role="status">Henüz iş başlatılmadı.</p><pre id="tkEvolutionResult" hidden></pre></div></section>
   <section class="tkMindPanel" data-tk-panel="all25">
    <div class="tkMindCard">
-    <strong>25 Gelişmiş Zihin & Nöral Entegrasyon Motoru</strong>
-    <p>Bu bölüm, gönderdiğin 25 özelliğin tamamını Zihin Atölyesi içine taşır. Bir kart seç, aşağıya proje/kod/isteğini yaz ve seçili motoru çalıştır. Her araç gerçek kapasitesi ölçüsünde analiz, prototip veya plan üretir.</p>
+    <strong>30 Gelişmiş Zihin & Nöral Entegrasyon Motoru</strong>
+    <p>Bu bölüm, gönderdiğin 30 özelliğin tamamını Zihin Atölyesi içine taşır. Bir kart seç, aşağıya proje/kod/isteğini yaz ve seçili motoru çalıştır. Her araç gerçek kapasitesi ölçüsünde analiz, prototip veya plan üretir.</p>
     <div class="tk25Grid">
      <button type="button" class="tk25Card" data-feature="thought_physics"><b>1. Nöro-Mekanik Fizik Motoru</b><span>Fikir ve etkileşim tarifinden Canvas/JavaScript fizik prototipi üretir.</span></button>
      <button type="button" class="tk25Card" data-feature="bio_ui"><b>2. Biyo-Ritmik Arayüz Adaptasyonu</b><span>İzinli sinyal özeti ve tercihlere göre erişilebilir arayüz önerir.</span></button>
@@ -6569,6 +6589,11 @@ MIND_LAB_HTML = r"""
      <button type="button" class="tk25Card" data-feature="organic_code"><b>23. Kendi Kendine Evrimleşen Organik Kod</b><span>Öneri, diff, test, onay ve geri alma adımlarından oluşan kontrollü iyileştirme döngüsü kurar.</span></button>
      <button type="button" class="tk25Card" data-feature="zero_latency"><b>24. Sıfır Gecikmeli Dünya Motoru</b><span>Önbellek, streaming ve indeksleme ile ölçülebilir gecikme azaltma planı çıkarır.</span></button>
      <button type="button" class="tk25Card" data-feature="emotional_audio"><b>25. Duygu-Melodi Eş Zamanlı Stüdyo</b><span>Seçtiğin tema ve proje içeriğine özgün müzik taslağı hazırlar.</span></button>
+     <button type="button" class="tk25Card" data-feature="entropy_reset"><b>26. Termodinamik Sıfırlama Motoru</b><span>Eski/bozuk kodu yeniden yapılandırır, modern sürüm ve test planı üretir.</span></button>
+     <button type="button" class="tk25Card" data-feature="schrodinger_code"><b>27. Schrödinger Kod Tabanı</b><span>İki zıt mimari adayı ayrı ayrı üretir ve karşılaştırır.</span></button>
+     <button type="button" class="tk25Card" data-feature="causality_loop"><b>28. Nedensellik Döngüsü Derleyicisi</b><span>Yazım sırasında mevcut koddan erken hata uyarıları çıkarır.</span></button>
+     <button type="button" class="tk25Card" data-feature="neural_telepathy"><b>29. Eşzamanlı Zihin Köprüsü</b><span>Gerçek zamanlı ortak proje ve değişiklik senkronizasyonu tasarlar.</span></button>
+     <button type="button" class="tk25Card" data-feature="mass_matter"><b>30. Dijitalden Donanıma Tasarımcı</b><span>Donanım fikrini PCB/HDL, parça listesi ve prototip planına dönüştürür.</span></button>
     </div>
     <div class="tk25Runner">
      <div class="tk25Selected" id="tk25Selected">Bir motor seçerek başla.</div>
@@ -6599,8 +6624,8 @@ MIND_LAB_HTML = r"""
 </div>
 <script>
 (()=>{
- const $=id=>document.getElementById(id);let focus='neutral',manualFocus='neutral';window.tkFocusState='neutral';
- let cameraStream=null,cameraRAF=0,faceLandmarker=null,lastVideoTime=-1,lastCameraProcessAt=0,faceMissingSince=0,eyesClosedSince=0,cameraBrief=false,eyeWasClosed=false,blinkTimes=[];
+ const $=id=>document.getElementById(id);let focus='neutral',manualFocus='neutral';window.tkFocusState='neutral';window.tkSensorContext='none';
+ let cameraStream=null,cameraRAF=0,faceLandmarker=null,lastVideoTime=-1,lastCameraProcessAt=0,faceMissingSince=0,eyesClosedSince=0,cameraBrief=false,eyeWasClosed=false,blinkTimes=[];window.tkFacialExpression='none';
  let pulseDevice=null,pulseCharacteristic=null,currentBpm=null,pulseAutoActive=false;
  let micStream=null,micContext=null,micAnalyser=null,micRaf=0,micSamples=[],micStartedAt=0;
  let toneContext=null,toneNodes=[];
@@ -6609,8 +6634,8 @@ MIND_LAB_HTML = r"""
  function show(id,text){const el=$(id);el.textContent=text;el.hidden=false}
  function esc(t){return String(t||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
  $('tkMindOpen').addEventListener('click',()=>{$('tkMindShade').style.display='flex';loadProjects().catch(e=>status(e.message))});
- $('tkMindClose').addEventListener('click',()=>{$('tkMindShade').style.display='none'});
- $('tkMindShade').addEventListener('click',e=>{if(e.target===$('tkMindShade'))$('tkMindShade').style.display='none'});
+ $('tkMindClose').addEventListener('click',()=>{$('tkMindShade').style.display='none';if(cameraStream)stopCamera()});
+ $('tkMindShade').addEventListener('click',e=>{if(e.target===$('tkMindShade')){$('tkMindShade').style.display='none';if(cameraStream)stopCamera()}});
  document.querySelectorAll('[data-tk-tab]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-tk-tab]').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('[data-tk-panel]').forEach(x=>x.classList.toggle('active',x.dataset.tkPanel===b.dataset.tkTab));status('')}));
  async function loadProjects(){try{const d=await req('/api/mind/projects');const root=$('tkProjectList');root.textContent='';if(!d.items.length){root.textContent='Henüz proje kaydedilmedi.';return}d.items.forEach(item=>{const wrap=document.createElement('div');wrap.className='tkProjectItem';const info=document.createElement('div');const title=document.createElement('strong');title.textContent=item.project_name;const small=document.createElement('small');small.textContent=(item.summary||'').slice(0,180);info.append(title,small);const actions=document.createElement('div');actions.style.display='grid';actions.style.gap='5px';const review=document.createElement('button');review.className='tkSecondary';review.textContent='Gözden geçir';review.addEventListener('click',async()=>{review.disabled=true;status('Proje değerlendirmesi hazırlanıyor…');try{const x=await req('/api/mind/projects/'+item.id+'/review',{method:'POST',body:'{}'});small.textContent=x.suggestion.slice(0,260);status('Sonraki adım önerisi hazır. Proje hafızasına kaydedildi.')}catch(e){status(e.message)}finally{review.disabled=false}});const del=document.createElement('button');del.className='tkSecondary';del.textContent='Sil';del.addEventListener('click',async()=>{if(!confirm('Bu proje hafızası silinsin mi?'))return;try{await req('/api/mind/projects/'+item.id,{method:'DELETE'});loadProjects()}catch(e){status(e.message)}});actions.append(review,del);wrap.append(info,actions);root.append(wrap)})}catch(e){$('tkProjectList').textContent=e.message;throw e}}
  $('tkProjectSave').addEventListener('click',async()=>{const project_name=$('tkProjectName').value.trim(),summary=$('tkProjectSummary').value.trim(),next_actions=$('tkProjectNext').value.trim();if(project_name.length<2||summary.length<5){status('Proje adı ve en az birkaç cümlelik özet gerekli.');return}try{await req('/api/mind/projects',{method:'POST',body:JSON.stringify({project_name,summary,next_actions})});status('Proje hafızası kaydedildi.');await loadProjects()}catch(e){status(e.message)}});
@@ -6619,6 +6644,12 @@ MIND_LAB_HTML = r"""
   if(cameraBrief && $('tkCameraAuto')?.checked) next='brief';
   if(pulseAutoActive && $('tkPulseAuto')?.checked) next=$('tkPulseStyle').value;
   window.tkFocusState=next;
+  let sensor='none';
+  if(pulseAutoActive && $('tkPulseAuto')?.checked) sensor='pulse_style_selected';
+  else if(window.tkFacialExpression && window.tkFacialExpression!=='none' && $('tkExpressionAuto')?.checked) sensor=window.tkFacialExpression;
+  else if(cameraBrief && $('tkCameraAuto')?.checked) sensor='camera_accessibility';
+  else if(window.tkTypingSignal && $('tkTypingAuto')?.checked) sensor=window.tkTypingSignal;
+  window.tkSensorContext=sensor;
   const active=[];if(cameraStream)active.push('kamera');if(pulseDevice?.gatt?.connected)active.push('Bluetooth nabız');
   $('tkMindOpen').textContent=active.length?'✦ Zihin Atölyesi · '+active.join(' + ')+' etkin':'✦ Zihin Atölyesi';
  }
@@ -6631,14 +6662,21 @@ MIND_LAB_HTML = r"""
   lastCameraProcessAt=now;lastVideoTime=video.currentTime;
   let result;try{result=faceLandmarker.detectForVideo(video,now)}catch(err){setCameraStatus('Kamera analizi durdu: '+err.message);return}
   const hasFace=!!(result.faceLandmarks&&result.faceLandmarks.length);
-  if(!hasFace){if(!faceMissingSince)faceMissingSince=Date.now();eyesClosedSince=0;cameraBrief=Date.now()-faceMissingSince>12000;setCameraStatus(cameraBrief?'Yüz 12 saniyeden uzun süredir görüntüde algılanmıyor. Bu durumun nedeni bilinemez.':'Yüz algılanmadı veya kamera açısı uygun değil.');}
+  if(!hasFace){if(!faceMissingSince)faceMissingSince=Date.now();eyesClosedSince=0;cameraBrief=Date.now()-faceMissingSince>12000;window.tkFacialExpression='none';setCameraStatus(cameraBrief?'Yüz 12 saniyeden uzun süredir görüntüde algılanmıyor. Bu durumun nedeni bilinemez.':'Yüz algılanmadı veya kamera açısı uygun değil.');}
   else{
    faceMissingSince=0;
    const categories=result.faceBlendshapes?.[0]?.categories||[];
    const score=name=>categories.find(x=>x.categoryName===name)?.score||0;
+   const smile=(score('mouthSmileLeft')+score('mouthSmileRight'))/2;
+   const wideEyes=(score('eyeWideLeft')+score('eyeWideRight'))/2;
+   const browDown=(score('browDownLeft')+score('browDownRight'))/2;
+   const mouthPress=(score('mouthPressLeft')+score('mouthPressRight'))/2;
+   const jawOpen=score('jawOpen');
+   // Yüz ifadesi ipucu; kişinin gerçek duygusunu veya ruh hâlini belirlemez.
+   window.tkFacialExpression=$('tkExpressionAuto')?.checked?(smile>=0.42?'expression_smiling':(wideEyes>=0.48&&jawOpen>=0.28?'expression_surprised':(browDown>=0.52&&mouthPress>=0.32?'expression_serious':'none'))):'none';
    const eyesClosed=score('eyeBlinkLeft')>.78&&score('eyeBlinkRight')>.78;
    if(eyesClosed){if(!eyeWasClosed){blinkTimes.push(Date.now());blinkTimes=blinkTimes.filter(t=>Date.now()-t<60000);}eyeWasClosed=true;if(!eyesClosedSince)eyesClosedSince=Date.now();cameraBrief=Date.now()-eyesClosedSince>5000;setCameraStatus((cameraBrief?'Gözler bir süredir kapalı görünüyor. ':'Yüz algılandı. ')+ 'Son 60 saniye göz kırpma sayısı: '+blinkTimes.filter(t=>Date.now()-t<60000).length+'. Bu bir duygu/odak teşhisi değildir.');}
-   else{eyeWasClosed=false;eyesClosedSince=0;cameraBrief=false;setCameraStatus('Yüz algılandı. Son 60 saniye göz kırpma sayısı: '+blinkTimes.filter(t=>Date.now()-t<60000).length+'. İpuçları cihaz üzerinde işleniyor.');}
+   else{eyeWasClosed=false;eyesClosedSince=0;cameraBrief=false;const exprLabel=window.tkFacialExpression==='expression_smiling'?'Gülümsemeye benzer ifade':window.tkFacialExpression==='expression_surprised'?'Şaşkınlığa benzer ifade':window.tkFacialExpression==='expression_serious'?'Ciddi ifadeye benzer ipucu':'Belirgin ifade ipucu yok';setCameraStatus('Yüz algılandı. '+exprLabel+'. Son 60 saniye göz kırpma sayısı: '+blinkTimes.filter(t=>Date.now()-t<60000).length+'. Yaklaşık sınıflandırma cihazda yapılıyor.');}
   }
   refreshSensorFocus();
  }
@@ -6671,7 +6709,7 @@ MIND_LAB_HTML = r"""
   if(cameraStream)cameraStream.getTracks().forEach(t=>t.stop());cameraStream=null;
   if(faceLandmarker){try{faceLandmarker.close()}catch{}faceLandmarker=null;}
   const video=$('tkSensorVideo');if(video){video.pause();video.srcObject=null;video.style.display='none';}
-  cameraBrief=false;faceMissingSince=0;eyesClosedSince=0;lastVideoTime=-1;lastCameraProcessAt=0;eyeWasClosed=false;blinkTimes=[];setCameraStatus('Kamera kapalı.');refreshSensorFocus();
+  cameraBrief=false;window.tkFacialExpression='none';faceMissingSince=0;eyesClosedSince=0;lastVideoTime=-1;lastCameraProcessAt=0;eyeWasClosed=false;blinkTimes=[];setCameraStatus('Kamera kapalı.');refreshSensorFocus();
  }
  function recalculatePulseStyle(){
   const threshold=Number($('tkPulseThreshold').value);
@@ -6705,11 +6743,24 @@ MIND_LAB_HTML = r"""
  }
  $('tkCameraStart').addEventListener('click',startCamera);$('tkCameraStop').addEventListener('click',stopCamera);
  $('tkPulseConnect').addEventListener('click',connectPulse);$('tkPulseDisconnect').addEventListener('click',disconnectPulse);
- $('tkCameraAuto').addEventListener('change',refreshSensorFocus);$('tkPulseAuto').addEventListener('change',recalculatePulseStyle);
+ $('tkCameraAuto').addEventListener('change',refreshSensorFocus);$('tkExpressionAuto').addEventListener('change',refreshSensorFocus);$('tkPulseAuto').addEventListener('change',recalculatePulseStyle);$('tkTypingAuto').addEventListener('change',()=>{window.tkTypingSignal='none';chatKeyTimes=[];refreshSensorFocus()});
  $('tkPulseThreshold').addEventListener('input',recalculatePulseStyle);
  $('tkPulseStyle').addEventListener('change',refreshSensorFocus);
  document.addEventListener('visibilitychange',()=>{if(document.hidden){if(cameraStream)stopCamera();if(pulseDevice?.gatt?.connected)disconnectPulse()}});
  window.addEventListener('beforeunload',()=>{if(cameraStream)cameraStream.getTracks().forEach(t=>t.stop());if(pulseDevice?.gatt?.connected)pulseDevice.gatt.disconnect()});
+ // Privacy-preserving chat typing rhythm: only timestamps are measured; no keys or text are stored.
+ let chatKeyTimes=[];let chatTypingTimer=null;window.tkTypingSignal='none';
+ const chatPrompt=$('prompt');
+ if(chatPrompt){
+  chatPrompt.addEventListener('keydown',ev=>{if(!$('tkTypingAuto')?.checked)return;if(ev.key.length!==1 && ev.key!=='Backspace' && ev.key!=='Enter')return;const now=Date.now();chatKeyTimes.push(now);chatKeyTimes=chatKeyTimes.filter(t=>now-t<12000);});
+  chatPrompt.addEventListener('input',()=>{if(!$('tkTypingAuto')?.checked){window.tkTypingSignal='none';refreshSensorFocus();return;}if(chatTypingTimer)clearTimeout(chatTypingTimer);chatTypingTimer=setTimeout(()=>{
+   if(chatKeyTimes.length<4){window.tkTypingSignal='none';refreshSensorFocus();return;}
+   const now=Date.now(),gaps=chatKeyTimes.slice(1).map((t,i)=>t-chatKeyTimes[i]);
+   const avg=gaps.reduce((a,b)=>a+b,0)/gaps.length;const lastGap=now-chatKeyTimes[chatKeyTimes.length-1];
+   window.tkTypingSignal=lastGap>5000?'typing_pauses':avg>850?'typing_slow':avg<180?'typing_fast':'none';
+   refreshSensorFocus();
+  },350);});
+ }
  let typingTimes=[];let typingAdaptive=false;document.addEventListener('keydown',ev=>{if(!document.querySelector('[data-tk-panel=\"synapse\"].active'))return;if(ev.key.length!==1)return;const now=Date.now();typingTimes.push(now);typingTimes=typingTimes.filter(t=>now-t<20000);if(typingTimes.length>=5){const gaps=typingTimes.slice(1).map((t,i)=>t-typingTimes[i]);const avg=gaps.reduce((a,b)=>a+b,0)/gaps.length;$('tkTypingCue').textContent='Son yazma temposu: yaklaşık '+Math.round(60000/Math.max(avg,1))+' tuş/dakika. Bu yalnızca etkileşim ritmidir.';if($('tkAdaptiveUI').checked&&avg>1800){document.documentElement.style.setProperty('--tk-density','1.08');$('tkTypingCue').textContent+=' · Daha geniş arayüz aralığı etkin.';}else{document.documentElement.style.removeProperty('--tk-density');}}});
  $('tkAdaptiveUI').addEventListener('change',()=>{if(!$('tkAdaptiveUI').checked)document.documentElement.style.removeProperty('--tk-density');});
  function renderLogicGalaxy(raw){const canvas=$('tkLogicGalaxy'),ctx=canvas.getContext('2d');let data;try{const a=raw.indexOf('{'),b=raw.lastIndexOf('}');if(a<0||b<=a)throw Error('JSON bulunamadı');data=JSON.parse(raw.slice(a,b+1));}catch(e){$('tkLogicGalaxyStatus').textContent='Harita verisi okunamadı. Model çıktısını metin olarak inceleyebilirsin.';return;}if(!Array.isArray(data.nodes)||!Array.isArray(data.edges)||!data.nodes.length){$('tkLogicGalaxyStatus').textContent='Geçerli düğüm/bağlantı verisi bulunamadı.';return;}const nodes=data.nodes.slice(0,24),edges=data.edges.slice(0,60);const pos={};nodes.forEach((n,i)=>{const phi=Math.acos(1-2*(i+.5)/nodes.length),theta=i*2.3999632297;pos[n.id]={x:Math.cos(theta)*Math.sin(phi),y:Math.sin(theta)*Math.sin(phi),z:Math.cos(phi),label:String(n.label||n.id).slice(0,42)};});let angle=0,dragging=false,lastX=0;canvas.onpointerdown=e=>{dragging=true;lastX=e.clientX;canvas.setPointerCapture(e.pointerId)};canvas.onpointermove=e=>{if(dragging){angle+=(e.clientX-lastX)*.008;lastX=e.clientX;draw()}};canvas.onpointerup=()=>dragging=false;canvas.onpointercancel=()=>dragging=false;function draw(){const w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);ctx.fillStyle='#07162b';ctx.fillRect(0,0,w,h);const projected={};nodes.forEach(n=>{const p=pos[n.id],x=p.x*Math.cos(angle)-p.z*Math.sin(angle),z=p.x*Math.sin(angle)+p.z*Math.cos(angle),scale=260/(3.1+z);projected[n.id]={x:w/2+x*scale,y:h/2+p.y*scale,z,scale};});ctx.lineWidth=1.6;edges.forEach(e=>{const a=projected[e.from],b=projected[e.to];if(!a||!b)return;ctx.strokeStyle='rgba(86,180,255,.38)';ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();});nodes.forEach(n=>{const p=projected[n.id];if(!p)return;const r=Math.max(5,Math.min(13,8+p.z*3));ctx.beginPath();ctx.arc(p.x,p.y,r,0,Math.PI*2);ctx.fillStyle=p.z>.2?'#82e6ff':'#b58cff';ctx.shadowColor=ctx.fillStyle;ctx.shadowBlur=16;ctx.fill();ctx.shadowBlur=0;ctx.font='13px system-ui';ctx.fillStyle='#ecf5ff';ctx.textAlign='center';ctx.fillText(pos[n.id].label,p.x,p.y+r+16);});}draw();$('tkLogicGalaxyStatus').textContent=nodes.length+' bileşen ve '+edges.length+' bağlantı gösteriliyor. Fareyle sürükleyerek görünümü döndürebilirsin.';}
@@ -8907,4 +8958,3 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
-            
