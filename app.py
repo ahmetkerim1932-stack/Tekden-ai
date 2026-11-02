@@ -1356,7 +1356,9 @@ Yazım ve anlatım kuralları:
         "camera_accessibility": "Kullanıcının cihazında yüzün görünmemesi veya gözlerin bir süre kapalı görünmesi gibi yalnızca görsel erişilebilirlik ipuçları algılandı. Bu durumun nedenini, duyguyu, stresi, yorgunluğu veya dikkati teşhis etme. Yanıtı daha kısa ve kolay takip edilir parçalara böl; kullanıcıya durum atfetme.",
         "expression_smiling": "Kamerada gülümsemeye benzeyen bir yüz ifadesi yaklaşık olarak algılandı. Kullanıcının kesinlikle mutlu olduğunu varsayma. Uygunsa sıcak, pozitif ve biraz daha neşeli bir üslup kullan; konunun ciddiyetini koru ve yapay biçimde aşırı coşkulu olma.",
         "expression_surprised": "Kamerada şaşkınlık ifadesine benzeyen görsel ipuçları yaklaşık olarak algılandı. Kullanıcının ne hissettiğini kesin bildiğini iddia etme. Uygunsa merak uyandıran, açıklayıcı ve canlı bir üslup kullan.",
-        "expression_serious": "Kamerada ciddi veya kaşları çatık bir ifadeye benzeyen görsel ipuçları yaklaşık olarak algılandı. Kullanıcının kızgın, üzgün veya stresli olduğunu varsayma. Sakin, nazik ve açık bir üslup kullan; kullanıcıya duygu atfetme.",
+        "expression_serious": "Kamerada kaş çatmaya benzer yüz hareketleri algılandı. Bu, kullanıcının kesinlikle kızgın olduğu anlamına gelmez. Suçlayıcı veya sorgulayıcı olmadan sakin, nazik ve açık bir üslup kullan; kullanıcıya duygu atfetme. ",
+        "expression_furrowed_brows": "Kamerada kaşların çatılmasına benzeyen mimik ipuçları algılandı. Bunun öfke olduğunu kesin kabul etme; kullanıcıya kızgın olduğunu söyleme. Sakin, anlayışlı ve doğrudan bir üslup kullan.",
+        "expression_yawning": "Kamerada bir süre devam eden ağız açılması/esneme hareketine benzeyen ipuçları algılandı. Bunun kesin yorgunluk kanıtı olmadığını unut. Yanıtı daha kısa, sade ve kolay takip edilir tut; kullanıcıya yorgun olduğunu kesinmiş gibi söyleme.",
         "pulse_style_selected": "Kullanıcının yerel cihazında kendi belirlediği nabız eşiği aşılmış ve kendi seçtiği anlatım tercihi etkinleşmiş. Nabız değerini bilmiyorsun; sağlık yorumu yapma. Yalnızca seçilen anlatım tercihini uygula.",
         "typing_slow": "Kullanıcının yazma alanındaki son tuş zamanlamaları yavaş bir yazma temposu gösteriyor. Bunun nedenini çıkarma. Daha kısa, adım adım ve kolay düzenlenebilir yanıt ver.",
         "typing_fast": "Kullanıcının yazma alanındaki son tuş zamanlamaları hızlı bir yazma temposu gösteriyor. Duygu veya kişilik çıkarımı yapma. Yanıtı doğrudan ve düzenli sun.",
@@ -6630,7 +6632,7 @@ MIND_LAB_HTML = r"""
 <script>
 (()=>{
  const $=id=>document.getElementById(id);let focus='neutral',manualFocus='neutral';window.tkFocusState='neutral';window.tkSensorContext='none';
- let cameraStream=null,cameraRAF=0,faceLandmarker=null,lastVideoTime=-1,lastCameraProcessAt=0,faceMissingSince=0,eyesClosedSince=0,cameraBrief=false,eyeWasClosed=false,blinkTimes=[];let expressionHistory=[],expressionCandidate='none',expressionCandidateSince=0,stableExpression='none';window.tkFacialExpression='none';
+ let cameraStream=null,cameraRAF=0,faceLandmarker=null,lastVideoTime=-1,lastCameraProcessAt=0,faceMissingSince=0,eyesClosedSince=0,cameraBrief=false,eyeWasClosed=false,blinkTimes=[],jawOpenSince=0,yawnCooldownUntil=0;let expressionHistory=[],expressionCandidate='none',expressionCandidateSince=0,stableExpression='none';window.tkFacialExpression='none';
  let pulseDevice=null,pulseCharacteristic=null,currentBpm=null,pulseAutoActive=false;
  let micStream=null,micContext=null,micAnalyser=null,micRaf=0,micSamples=[],micStartedAt=0;
  let toneContext=null,toneNodes=[];
@@ -6677,34 +6679,45 @@ MIND_LAB_HTML = r"""
     smileL:score('mouthSmileLeft'),smileR:score('mouthSmileRight'),
     wideL:score('eyeWideLeft'),wideR:score('eyeWideRight'),
     browL:score('browDownLeft'),browR:score('browDownRight'),
+    squintL:score('eyeSquintLeft'),squintR:score('eyeSquintRight'),
     pressL:score('mouthPressLeft'),pressR:score('mouthPressRight'),
     frownL:score('mouthFrownLeft'),frownR:score('mouthFrownRight'),
-    jaw:score('jawOpen')
+    sneerL:score('noseSneerLeft'),sneerR:score('noseSneerRight'),
+    jaw:score('jawOpen'), funnel:score('mouthFunnel'), stretchL:score('mouthStretchLeft'),stretchR:score('mouthStretchRight')
    };
    expressionHistory.push(sample);if(expressionHistory.length>8)expressionHistory.shift();
    const avg=key=>expressionHistory.reduce((sum,item)=>sum+item[key],0)/expressionHistory.length;
    const smileL=avg('smileL'),smileR=avg('smileR'),smile=(smileL+smileR)/2;
    const wideEyes=(avg('wideL')+avg('wideR'))/2;
    const browDown=(avg('browL')+avg('browR'))/2;
+   const eyeSquint=(avg('squintL')+avg('squintR'))/2;
    const mouthPress=(avg('pressL')+avg('pressR'))/2;
    const mouthFrown=(avg('frownL')+avg('frownR'))/2;
+   const noseSneer=(avg('sneerL')+avg('sneerR'))/2;
    const jawOpen=avg('jaw');
-   // Blendshape ipuçları 8 örnek üzerinden yumuşatılır; kısa anlık sıçramalar sınıflandırmayı değiştirmez.
+   const nowMs=Date.now();
+   // Uzun süre açık kalan ağız esneme ipucu olabilir; kısa açılma şaşkınlık olarak değerlendirilebilir.
+   if(jawOpen>=0.56){if(!jawOpenSince)jawOpenSince=nowMs;}else jawOpenSince=0;
+   const sustainedOpen=!!jawOpenSince && nowMs-jawOpenSince>=1250;
+   if(jawOpenSince===0 && nowMs>yawnCooldownUntil)yawnCooldownUntil=0;
+   // 8 karelik yumuşatma + süre eşiği: tek karelik mimik değişimleri atlanır.
    let detected='none';
    if($('tkExpressionAuto')?.checked){
-    if(smile>=0.34&&Math.min(smileL,smileR)>=0.22)detected='expression_smiling';
-    else if(wideEyes>=0.40&&jawOpen>=0.22)detected='expression_surprised';
-    else if(browDown>=0.42&&(mouthPress>=0.30||mouthFrown>=0.25))detected='expression_serious';
+    if(sustainedOpen && nowMs>=yawnCooldownUntil)detected='expression_yawning';
+    else if(wideEyes>=0.38&&jawOpen>=0.22&&!sustainedOpen)detected='expression_surprised';
+    else if(browDown>=0.34&&(mouthPress>=0.22||mouthFrown>=0.20||eyeSquint>=0.30||noseSneer>=0.24))detected='expression_furrowed_brows';
+    else if(smile>=0.34&&Math.min(smileL,smileR)>=0.22)detected='expression_smiling';
    }
-   const nowMs=Date.now();
+   
    if(detected!==expressionCandidate){expressionCandidate=detected;expressionCandidateSince=nowMs;}
-   const stableDelay=detected==='none'?650:450;
+   const stableDelay=detected==='none'?700:(detected==='expression_yawning'?250:500);
    if(nowMs-expressionCandidateSince>=stableDelay)stableExpression=detected;
    // Kısa geçişleri yoksay; kararlı ipucunu sohbet mesajı gönderilene kadar sakla.
    window.tkFacialExpression=$('tkExpressionAuto')?.checked?stableExpression:'none';
+   if(window.tkFacialExpression==='expression_yawning' && jawOpen<0.30){yawnCooldownUntil=Date.now()+1800;jawOpenSince=0;}
    const eyesClosed=score('eyeBlinkLeft')>.78&&score('eyeBlinkRight')>.78;
    if(eyesClosed){if(!eyeWasClosed){blinkTimes.push(Date.now());blinkTimes=blinkTimes.filter(t=>Date.now()-t<60000);}eyeWasClosed=true;if(!eyesClosedSince)eyesClosedSince=Date.now();cameraBrief=Date.now()-eyesClosedSince>5000;setCameraStatus((cameraBrief?'Gözler bir süredir kapalı görünüyor. ':'Yüz algılandı. ')+ 'Son 60 saniye göz kırpma sayısı: '+blinkTimes.filter(t=>Date.now()-t<60000).length+'. Bu bir duygu/odak teşhisi değildir.');}
-   else{eyeWasClosed=false;eyesClosedSince=0;cameraBrief=false;const exprLabel=window.tkFacialExpression==='expression_smiling'?'Gülümsemeye benzer ifade algılandı':window.tkFacialExpression==='expression_surprised'?'Şaşkınlığa benzer ifade algılandı':window.tkFacialExpression==='expression_serious'?'Ciddi ifadeye benzer ipucu algılandı':'Yüz algılandı · belirgin ifade yok';setCameraStatus(exprLabel+'. Sohbet yanıtı bu ipucuna göre uyarlanacak.');}
+   else{eyeWasClosed=false;eyesClosedSince=0;cameraBrief=false;const exprLabel=window.tkFacialExpression==='expression_smiling'?'Gülümsemeye benzer ifade algılandı':window.tkFacialExpression==='expression_surprised'?'Şaşkınlığa benzer ifade algılandı':window.tkFacialExpression==='expression_furrowed_brows'?'Kaş çatmaya benzer mimik algılandı':window.tkFacialExpression==='expression_yawning'?'Uzun ağız açılması / esneme ipucu algılandı':'Yüz algılandı · belirgin ifade yok';setCameraStatus(exprLabel+'. Sohbet yanıtı bu ipucuna göre uyarlanacak.');}
   }
   refreshSensorFocus();
  }
@@ -6722,7 +6735,7 @@ MIND_LAB_HTML = r"""
    const base={modelAssetPath:model};
    try{faceLandmarker=await vision.FaceLandmarker.createFromOptions(wasm,{baseOptions:{...base,delegate:'GPU'},runningMode:'VIDEO',numFaces:1,outputFaceBlendshapes:true});}
    catch(gpuError){faceLandmarker=await vision.FaceLandmarker.createFromOptions(wasm,{baseOptions:{...base,delegate:'CPU'},runningMode:'VIDEO',numFaces:1,outputFaceBlendshapes:true});}
-   lastVideoTime=-1;lastCameraProcessAt=0;faceMissingSince=0;eyesClosedSince=0;cameraBrief=false;eyeWasClosed=false;blinkTimes=[];
+   lastVideoTime=-1;lastCameraProcessAt=0;faceMissingSince=0;eyesClosedSince=0;cameraBrief=false;eyeWasClosed=false;blinkTimes=[];jawOpenSince=0;yawnCooldownUntil=0;
    const loop=()=>{if(!cameraStream)return;updateCameraCue(performance.now());cameraRAF=requestAnimationFrame(loop)};cameraRAF=requestAnimationFrame(loop);
    setCameraStatus('Kamera açık. Görüntü bu cihazda işleniyor; sunucuya gönderilmiyor.');refreshSensorFocus();
   }catch(err){
@@ -6737,7 +6750,7 @@ MIND_LAB_HTML = r"""
   if(cameraStream)cameraStream.getTracks().forEach(t=>t.stop());cameraStream=null;
   if(faceLandmarker){try{faceLandmarker.close()}catch{}faceLandmarker=null;}
   const video=$('tkSensorVideo');if(video){video.pause();video.srcObject=null;video.style.display='none';}if($('tkCameraPip'))$('tkCameraPip').style.display='none';
-  cameraBrief=false;window.tkFacialExpression='none';faceMissingSince=0;eyesClosedSince=0;lastVideoTime=-1;lastCameraProcessAt=0;eyeWasClosed=false;blinkTimes=[];expressionHistory=[];expressionCandidate='none';stableExpression='none';setCameraStatus('Kamera kapalı.');refreshSensorFocus();
+  cameraBrief=false;window.tkFacialExpression='none';jawOpenSince=0;yawnCooldownUntil=0;faceMissingSince=0;eyesClosedSince=0;lastVideoTime=-1;lastCameraProcessAt=0;eyeWasClosed=false;blinkTimes=[];expressionHistory=[];expressionCandidate='none';stableExpression='none';setCameraStatus('Kamera kapalı.');refreshSensorFocus();
  }
  function recalculatePulseStyle(){
   const threshold=Number($('tkPulseThreshold').value);
@@ -8986,4 +8999,4 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
-    
+        
