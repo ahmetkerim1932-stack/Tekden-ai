@@ -34,6 +34,10 @@ STRIPE_PRICE_ID_PRO = os.getenv("STRIPE_PRICE_ID_PRO", "").strip()
 STRIPE_PRICE_ID_PLUS = os.getenv("STRIPE_PRICE_ID_PLUS", "").strip()
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
 PUBLIC_APP_URL = os.getenv("PUBLIC_APP_URL", "").strip().rstrip("/")
+# Optional HTTPS player URL for an externally hosted Unreal Engine Pixel Streaming session.
+METAHUMAN_PIXEL_STREAMING_URL = os.getenv("METAHUMAN_PIXEL_STREAMING_URL", "").strip()
+if not METAHUMAN_PIXEL_STREAMING_URL.startswith("https://"):
+    METAHUMAN_PIXEL_STREAMING_URL = ""
 COOKIE_NAME = "tekden_session"
 SESSION_DAYS = 30
 
@@ -6480,7 +6484,7 @@ def pro_studio(request: Request):
     studio_plan = "plus" if studio_user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else studio_user.get("plan", "free")
     if studio_plan not in ("pro", "plus"):
         raise HTTPException(403, "Pro Stüdyo yalnızca Pro ve Plus üyelerine açıktır.")
-    return HTMLResponse(r'''<!doctype html>
+    page = r'''<!doctype html>
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tekden AI · Pro Stüdyo</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top left,#eaf4ff 0,transparent 42%),#f8fbff;color:#122744;font:15px/1.5 Inter,system-ui,sans-serif}button,textarea{font:inherit}button{cursor:pointer;border:0;border-radius:12px;padding:11px 15px;background:#0878f9;color:white;font-weight:750}button:disabled{opacity:.55;cursor:wait}.secondary{background:#fff;color:#24466e;border:1px solid #d7e6f8}.shell{max-width:1250px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.brand{font-weight:900;font-size:22px}.brand span{color:#0878f9}.pill{background:#efe6ff;color:#6834bd;padding:5px 10px;border-radius:99px;font-size:12px;font-weight:850}.hero{padding:35px 0 24px}.hero h1{font-size:clamp(30px,4vw,48px);letter-spacing:-1.4px;margin:0 0 8px}.hero p{color:#607590;max-width:700px;margin:0}.grid{display:grid;grid-template-columns:minmax(280px,370px) minmax(0,1fr);gap:18px;align-items:start}.card{background:#fff;border:1px solid #dce9f8;border-radius:20px;padding:20px;box-shadow:0 12px 34px #254c7c0b}.card h2{margin:0 0 5px;font-size:18px}.muted{color:#607590;font-size:13px}.presets{display:flex;gap:7px;flex-wrap:wrap;margin:15px 0}.presets button{font-size:12px;padding:8px 10px}.textarea{width:100%;min-height:190px;resize:vertical;border:1px solid #d6e5f8;border-radius:13px;padding:13px;outline:none}.textarea:focus{border-color:#76b7ff;box-shadow:0 0 0 3px #e3f1ff}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.status{min-height:22px;color:#526784;font-size:13px;margin-top:10px}.preview{min-height:530px;border:1px dashed #bdd5f0;border-radius:15px;background:linear-gradient(135deg,#f5f9ff,#fff);display:grid;place-items:center;overflow:hidden}.preview iframe{width:100%;height:650px;border:0;background:#07111f}.empty{text-align:center;padding:30px;color:#69809b}.empty .icon{font-size:42px}.smallnote{font-size:12px;color:#7386a0;margin-top:10px}@media(max-width:850px){.shell{padding:14px}.grid{grid-template-columns:1fr}.preview{min-height:350px}.preview iframe{height:65vh}}
@@ -6514,11 +6518,22 @@ def pro_studio(request: Request):
 .avatar-preset-row button{padding:8px 10px;font-size:12px}
 @media(max-width:850px){.avatar-layout{grid-template-columns:1fr}.avatar-stage{min-height:500px}.avatar-figure{height:390px}.avatar-control-grid{grid-template-columns:1fr 1fr}}
 @media(max-width:480px){.avatar-control-grid{grid-template-columns:1fr}.avatar-stage{min-height:440px}.avatar-figure{height:340px}}
+@media(max-width:600px){.td-metahuman-card iframe{min-height:300px!important;height:58vh!important}.td-metahuman-card .pill{font-size:10px}}
 </style></head><body><div class="shell"><header class="top"><div class="brand">Tekden <span>AI</span> <span class="pill">✦ PRO STÜDYO</span></div><div style="display:flex;gap:8px"><button class="secondary" onclick="location.href='/'">← Sohbete dön</button></div></header>
 <section class="hero"><h1>Fikrini <span style="color:#0878f9">oyuna, şarkıya veya avatara</span> dönüştür.</h1><p>Pro Stüdyo oyun, müzik ve kurgusal avatar sunucusu üretim araçlarını bir araya getirir. Avatarın seslendirmesi cihazındaki tarayıcı motoruyla yapılır; kişisel yüz veya ses klonlaması içermez. Müzik motoru eroq Music API üzerinden bağlanır (Render Environment: EROQ_API_KEY).</p></section><div class="actions" style="margin:0 0 18px"><button id="gameMode">🎮 Oyun stüdyosu</button><button class="secondary" id="songMode">🎵 Şarkı stüdyosu</button><button class="secondary" id="avatarMode">🧑‍🚀 Avatar stüdyosu</button></div>
 <section id="avatarPanel" class="card" style="display:none;margin-bottom:18px">
 <h2>🧑‍🚀 Tekden AI Kurgusal Avatar Stüdyosu</h2>
 <p class="muted">Gerçek bir kişiyi taklit etmeyen, ışıklandırılmış ve döndürülebilir 3D sanal sunucu tasarla. Yüz materyalini, saçını, gözlerini, kıyafetini ve sahne ışığını özelleştir; avatar metnini Türkçe yapay sesle okurken baş ve ağız animasyonlarını izle.</p>
+<section class="card td-metahuman-card" style="margin:14px 0 18px;background:linear-gradient(135deg,#071629,#122c4b);color:#eef8ff;border-color:#315b82">
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap"><h3 style="margin:0;font-size:18px">🎬 Fotogerçekçi MetaHuman sahnesi</h3><span class="pill">UNREAL ENGINE · PIXEL STREAMING</span></div>
+  <p style="color:#c2d9ed;font-size:13px;margin:8px 0 12px">Bu alan, geometrik demo yerine Unreal Engine üzerinde GPU ile render edilen gerçekçi dijital insanı gösterir. Görüntü, ayrı çalışan Pixel Streaming sunucusundan tarayıcıya aktarılır.</p>
+  <div id="tdMetaHumanPlayerWrap" style="display:none;position:relative;border:1px solid #47749a;border-radius:14px;overflow:hidden;background:#020812">
+    <span style="position:absolute;z-index:4;top:10px;left:10px;border:1px solid #8ab6d6;background:#061629dd;color:#e9f6ff;border-radius:99px;padding:5px 9px;font-size:10px;font-weight:800;letter-spacing:.05em;pointer-events:none">AI İLE OLUŞTURULMUŞ DİJİTAL SUNUCU</span>
+    <iframe id="tdMetaHumanPlayer" title="Tekden AI fotogerçekçi dijital insan" loading="lazy" allow="autoplay; fullscreen; camera; microphone; clipboard-read; clipboard-write" allowfullscreen referrerpolicy="no-referrer" style="display:block;width:100%;height:min(70vh,720px);min-height:420px;border:0;background:#020812"></iframe>
+  </div>
+  <div id="tdMetaHumanStatus" role="status" style="border:1px dashed #6b91b4;border-radius:12px;padding:15px;color:#d8ecff;background:#0b2037">Henüz Unreal Pixel Streaming bağlantısı ayarlanmadı. Önce bilgisayarında veya GPU sunucusunda MetaHuman projesini çalıştırıp HTTPS web player adresini oluşturmalısın.</div>
+  <div style="font-size:12px;color:#b9d2e7;margin-top:10px;line-height:1.55">Gerçek insan kalitesindeki görünüm, burada yüklenen bir resimle değil; MetaHuman karakteri, yüksek kaliteli materyaller, yüz rig'i ve gerçek zamanlı Unreal render'ıyla sağlanır. Yayında yapay zekâ etiketi görünür tutulmalıdır.</div>
+</section>
 <div class="avatar-layout">
   <div class="avatar-stage" id="tdAvatarStage">
     <div class="avatar-orbit"></div>
@@ -6548,7 +6563,7 @@ def pro_studio(request: Request):
     <div class="avatar-preset-row"><button class="secondary" type="button" data-avatar-script="Merhaba! Ben Tekden AI'ın kurgusal dijital sunucusuyum. Bugün sana nasıl yardımcı olabilirim?">👋 Tanıtım metni</button><button class="secondary" type="button" data-avatar-script="Tekden AI ile fikirlerini projelere dönüştürebilir, yeni şeyler öğrenebilir ve yaratıcı çalışmalar yapabilirsin.">✦ Tekden AI tanıtımı</button></div>
     <div class="actions"><button id="tdAvatarSpeak" type="button">▶ Avatarı konuştur</button><button class="secondary" id="tdAvatarStop" type="button">■ Durdur</button><button class="secondary" id="tdAvatarPreviewVoice" type="button">🔊 Sesi dene</button></div>
     <div id="tdAvatarStatus" class="status" role="status">Seslendirme tarayıcının konuşma motoruyla cihazında yapılır.</div>
-    <div class="avatar-help"><b>Gizlilik ve kapsam:</b> Bu sürüm gerçek kişiyi fotoğraftan veya sesten klonlamaz. Daha gerçekçi görünüm için kendi kullanım hakkına sahip, dokuları gömülü .GLB 3D modelini yalnızca tarayıcıya yükleyebilirsin; dosya sunucuya gönderilmez. Three.js ve GLTFLoader CDN üzerinden yüklenir, bu nedenle internet bağlantısı gerekir. Seçimler ve metin sunucuya gönderilmez. Bu sürüm MP4 üretmez; konuşma animasyonu tarayıcı konuşma olaylarına dayalı görsel senkronizasyondur. Kullanılabilir Türkçe sesler cihazına ve tarayıcına göre değişir.</div>
+    <div class="avatar-help"><b>Gizlilik ve kapsam:</b> Bu sürüm gerçek kişiyi fotoğraftan veya sesten klonlamaz. Daha gerçekçi görünüm için kendi kullanım hakkına sahip, dokuları gömülü .GLB 3D modelini yalnızca tarayıcıya yükleyebilirsin; dosya sunucuya gönderilmez. Three.js ve GLTFLoader CDN üzerinden yüklenir, bu nedenle internet bağlantısı gerekir. Seçimler ve metin sunucuya gönderilmez. Bu sürüm MP4 üretmez; konuşma animasyonu tarayıcı konuşma olaylarına dayalı görsel senkronizasyondur. Fotogerçekçi yayın için yukarıdaki Unreal Pixel Streaming bağlantısı gerekir. Kullanılabilir Türkçe sesler cihazına ve tarayıcına göre değişir.</div>
   </div>
 </div>
 </section>
@@ -6560,6 +6575,16 @@ function tdSetStudioMode(mode){$('gamePanel').style.display=mode==='game'?'grid'
 $('gameMode').onclick=()=>tdSetStudioMode('game');
 $('songMode').onclick=()=>tdSetStudioMode('song');
 $('avatarMode').onclick=()=>tdSetStudioMode('avatar');
+
+const TD_METAHUMAN_PIXEL_STREAMING_URL=__TD_METAHUMAN_STREAM_URL__;
+function tdConnectMetaHumanStream(){
+ const status=$('tdMetaHumanStatus'),wrap=$('tdMetaHumanPlayerWrap'),frame=$('tdMetaHumanPlayer');
+ if(!status||!wrap||!frame)return;
+ if(!TD_METAHUMAN_PIXEL_STREAMING_URL){status.textContent='Bağlantı henüz kurulmadı. Render → Environment bölümünde METAHUMAN_PIXEL_STREAMING_URL değişkenine Unreal Pixel Streaming web player adresini HTTPS olarak eklediğinde bu alan gerçek 3D sahneyi gösterecek. Şimdilik aşağıdaki GLB önizlemesi kullanılabilir.';return;}
+ try{const u=new URL(TD_METAHUMAN_PIXEL_STREAMING_URL);if(u.protocol!=='https:')throw new Error('Yalnızca HTTPS bağlantısı kabul edilir.');frame.src=u.href;wrap.style.display='block';status.style.display='none';}
+ catch(e){status.textContent='Pixel Streaming adresi geçersiz. METAHUMAN_PIXEL_STREAMING_URL değişkenine geçerli bir HTTPS web player adresi gir.';}
+}
+tdConnectMetaHumanStream();
 document.querySelectorAll('[data-song]').forEach(b=>b.onclick=()=>{$('songPrompt').value=b.dataset.song;$('songPrompt').focus()});
 async function waitForVocalSong(generationId,statusEl,player,download){const deadline=Date.now()+15*60*1000;let transientFailures=0;while(Date.now()<deadline){await new Promise(r=>setTimeout(r,6000));try{const s=await api('/api/studio/song/status/'+encodeURIComponent(generationId));transientFailures=0;if(s.status==='succeeded'&&s.audio_url){player.src=s.audio_url;player.style.display='block';download.href=s.audio_url;download.style.display='inline-block';download.style.marginTop='10px';statusEl.textContent='Şarkı hazır! Buradan dinleyebilir veya indirebilirsin.';player.load();return}if(s.status==='failed')throw new Error('Müzik motoru üretimi başarısız olarak bildirdi. eroq panelini kontrol et.');statusEl.textContent=(s.temporary_issue||'Vokalli şarkı oluşturuluyor… Durum: '+(s.status||'processing')+'.')+' Biraz sürebilir.'}catch(e){if(String(e.message||e).includes('Müzik motoru üretimi başarısız'))throw e;transientFailures++;statusEl.textContent='Müzik sunucusu geç yanıt veriyor. Otomatik tekrar deniyorum ('+transientFailures+'); aynı şarkı için yeniden üretim başlatmıyorum.';}}throw new Error('Şarkı hâlâ hazırlanıyor veya servis yavaş yanıt veriyor. Aynı şarkı için yeniden üretim başlatmadan eroq panelindeki Music geçmişini kontrol et.')}
 $('makeSong').onclick=async()=>{const title=$('songPrompt').value.trim()||'Tekden AI şarkısı';const style=$('songStylePro').value.trim();const lyrics=$('songLyricsPro').value.trim();const b=$('makeSong');if(lyrics.length<5){$('songStatus').textContent='Önce şarkı sözlerini gir.';return}b.disabled=true;b.textContent='⏳ Şarkı üretiliyor…';$('songStatus').textContent='eroq müzik motoruna istek gönderiliyor. 90 saniyelik tek üretim yaklaşık 9 kredi kullanır.';$('proSongAudio').style.display='none';$('proSongDownload').style.display='none';try{const d=await api('/api/studio/song/generate',{method:'POST',body:JSON.stringify({title,style,lyrics,language:'tr',duration:90})});if(!d.generation_id)throw new Error('Müzik servisi görev kimliği döndürmedi.');if(d.credits_remaining!==null&&d.credits_remaining!==undefined)$('songStatus').textContent='Üretim başladı. Kalan eroq kredisi: '+d.credits_remaining+'.';await waitForVocalSong(d.generation_id,$('songStatus'),$('proSongAudio'),$('proSongDownload'))}catch(e){$('songStatus').textContent=e.message}finally{b.disabled=false;b.textContent='🎵 Vokalli şarkı üret'}};
@@ -6737,7 +6762,8 @@ $('fullscreen').onclick=()=>frame?.requestFullscreen?.();$('download').onclick=(
  }catch(err){console.error('3D avatar yüklenemedi',err);const status=document.getElementById('tdAvatarStatus');if(status)status.textContent='3D motor yüklenemedi. İnternet bağlantısını ve WebGL desteğini kontrol et; eski avatar görüntüsüne geri dönülüyor.';}
 })();
 </script>
-</body></html>''')
+</body></html>'''
+    return HTMLResponse(page.replace('__TD_METAHUMAN_STREAM_URL__', json.dumps(METAHUMAN_PIXEL_STREAMING_URL)))
 
 
 MIND_LAB_HTML = r"""
