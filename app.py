@@ -18,9 +18,10 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud").strip()
 OLLAMA_PRO_MODEL = os.getenv("OLLAMA_PRO_MODEL", "gpt-oss:120b-cloud").strip()
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "AhmetKerim.").strip()
 OWNER_PASSWORD = os.getenv("OWNER_PASSWORD", "").strip()
-# Site-wide entry PIN is configured in Render Environment, never embedded in frontend code.
-SITE_ACCESS_PIN = os.getenv("SITE_ACCESS_PIN", "").strip()
-SITE_ACCESS_COOKIE = "tekden_site_gate"
+# Owner-only admin PIN. The public website does not require this code.
+ADMIN_ACCESS_PIN = os.getenv("ADMIN_ACCESS_PIN", os.getenv("SITE_ACCESS_PIN", "")).strip()
+SITE_ACCESS_PIN = ADMIN_ACCESS_PIN  # compatibility with signed-token helpers below
+SITE_ACCESS_COOKIE = "tekden_admin_gate"
 SITE_ACCESS_SECONDS = 12 * 60 * 60
 _SITE_PIN_ATTEMPTS = {}  # per-process throttling; use a stronger secret than a short PIN for production
 EXTRA_PRO_USERNAME = os.getenv("EXTRA_PRO_USERNAME", "").strip()
@@ -554,6 +555,8 @@ def require_owner(request: Request):
         raise HTTPException(401, "Yönetim sekmesi için önce Tekden AI sahibi hesabınla giriş yapmalısın.")
     if not is_owner_account(user):
         raise HTTPException(403, "Bu yönetim alanı yalnızca site sahibine açıktır.")
+    if not has_site_access(request):
+        raise HTTPException(401, "Yönetim paneli için önce yönetici kodunu gir.")
     return user
 
 
@@ -595,21 +598,9 @@ def site_pin_throttle_key(request: Request) -> str:
 
 @app.middleware("http")
 async def enforce_site_access(request: Request, call_next):
-    """Require a server-validated site PIN before exposing any app route."""
-    path = request.url.path
-    public_paths = {"/access", "/api/access/status", "/api/access/login", "/api/access/logout", "/health", "/robots.txt"}
-    if path not in public_paths and not has_site_access(request):
-        if path.startswith("/api/"):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "Tekden AI'ye girmek için önce site erişim kodunu doğrulamalısın.", "access_required": True},
-                headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"},
-            )
-        return RedirectResponse(url="/access", status_code=303, headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"})
-    response = await call_next(request)
-    if path not in ("/health", "/robots.txt"):
-        response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
-    return response
+    """The public site is open; the PIN is checked only on owner management routes."""
+    return await call_next(request)
+
 
 def web_search(query: str):
     """Search the web with deeper results and a resilient fallback chain."""
@@ -6427,6 +6418,26 @@ HTML = r"""<!doctype html>
   .composer textarea{min-height:52px}
 }
 @media(min-width:721px){#mobileToolsMenu{display:none!important}}
+/* Mobile usability refresh */
+@media(max-width:720px){
+ .top{position:sticky;top:0;z-index:30;background:rgba(255,255,255,.97);backdrop-filter:blur(12px);border-bottom:1px solid #e4edf7}
+ .topnav{display:none!important}
+ #mobileToolsBtn{width:46px;height:46px;border-radius:14px;background:#eaf4ff;border:1px solid #cfe3fb;color:#075db8;font-size:26px}
+ #mobileToolsMenu{width:min(340px,calc(100vw - 20px));grid-template-columns:1fr 1fr;padding:12px;gap:8px;max-height:78dvh;overflow:auto}
+ #mobileToolsMenu button{min-height:48px;border-radius:12px;background:#f5f9ff;border:1px solid #e0ebf8;font-size:13px}
+ .messages{padding:18px 12px 28px}
+ .welcomegrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+ .feature{min-height:100px;border-radius:15px;padding:13px}
+ .composerwrap{position:sticky;bottom:0;z-index:25;background:rgba(255,255,255,.97);backdrop-filter:blur(12px);border-top:1px solid #e4edf7;padding:10px 10px calc(12px + env(safe-area-inset-bottom))}
+ .composer{border-radius:18px;padding:10px;box-shadow:0 5px 24px #245b9518}
+ .toolleft #imageBtn,.toolleft #dictationBtn,.toolleft #voiceBtn{display:inline-flex!important}
+ .toolleft{gap:6px}
+ .toolleft button{min-height:38px}
+ .attachrow{padding:4px 4px 8px}
+ .bubble.assistant{width:100%;line-height:1.58}
+ .sidebar.mobile-open{z-index:150}
+}
+
 @media(max-width:720px){#tkFloatingLinks{display:none!important}}
 </style></head><body>
 <div class="layout"><aside class="sidebar"><div class="brand">Tekden <span>AI</span></div>
@@ -7576,60 +7587,66 @@ document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',(
 </script></body></html>"""
 
 @app.get("/access", response_class=HTMLResponse)
-def site_access_page(request: Request):
-    if has_site_access(request):
-        return RedirectResponse("/", status_code=303)
-    return HTMLResponse(ACCESS_HTML, headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"})
+def legacy_access_page():
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/api/access/status")
-def site_access_status(request: Request):
-    return {"configured": bool(SITE_ACCESS_PIN and SESSION_SECRET and len(SESSION_SECRET) >= 32), "unlocked": has_site_access(request)}
+def site_access_status():
+    return {"configured": bool(ADMIN_ACCESS_PIN and SESSION_SECRET and len(SESSION_SECRET) >= 32),
+            "scope": "admin_only"}
 
 
 @app.post("/api/access/login")
-async def site_access_login(request: Request):
-    if not SITE_ACCESS_PIN:
-        raise HTTPException(503, "Site erişim kodu tanımlı değil. Render Environment bölümüne SITE_ACCESS_PIN eklenmeli.")
-    if not SESSION_SECRET or len(SESSION_SECRET) < 32:
-        raise HTTPException(503, "SESSION_SECRET en az 32 karakter olmalı.")
-    key = site_pin_throttle_key(request)
-    now = time.monotonic()
-    attempt = _SITE_PIN_ATTEMPTS.get(key, {"count": 0, "window": now + 900, "locked": 0})
-    if attempt["locked"] > now:
-        retry = max(1, int(attempt["locked"] - now))
-        raise HTTPException(429, f"Çok fazla hatalı deneme. {retry} saniye sonra tekrar dene.", headers={"Retry-After": str(retry)})
-    if attempt["window"] <= now:
-        attempt = {"count": 0, "window": now + 900, "locked": 0}
-    try:
-        data = await request.json()
-    except Exception:
-        data = {}
-    supplied = str(data.get("pin", ""))[:32] if isinstance(data, dict) else ""
-    if not hmac.compare_digest(supplied, SITE_ACCESS_PIN):
-        attempt["count"] += 1
-        if attempt["count"] >= 5:
-            attempt["locked"] = now + 900
-        _SITE_PIN_ATTEMPTS[key] = attempt
-        raise HTTPException(401, "Site erişim kodu hatalı.")
-    _SITE_PIN_ATTEMPTS.pop(key, None)
-    out = JSONResponse({"ok": True})
-    out.set_cookie(
-        SITE_ACCESS_COOKIE,
-        make_site_access_token(),
-        httponly=True,
-        secure=(request.url.scheme == "https"),
-        samesite="strict",
-        max_age=SITE_ACCESS_SECONDS,
-        path="/",
-    )
-    return out
+async def legacy_access_login():
+    raise HTTPException(410, "Site geneli şifre kaldırıldı. Yönetim kodu yalnızca /yonetim sayfasında kullanılır.")
 
 
 @app.post("/api/access/logout")
 def site_access_logout():
     out = JSONResponse({"ok": True})
     out.delete_cookie(SITE_ACCESS_COOKIE, httponly=True, secure=True, samesite="strict", path="/")
+    return out
+
+
+
+ADMIN_PIN_HTML = r"""<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tekden AI · Yönetici doğrulaması</title><style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 20% 10%,#173d68,#071426 60%);font:16px system-ui;color:#eef}.card{width:min(420px,calc(100% - 32px));padding:28px;border:1px solid #29496c;border-radius:22px;background:#0d2037;box-shadow:0 24px 80px #0006}.mark{width:48px;height:48px;border-radius:15px;background:#1478dc;display:grid;place-items:center;font-weight:900;font-size:24px}.card h1{font-size:24px;margin:18px 0 8px}.card p{color:#a9bdd3;line-height:1.5}.card input{width:100%;padding:15px;border-radius:12px;border:1px solid #355675;background:#071426;color:white;font-size:22px;letter-spacing:8px;text-align:center;margin:12px 0}.card button{width:100%;padding:14px;border:0;border-radius:12px;background:#1686ef;color:white;font-weight:800;font-size:15px;cursor:pointer}.status{min-height:24px;color:#ffb7b7;margin-top:12px;font-size:13px}a{color:#8bdcff;text-decoration:none}
+</style></head><body><main class="card"><div class="mark">T</div><h1>Yönetici doğrulaması</h1><p>Bu alan yalnızca site sahibine özeldir. Ana Tekden AI sitesi herkese açıktır; bu kod yalnızca yönetim panelini açar.</p><form id="f"><input id="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="32" placeholder="••••" aria-label="Yönetici kodu" required><button>Yönetim panelini aç</button></form><div class="status" id="s" role="status"></div><p><a href="/">← Ana siteye dön</a></p></main><script>
+document.getElementById('f').addEventListener('submit',async e=>{e.preventDefault();const s=document.getElementById('s');s.textContent='Kontrol ediliyor…';try{const r=await fetch('/api/admin/pin-login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin:document.getElementById('pin').value})});const d=await r.json();if(!r.ok)throw Error(d.detail||'Kod doğrulanamadı');location.reload()}catch(x){s.textContent=x.message}});
+</script></body></html>"""
+
+
+@app.post("/api/admin/pin-login")
+async def owner_admin_pin_login(request: Request):
+    user = current_user(request)
+    if not is_owner_account(user):
+        raise HTTPException(403, "Önce site sahibi hesabınla giriş yapmalısın.")
+    if not ADMIN_ACCESS_PIN:
+        raise HTTPException(503, "Render Environment bölümüne ADMIN_ACCESS_PIN eklenmeli.")
+    if not SESSION_SECRET or len(SESSION_SECRET) < 32:
+        raise HTTPException(503, "SESSION_SECRET en az 32 karakter olmalı.")
+    key = site_pin_throttle_key(request)
+    now = time.monotonic()
+    attempt = _SITE_PIN_ATTEMPTS.get(key, {"count": 0, "window": now + 900, "locked": 0})
+    if attempt["locked"] > now:
+        raise HTTPException(429, f"Çok fazla hatalı deneme. {max(1,int(attempt['locked']-now))} saniye sonra tekrar dene.")
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    supplied = str(data.get("pin", ""))[:32] if isinstance(data, dict) else ""
+    if not hmac.compare_digest(supplied, ADMIN_ACCESS_PIN):
+        attempt["count"] += 1
+        if attempt["count"] >= 5:
+            attempt["locked"] = now + 900
+        _SITE_PIN_ATTEMPTS[key] = attempt
+        raise HTTPException(401, "Yönetici kodu hatalı.")
+    _SITE_PIN_ATTEMPTS.pop(key, None)
+    out = JSONResponse({"ok": True})
+    out.set_cookie(SITE_ACCESS_COOKIE, make_site_access_token(), httponly=True,
+                   secure=(request.url.scheme == "https"), samesite="strict",
+                   max_age=SITE_ACCESS_SECONDS, path="/")
     return out
 
 
@@ -7641,10 +7658,12 @@ def owner_management_page(request: Request):
         user = None
     if not is_owner_account(user):
         return HTMLResponse(
-            "<!doctype html><html lang='tr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Yetkisiz erişim</title><body style='font:16px system-ui;background:#081426;color:#eef;padding:40px'><h1>Yönetim alanı korumalı</h1><p>Bu alan yalnızca site sahibinin hesabına açıktır.</p><a style='color:#8bdcff' href='/'>Tekden AI ana sayfasına dön</a></body></html>",
+            "<!doctype html><html lang='tr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Yetkisiz erişim</title><body style='font:16px system-ui;background:#081426;color:#eef;padding:40px'><h1>Yönetim alanı korumalı</h1><p>Önce site sahibi hesabınla giriş yapmalısın.</p><a style='color:#8bdcff' href='/'>Tekden AI ana sayfasına dön</a></body></html>",
             status_code=403,
             headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"},
         )
+    if not has_site_access(request):
+        return HTMLResponse(ADMIN_PIN_HTML, headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"})
     return HTMLResponse(ADMIN_HTML, headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"})
 
 
@@ -9805,3 +9824,4 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
+    
