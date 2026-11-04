@@ -1,4 +1,4 @@
-import os, re, json, time, hmac, hashlib, secrets, base64, threading
+import os, re, json, time, hmac, hashlib, secrets, base64, threading, io, zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from urllib.parse import quote
@@ -6,8 +6,9 @@ import requests
 import psycopg
 from psycopg.rows import dict_row
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, RedirectResponse
 from pydantic import BaseModel, Field
+from html import escape as html_escape
 
 APP_NAME = "Tekden AI"
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
@@ -17,6 +18,11 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gpt-oss:20b-cloud").strip()
 OLLAMA_PRO_MODEL = os.getenv("OLLAMA_PRO_MODEL", "gpt-oss:120b-cloud").strip()
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "AhmetKerim.").strip()
 OWNER_PASSWORD = os.getenv("OWNER_PASSWORD", "").strip()
+# Site-wide entry PIN is configured in Render Environment, never embedded in frontend code.
+SITE_ACCESS_PIN = os.getenv("SITE_ACCESS_PIN", "").strip()
+SITE_ACCESS_COOKIE = "tekden_site_gate"
+SITE_ACCESS_SECONDS = 12 * 60 * 60
+_SITE_PIN_ATTEMPTS = {}  # per-process throttling; use a stronger secret than a short PIN for production
 EXTRA_PRO_USERNAME = os.getenv("EXTRA_PRO_USERNAME", "").strip()
 EXTRA_PRO_PASSWORD = os.getenv("EXTRA_PRO_PASSWORD", "").strip()
 EXTRA_PLUS_USERNAME = os.getenv("EXTRA_PLUS_USERNAME", "").strip()
@@ -50,13 +56,9 @@ PUBLIC_BASE_URL = "https://tekden-ai-2.onrender.com"
 
 @app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
 def robots_txt():
-    body = (
-        "User-agent: *\\n"
-        "Allow: /\\n"
-        f"Sitemap: {PUBLIC_BASE_URL}/sitemap.xml\\n"
-    )
+    # The site is PIN-gated by request; search engines must not index private pages.
     return PlainTextResponse(
-        body,
+        "User-agent: *\nDisallow: /\n",
         media_type="text/plain; charset=utf-8",
         headers={"Cache-Control": "no-cache, max-age=0"},
     )
@@ -535,6 +537,80 @@ def current_user(request: Request):
     with db() as conn:
         return conn.execute("SELECT id, username, plan FROM users WHERE id=%s", (uid,)).fetchone()
 
+def is_owner_account(user: dict | None) -> bool:
+    """Only the provisioned owner account can enter the separate management area."""
+    return bool(
+        user
+        and OWNER_USERNAME
+        and OWNER_PASSWORD
+        and len(OWNER_PASSWORD) >= 8
+        and str(user.get("username", "")).casefold() == OWNER_USERNAME.casefold()
+    )
+
+
+def require_owner(request: Request):
+    user = current_user(request)
+    if not user:
+        raise HTTPException(401, "Yönetim sekmesi için önce Tekden AI sahibi hesabınla giriş yapmalısın.")
+    if not is_owner_account(user):
+        raise HTTPException(403, "Bu yönetim alanı yalnızca site sahibine açıktır.")
+    return user
+
+
+def make_site_access_token() -> str:
+    if not SESSION_SECRET or len(SESSION_SECRET) < 32 or not SITE_ACCESS_PIN:
+        raise RuntimeError("SITE_ACCESS_PIN veya SESSION_SECRET yapılandırılmamış.")
+    expires = int(time.time()) + SITE_ACCESS_SECONDS
+    nonce = secrets.token_urlsafe(18)
+    pin_tag = hashlib.sha256(SITE_ACCESS_PIN.encode("utf-8")).hexdigest()[:16]
+    payload = f"{expires}:{nonce}:{pin_tag}"
+    signature = hmac.new(SESSION_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return b64e(payload + ":" + signature)
+
+
+def has_site_access(request: Request) -> bool:
+    token = request.cookies.get(SITE_ACCESS_COOKIE, "")
+    if not token or not SITE_ACCESS_PIN or not SESSION_SECRET or len(SESSION_SECRET) < 32:
+        return False
+    try:
+        raw = b64d(token)
+        expires, nonce, pin_tag, signature = raw.split(":", 3)
+        payload = f"{expires}:{nonce}:{pin_tag}"
+        expected = hmac.new(SESSION_SECRET.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        current_pin_tag = hashlib.sha256(SITE_ACCESS_PIN.encode("utf-8")).hexdigest()[:16]
+        return (
+            hmac.compare_digest(signature, expected)
+            and hmac.compare_digest(pin_tag, current_pin_tag)
+            and int(expires) > int(time.time())
+        )
+    except Exception:
+        return False
+
+
+def site_pin_throttle_key(request: Request) -> str:
+    host = request.client.host if request.client else "unknown"
+    agent = request.headers.get("user-agent", "")[:160]
+    return hashlib.sha256((host + "|" + agent).encode("utf-8", "ignore")).hexdigest()
+
+
+@app.middleware("http")
+async def enforce_site_access(request: Request, call_next):
+    """Require a server-validated site PIN before exposing any app route."""
+    path = request.url.path
+    public_paths = {"/access", "/api/access/status", "/api/access/login", "/api/access/logout", "/health", "/robots.txt"}
+    if path not in public_paths and not has_site_access(request):
+        if path.startswith("/api/"):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "Tekden AI'ye girmek için önce site erişim kodunu doğrulamalısın.", "access_required": True},
+                headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"},
+            )
+        return RedirectResponse(url="/access", status_code=303, headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"})
+    response = await call_next(request)
+    if path not in ("/health", "/robots.txt"):
+        response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
+    return response
+
 def web_search(query: str):
     """Search the web with deeper results and a resilient fallback chain."""
     query = query.strip()
@@ -626,11 +702,42 @@ def pro_web_search(query: str):
     return combined
 
 def should_search(text: str) -> bool:
-    t = text.lower()
-    cues = ["internette ara", "web'de ara", "webde ara", "güncel", "bugün", "son dakika",
-            "en son", "kaynak göster", "kaynakları", "araştır", "2026", "şu an", "fiyatı ne", "internette ara", "web ara", "web araması", "internetten bul", "kaynaklarla cevapla",
-            "latest", "current", "today", "search the web", "look up", "kaynaklarla araştır", "derin araştır", "detaylı araştır", "karşılaştır", "incele", "kimdir", "nedir", "ne zaman", "neden", "nasıl çalışır", "istatistik", "raporu", "bilimsel çalışma", "araştırma makalesi"]
-    return any(x in t for x in cues) or t.strip().startswith("/search ")
+    """Search automatically for fresh, verifiable or niche facts; avoid searching every basic concept question."""
+    t = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    if not t:
+        return False
+    if any(x in t for x in ("internete bakma", "web'de arama yapma", "webde arama yapma", "arama yapma", "kaynak kullanma")):
+        return False
+    if t.startswith("/search "):
+        return True
+    explicit = (
+        "internette ara", "web'de ara", "webde ara", "web ara", "web araması", "internetten bul",
+        "kaynak göster", "kaynakları göster", "kaynaklarla cevapla", "kaynaklarla araştır",
+        "araştır", "derin araştır", "detaylı araştır", "güncel bilgi", "güncel veriler",
+        "doğrula", "teyit et", "bul ve listele",
+        "search the web", "look up", "latest", "current", "today", "breaking news"
+    )
+    if any(x in t for x in explicit):
+        return True
+    time_sensitive = (
+        "bugün", "şu an", "şimdi", "son dakika", "en son", "en yeni", "en güncel", "yeni model", "son model", "son gelişme", "güncel", "bu hafta", "bu ay",
+        "2025", "2026", "2027", "2028", "2029", "fiyatı", "ücreti", "kaç tl", "ne kadar",
+        "kampanya", "stokta", "satışta mı", "sürümü çıktı", "yayımlandı mı", "çıkış tarihi",
+        "hava durumu", "hava nasıl", "maç sonucu", "fikstür", "puan durumu", "seçim sonucu",
+        "cumhurbaşkanı", "bakan", "yönetmelik", "mevzuat", "yasa değişti", "açık mı", "çalışma saatleri",
+        "uçuş", "sefer", "rezervasyon", "etkinlik takvimi", "borsa", "döviz kuru", "faiz oranı"
+    )
+    if any(x in t for x in time_sensitive):
+        return True
+    # Current facts about named people, companies, products, services or releases usually need verification.
+    if re.search(r"\b(kimdir|kim şu anda|ceo'su kim|sahibi kim|nerede bulunuyor|hangi şirkette)\b", t):
+        return True
+    if re.search(r"\b(versiyon|sürüm|güncelleme|destekleniyor mu|kapatıldı mı|yasaklandı mı|erişim engeli)\b", t):
+        return True
+    # Scientific papers, statistics and formal reports are source-sensitive even if not explicitly called research.
+    if any(x in t for x in ("istatistik", "bilimsel çalışma", "araştırma makalesi", "akademik kaynak", "resmî açıklama", "rapor verisi")):
+        return True
+    return False
 
 def call_ollama(messages, model=None):
     if not OLLAMA_API_KEY:
@@ -1053,8 +1160,8 @@ def export_account_data(request: Request):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "app": APP_NAME, "database_configured": bool(DATABASE_URL),
-            "ollama_configured": bool(OLLAMA_API_KEY), "image_configured": True, "pro_model": OLLAMA_PRO_MODEL}
+    # Minimal hosting health probe; service configuration is visible only in the owner console.
+    return {"ok": True}
 
 @app.post("/api/register")
 def register(body: AuthBody, response: JSONResponse):
@@ -1119,8 +1226,10 @@ def me(request: Request):
         user = current_user(request)
     except Exception:
         user = None
-    if user and user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD:
-        user["plan"] = "plus"
+    if user:
+        user["is_owner"] = is_owner_account(user)
+        if user["is_owner"]:
+            user["plan"] = "plus"
     return {"user": user}
 
 @app.get("/api/chats")
@@ -1795,6 +1904,125 @@ class AdvancedSynapseBody(BaseModel):
     material: str = Field(min_length=5, max_length=16000)
     context: str = Field(default="", max_length=4000)
 
+class DocumentSource(BaseModel):
+    title: str = Field(default="Kaynak", max_length=300)
+    url: str = Field(default="", max_length=2000)
+
+class DocumentExportBody(BaseModel):
+    title: str = Field(default="Tekden AI Belgesi", min_length=1, max_length=150)
+    content: str = Field(min_length=1, max_length=60000)
+    sources: list[DocumentSource] = Field(default_factory=list, max_length=30)
+
+def _docx_text_run(text: str) -> str:
+    clean = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", str(text or ""))
+    clean = re.sub(r"\*\*(.*?)\*\*", r"\1", clean)
+    clean = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", clean)
+    clean = clean.replace("`", "")
+    return html_escape(clean, quote=False)
+
+def _docx_paragraph(text: str, style: str | None = None) -> str:
+    style_xml = f'<w:pPr><w:pStyle w:val="{style}"/></w:pPr>' if style else ""
+    return f'<w:p>{style_xml}<w:r><w:t xml:space="preserve">{_docx_text_run(text)}</w:t></w:r></w:p>'
+
+def build_docx_bytes(title: str, content: str, sources: list[DocumentSource] | None = None) -> bytes:
+    """Create a valid, editable DOCX using only Python's standard library."""
+    safe_title = re.sub(r"[\x00-\x1f]", "", str(title or "Tekden AI Belgesi"))[:150]
+    paragraphs = [_docx_paragraph(safe_title, "Title")]
+    in_code = False
+    for raw in str(content or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = raw.rstrip()
+        if line.strip().startswith("```"):
+            in_code = not in_code
+            continue
+        if not line.strip():
+            paragraphs.append(_docx_paragraph(""))
+        elif in_code:
+            paragraphs.append(_docx_paragraph(line, "Code"))
+        elif line.startswith("### "):
+            paragraphs.append(_docx_paragraph(line[4:], "Heading2"))
+        elif line.startswith("## "):
+            paragraphs.append(_docx_paragraph(line[3:], "Heading1"))
+        elif line.startswith("# "):
+            paragraphs.append(_docx_paragraph(line[2:], "Heading1"))
+        elif re.match(r"^\s*[-*•]\s+", line):
+            paragraphs.append(_docx_paragraph("• " + re.sub(r"^\s*[-*•]\s+", "", line), "ListParagraph"))
+        elif re.match(r"^\s*\d+[.)]\s+", line):
+            paragraphs.append(_docx_paragraph(line.strip(), "ListParagraph"))
+        elif line.strip().startswith(">"):
+            paragraphs.append(_docx_paragraph(line.strip().lstrip("> "), "Quote"))
+        else:
+            # Convert simple Markdown table rows to readable text instead of dropping content.
+            if line.strip().startswith("|") and line.strip().endswith("|"):
+                cells = [c.strip() for c in line.strip().strip("|").split("|")]
+                if not all(re.fullmatch(r":?-{3,}:?", c or "-") for c in cells):
+                    paragraphs.append(_docx_paragraph("   |   ".join(cells), "TableText"))
+            else:
+                paragraphs.append(_docx_paragraph(line))
+    if sources:
+        paragraphs.append(_docx_paragraph("Kaynaklar", "Heading1"))
+        for i, source in enumerate(sources[:30], 1):
+            label = (source.title or source.url or "Kaynak").strip()
+            if source.url:
+                label += " — " + source.url
+            paragraphs.append(_docx_paragraph(f"[{i}] {label}"))
+    document_xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:body>' + ''.join(paragraphs) +
+        '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr>'
+        '</w:body></w:document>')
+    styles_xml = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        '<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Aptos" w:hAnsi="Aptos"/><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults>'
+        '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:rPr><w:b/><w:sz w:val="34"/></w:rPr></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:next w:val="Normal"/><w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="24"/></w:rPr></w:style>'
+        '<w:style w:type="paragraph" w:styleId="ListParagraph"><w:name w:val="List Paragraph"/><w:basedOn w:val="Normal"/></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Quote"><w:name w:val="Quote"/><w:basedOn w:val="Normal"/><w:rPr><w:i/></w:rPr></w:style>'
+        '<w:style w:type="paragraph" w:styleId="Code"><w:name w:val="Code"/><w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas"/><w:sz w:val="18"/></w:rPr></w:style>'
+        '<w:style w:type="paragraph" w:styleId="TableText"><w:name w:val="Table Text"/><w:rPr><w:sz w:val="19"/></w:rPr></w:style>'
+        '</w:styles>')
+    content_types = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
+        '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>'
+        '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>'
+        '</Types>')
+    root_rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>'
+        '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>'
+        '</Relationships>')
+    doc_rels = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+        '</Relationships>')
+    core = ('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
+        '<dc:title>' + html_escape(safe_title, quote=False) + '</dc:title><dc:creator>Tekden AI</dc:creator></cp:coreProperties>')
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", root_rels)
+        zf.writestr("word/document.xml", document_xml)
+        zf.writestr("word/styles.xml", styles_xml)
+        zf.writestr("word/_rels/document.xml.rels", doc_rels)
+        zf.writestr("docProps/core.xml", core)
+    return buffer.getvalue()
+
+@app.post("/api/documents/docx")
+def export_document_docx(body: DocumentExportBody):
+    """Generate an editable DOCX without external document-generation packages."""
+    title_ascii = str(body.title or "tekden-ai-belge").translate(str.maketrans({"ç":"c","ğ":"g","ı":"i","ö":"o","ş":"s","ü":"u","Ç":"C","Ğ":"G","İ":"I","Ö":"O","Ş":"S","Ü":"U"}))
+    filename = re.sub(r"[^A-Za-z0-9_-]+", "_", title_ascii).strip("_")[:70] or "tekden-ai-belge"
+    data = build_docx_bytes(body.title, body.content, body.sources)
+    return Response(content=data,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}.docx"', "Cache-Control": "no-store"})
+
+
 @app.post("/api/mind/advanced-synapse")
 def mind_advanced_synapse(body: AdvancedSynapseBody, request: Request):
     """Plus-only applied workflow hub for the extended Zihin Atölyesi engines."""
@@ -1838,13 +2066,30 @@ def mind_advanced_synapse(body: AdvancedSynapseBody, request: Request):
         "subjective_reality": "Kullanıcının tercih ettiği tür ve temaya göre tarih çizelgesi, coğrafya, kültür, ekonomi, fizik kuralları, karakterler, çatışmalar ve olay simülasyonu olan etkileşimli bir alternatif evren oluştur. Bunu metin/oyun simülasyonu olarak sun; kullanıcının zihnine bağlanma, gerçek 50 yıl yaşatma veya dış zamandan bağımsız bilinç deneyimi iddia etme. Başlangıç sahnesi, dünya ansiklopedisi, karakter kartları, seçim sistemi ve devamlılık kaydı üret.",
         "chronos_rewrite": "Bir yazılım veya kararın 1, 3, 5 ve 10 yıllık koşullu etki senaryolarını üret. Her senaryoda varsayımlar, olası zincirleme etkiler, belirsizlikler, erken uyarı göstergeleri, istenmeyen sonuçlar ve bugünden alınabilecek önlemler bulunsun. Geleceği kesin bildiğini veya tarihi değiştirdiğini iddia etme; senaryoları olasılık ve varsayım olarak etiketle.",
         "digital_bio_transcoder": "Dijital algoritma ile DNA/biyoloji arasındaki kavramsal ilişkiyi yalnızca güvenli, teorik ve laboratuvar dışı düzeyde açıkla. Biyolojik sistemlerde bilgi kodlama, biyoinformatik veri temsili, etik, biyogüvenlik ve yasal gözetim başlıklarını içeren üst düzey mimari/öğrenme planı hazırla. Canlı organizma, virüs, bakteri veya genetik materyal üretme/değiştirme talimatı, dizisi, protokolü ya da deney adımı verme; dijital kodun doğrudan hücreye yüklenebileceğini iddia etme.",
-        "omniscience_core": "Kullanıcının sorusu için mevcut bilgi kaynaklarından araştırma planı, bilinenler, bilinmeyenler, kaynak güvenilirliği, çelişkiler ve doğrulama adımları oluştur. Erişilemeyen, henüz keşfedilmemiş veya gelecekteki bilgiyi bildiğini; ışık hızını aştığını veya tüm evrenin bilgisine eriştiğini iddia etme. Kaynak verilmediyse hangi kaynak türlerinin gerekli olduğunu açıkla."
+        "omniscience_core": "Kullanıcının sorusu için mevcut bilgi kaynaklarından araştırma planı, bilinenler, bilinmeyenler, kaynak güvenilirliği, çelişkiler ve doğrulama adımları oluştur. Erişilemeyen, henüz keşfedilmemiş veya gelecekteki bilgiyi bildiğini; ışık hızını aştığını veya tüm evrenin bilgisine eriştiğini iddia etme. Kaynak verilmediyse hangi kaynak türlerinin gerekli olduğunu açıkla.",
+        "omniscient_research": "Çok alanlı bilimsel araştırma yapısı kur: fizik, matematik, biyoloji, bilgisayar bilimi ve mühendislik bağlantılarını açıkla; iddiaları sağlanan kaynaklara bağla; kanıt, hipotez ve bilinmeyeni ayrı göster; test edilebilir araştırma soruları, deney dışı hesaplamalı doğrulama planı ve kaynak boşlukları çıkar. İnsanlığın bütün bilgisini bildiğini veya keşfedilmemiş sonuçları doğruladığını iddia etme.",
+        "genesis_life": "Kullanıcının tarifinden tutarlı bir kurgusal evren ve sanal ekosistem tasarla: gezegen/biomlar, fizik kuralları, canlı türlerinin kurgusal özellikleri, kaynak döngüleri, besin ağı, medeniyetler, zaman çizelgesi ve etkileşim kuralları. Gerçek dünya biyolojisi veya fizik hakkında doğrulanmamış iddia üretme; bu bir oyun/simülasyon tasarımıdır.",
+        "eternal_mirror": "Proje hafızası ve kontrollü öğrenme sistemi tasarla: yalnızca kullanıcının açıkça kaydettiği proje notları/sürümleri, etiketleme, arama, çelişki tespiti, düzeltme önerisi, diff, test, onay, sürümleme ve geri alma. Modelin kendi ağırlıklarını gizlice eğittiğini veya unutulmaz/sonsuz hafıza sunduğunu iddia etme; kullanıcı silme ve dışa aktarma kontrolünü korusun.",
+        "atlas_time": "Bir şehir, şirket, teknoloji veya proje için dijital ikiz/senaryo modeli tasarla. Kullanıcının verdiği verileri ve güncel kaynakları ayır; değişkenler, varsayımlar, etki bağlantıları, 1/3/5/10 yıllık olası senaryolar, duyarlılık analizi ve erken uyarı metrikleri ver. Gerçek dünyayı eksiksiz kopyaladığını veya geleceği kesin bildiğini iddia etme.",
+        "multiverse_lab": "Bir problemin 5-20 alternatif çözümünü paralel görevler olarak tasarla; her dal için farklı varsayım, yöntem, maliyet, risk, başarı ölçütü ve doğrulama testi ver. Bunlar gerçek paralel evrenler veya kuantum hesaplama değil, klasik alternatif senaryo analizidir.",
+        "telepath_collab": "İzinli ortak çalışma ve erişilebilir iletişim mimarisi tasarla: proje paylaşımı, anlık presence, yorumlar, değişiklik günlüğü, çakışma çözümü, rol/izin sistemi ve isteğe bağlı BCI cihaz entegrasyon planı. Zihin okuma veya düşünce telepatisi iddia etme; yalnızca kullanıcıların açıkça gönderdiği/verdiği veriyi eşitle.",
+        "molecule_lab": "Moleküler biyoloji, protein yapıları, biyomalzeme ve biyoinformatik konularında güvenli literatür özeti, kavram haritası ve hesaplamalı araştırma planı üret. Canlı organizma, virüs, bakteri, toksin veya genetik materyal oluşturma/değiştirme için deney protokolü, laboratuvar adımı veya uygulanabilir biyolojik tarif verme.",
+        "polyglot_archive": "Çok dilli ve tarihî metinler için çeviri/araştırma iş akışı kur: dil ve lehçe olasılıklarını belirt, terim sözlüğü çıkar, bağlama göre alternatif çevirileri karşılaştır, kültürel bağlamı açıkla, OCR/okunamayan kısımları belirsiz olarak işaretle. Bilinmeyen dilleri kusursuz çözdüğünü iddia etme.",
+        "architect_product": "Fikirden ürüne uygulanabilir ürün paketi hazırla: kullanıcı ihtiyacı, kapsam, kullanıcı akışları, ekran listesi, mimari, veri modeli, API sözleşmeleri, klasör yapısı, teknoloji seçenekleri, sprint planı, kabul kriterleri, test planı, maliyet/dağıtım riskleri. Depoya erişim ve açık onay olmadan dosyaları değiştirdiğini veya ürünü dağıttığını iddia etme.",
+        "autonomy_council": "Bir proje için ürün yöneticisi, yazılım mimarı, test uzmanı, güvenlik inceleyicisi ve pazarlama perspektiflerini tek model içinde simüle et. Görevleri sırala, bağımlılıkları kur, çıktıları çapraz eleştir, çelişkileri ve insan onayı gereken eylemleri belirt. Ayrı bağımsız ajanların arka planda çalıştığını veya onaysız eylem yaptığını iddia etme.",
+        "screen_tutor": "Kullanıcının yüklediği ekran görüntüsü veya açıkça paylaştığı ekran açıklaması üzerinden adım adım arayüz rehberliği yap. Görünen düğme/menüleri tarif et, olası sürüm farklarını belirt, her aşamada geri alınabilir adımlar öner. Canlı ekranı kendiliğinden izlediğini, tıkladığını veya bilgisayarı kontrol ettiğini iddia etme."
     }
     if body.feature not in modes:
         raise HTTPException(400, "Bilinmeyen gelişmiş araç seçimi.")
+    engine_sources = []
+    if body.feature == "omniscient_research":
+        engine_sources = pro_web_search(body.material[:700])
     prompt = (modes[body.feature] + "\nÇıktıyı uygulanabilir, bölümlü ve doğrulama adımlı ver. Yapılmamış işlemi yapılmış gibi anlatma. "
               "Varsayımları, gereken harici donanım/servisleri ve güvenli sınırları belirt.\n"
               f"Kullanıcı girdisi:\n{body.material}\nBağlam:\n{body.context}")
+    if engine_sources:
+        prompt += "\n\nWeb araştırması kaynakları (iddiaları yalnızca bunlar desteklediği ölçüde kullan):\n" + "\n".join(
+            f"[{i+1}] {x['title']} | {x['url']} | {x.get('snippet','')}" for i, x in enumerate(engine_sources[:12]))
     try:
         result = call_ollama([
             {"role":"system", "content":"Sen Tekden AI Plus'ın gelişmiş yaratıcı mühendislik motorusun. Gerçek yetenekleri ve sınırları dürüstçe belirt; somut çıktı üret."},
@@ -1852,7 +2097,7 @@ def mind_advanced_synapse(body: AdvancedSynapseBody, request: Request):
         ], OLLAMA_PRO_MODEL)
     except Exception as exc:
         raise HTTPException(502, "Gelişmiş motor çalıştırılamadı: " + str(exc)[:180])
-    return {"feature": body.feature, "result": result, "execution": "model_assisted_generation_not_autonomous_deployment"}
+    return {"feature": body.feature, "result": result, "sources": engine_sources, "execution": "model_assisted_generation_not_autonomous_deployment"}
 
 @app.post("/api/mind/what-if")
 def mind_what_if(body: WhatIfBody, request: Request):
@@ -2564,7 +2809,12 @@ $('tdClearGuest').onclick=()=>{if(!confirm('Bu tarayıcıdaki misafir sohbet ge�
 $('tdSubmitFeature').onclick=async()=>{const title=$('tdFeatureTitle').value.trim(),details=$('tdFeatureDetails').value.trim();if(title.length<4){$('tdFeatureStatus').textContent='Başlığı en az 4 karakter yaz.';return}try{await api('/api/feature-requests',{method:'POST',body:JSON.stringify({title,details})});$('tdFeatureStatus').textContent='Önerin kaydedildi. Teşekkürler!';$('tdFeatureTitle').value='';$('tdFeatureDetails').value=''}catch(e){$('tdFeatureStatus').textContent=e.message}};
 $('tdShortcuts').onclick=()=>alert('Klavye kısayolları:\nCtrl/⌘ + K: Araç kutusu\nCtrl/⌘ + Enter: Mesaj gönder\nCtrl/⌘ + Shift + N: Yeni sohbet\nEsc: Açık paneli kapat\nEnter: Mesaj gönder\nShift + Enter: Yeni satır');
 // Attach practical controls to each assistant answer: copy, bookmark, positive/negative rating and save as note.
-const tdOriginalBubble=bubble;bubble=function(role,content,sources=[]){const node=tdOriginalBubble(role,content,sources);if(role==='assistant'){tdLastAssistant=String(content||'');const tools=document.createElement('div');tools.className='tdBubbleTools';const copy=document.createElement('button');copy.className='secondary';copy.textContent='Kopyala';copy.onclick=async()=>{try{await navigator.clipboard.writeText(String(content));tdToast('Yanıt kopyalandı.')}catch{const ta=document.createElement('textarea');ta.value=String(content);document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();tdToast('Yanıt kopyalandı.')}};const save=document.createElement('button');save.className='secondary';save.textContent='🔖 Kaydet';save.onclick=async()=>{if(!user){alert('Yanıtı hesabında saklamak için giriş yap.');return}const title=(String(content).split('\n').find(x=>x.trim())||'Kaydedilen yanıt').slice(0,150);try{await api('/api/bookmarks',{method:'POST',body:JSON.stringify({title,content:String(content),chat_id:chatId||null})});tdToast('Yanıt kaydedildi.');tdLoadBookmarks()}catch(e){alert(e.message)}};const good=document.createElement('button');good.className='td-response-rating';good.textContent='👍 Faydalı';good.onclick=()=>api('/api/response-rating',{method:'POST',body:JSON.stringify({rating:1,context:location.pathname})}).then(()=>tdToast('Geri bildirimin için teşekkürler.')).catch(()=>tdToast('Puan kaydedilemedi.'));const bad=document.createElement('button');bad.className='td-response-rating';bad.textContent='👎 Geliştir';bad.onclick=()=>api('/api/response-rating',{method:'POST',body:JSON.stringify({rating:-1,context:location.pathname})}).then(()=>tdToast('Geri bildirimin için teşekkürler.')).catch(()=>tdToast('Puan kaydedilemedi.'));const note=document.createElement('button');note.className='secondary';note.textContent='📝 Nota dönüştür';note.onclick=()=>{tdOpenTools();$('tdNoteTitle').value=(String(content).split('\n').find(x=>x.trim())||'Yanıt notu').slice(0,120);$('tdNoteContent').value=String(content).slice(0,12000)};tools.append(copy,save,good,bad,note);node.appendChild(tools)}return node};
+function tdHtmlEscape(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function tdDocTitle(text){const first=String(text||'Tekden AI belgesi').split(/\r?\n/).find(x=>x.trim())||'Tekden AI belgesi';return first.replace(/^#+\s*/, '').replace(/[*_`]/g,'').trim().slice(0,110)||'Tekden AI belgesi';}
+async function tdDownloadWord(content,sources=[],title=''){const btnTitle=title||tdDocTitle(content);tdToast('Word belgesi hazırlanıyor…');try{const response=await fetch('/api/documents/docx',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:btnTitle,content:String(content||''),sources:(sources||[]).slice(0,30).map(x=>({title:String(x.title||'Kaynak').slice(0,300),url:String(x.url||'').slice(0,2000)}))})});if(!response.ok){let msg='Word belgesi oluşturulamadı.';try{const data=await response.json();msg=data.detail||msg}catch{}throw new Error(msg)}const blob=await response.blob(),url=URL.createObjectURL(blob),a=document.createElement('a');const safe=btnTitle.toLocaleLowerCase('tr-TR').replace(/[^a-z0-9ğüşöçıİĞÜŞÖÇ]+/gi,'-').replace(/^-|-$/g,'').slice(0,65)||'tekden-ai-belge';a.href=url;a.download=safe+'.docx';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),2000);tdToast('Word belgesi indirildi.');return true}catch(e){tdToast(e.message||'Word dışa aktarma başarısız.');return false}}
+function tdPrintPdf(content,sources=[],title='Tekden AI belgesi',preopened=null){let win=preopened;try{if(!win||win.closed)win=window.open('about:blank','_blank');}catch{}if(!win){alert('PDF penceresi açılamadı. Tarayıcı açılır pencere iznini bu site için etkinleştir.');return false;}const lines=String(content||'').replace(/\r/g,'').split('\n');let body='',inList=false,inCode=false;for(const raw of lines){const line=raw.trimEnd();if(line.trim().startsWith('```')){if(inCode){body+='</pre>';inCode=false}else{if(inList){body+='</ul>';inList=false}body+='<pre>';inCode=true}continue;}if(inCode){body+=tdHtmlEscape(line)+'\n';continue;}if(!line.trim()){if(inList){body+='</ul>';inList=false;}continue;}if(/^#{1,3}\s/.test(line)){if(inList){body+='</ul>';inList=false;}const level=Math.min(3,(line.match(/^#+/)||['#'])[0].length);body+='<h'+level+'>'+tdHtmlEscape(line.replace(/^#{1,3}\s*/,''))+'</h'+level+'>';continue;}if(/^\s*[-*•]\s+/.test(line)){if(!inList){body+='<ul>';inList=true;}body+='<li>'+tdHtmlEscape(line.replace(/^\s*[-*•]\s+/,''))+'</li>';continue;}if(inList){body+='</ul>';inList=false;}body+='<p>'+tdHtmlEscape(line).replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+)`/g,'<code>$1</code>')+'</p>'; }if(inList)body+='</ul>';if(inCode)body+='</pre>';if(sources?.length){body+='<h2>Kaynaklar</h2><ol>'+sources.slice(0,30).map(x=>'<li>'+tdHtmlEscape(x.title||x.url)+' '+(String(x.url||'').startsWith('http')?'<a href="'+tdHtmlEscape(x.url)+'">'+tdHtmlEscape(x.url)+'</a>':'')+'</li>').join('')+'</ol>';}const safeTitle=tdHtmlEscape(title||tdDocTitle(content));win.document.open();win.document.write('<!doctype html><html lang="tr"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+safeTitle+'</title><style>body{font:11pt/1.6 Arial,sans-serif;max-width:850px;margin:32px auto;padding:0 26px;color:#172b46}h1{font-size:22pt;border-bottom:2px solid #1683ef;padding-bottom:10px}h2{font-size:16pt;margin-top:24px}h3{font-size:13pt}p{margin:8px 0}li{margin:5px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f2f5f9;padding:12px;border-radius:8px}a{color:#075fcf}@media print{body{margin:0 auto;padding:0 12mm}a{color:#111;text-decoration:none}}</style><h1>'+safeTitle+'</h1>'+body+'</html>');win.document.close();setTimeout(()=>{try{win.focus();win.print()}catch(e){}},450);tdToast('Yazdır penceresi açıldı. Hedef olarak “PDF olarak kaydet” seç.');return true;}
+function tdDetectDocumentRequest(text){const t=String(text||'').toLocaleLowerCase('tr-TR');const action=/(oluştur|olustur|hazırla|hazirla|indir|dönüştür|donustur|çevir|cevir|dosyaya aktar|çıktı al|cikti al|export|kaydet|hazirlayabilir misin|hazırlayabilir misin|olarak ver|\bver\b|\byap\b)/.test(t);if(!action)return null;if(/\b(pdf)\b/.test(t)||/pdf'ye|pdf ye|pdf olarak/.test(t))return {format:'pdf',title:'Tekden AI PDF Belgesi'};if(/\b(word|docx|doc)\b/.test(t)||/word dosyası|word belgesi/.test(t))return {format:'docx',title:'Tekden AI Word Belgesi'};if(/dosya olarak|belge dosyası|rapor dosyası/.test(t)||(/(rapor|ödev|odev|sözleşme|sozlesme|dilekçe|dilekce|proje teklifi|iş planı|is plani|tutanak|kılavuz|kilavuz)/.test(t)&&/(oluştur|olustur|hazırla|hazirla|yaz|düzenle|duzenle|çıkar|cikar|hazirlayabilir|hazırlayabilir)/.test(t)))return {format:'docx',title:'Tekden AI Belgesi'};return null;}
+const tdOriginalBubble=bubble;bubble=function(role,content,sources=[]){const node=tdOriginalBubble(role,content,sources);if(role==='assistant'){tdLastAssistant=String(content||'');const tools=document.createElement('div');tools.className='tdBubbleTools';const copy=document.createElement('button');copy.className='secondary';copy.textContent='Kopyala';copy.onclick=async()=>{try{await navigator.clipboard.writeText(String(content));tdToast('Yanıt kopyalandı.')}catch{const ta=document.createElement('textarea');ta.value=String(content);document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();tdToast('Yanıt kopyalandı.')}};const save=document.createElement('button');save.className='secondary';save.textContent='🔖 Kaydet';save.onclick=async()=>{if(!user){alert('Yanıtı hesabında saklamak için giriş yap.');return}const title=(String(content).split('\n').find(x=>x.trim())||'Kaydedilen yanıt').slice(0,150);try{await api('/api/bookmarks',{method:'POST',body:JSON.stringify({title,content:String(content),chat_id:chatId||null})});tdToast('Yanıt kaydedildi.');tdLoadBookmarks()}catch(e){alert(e.message)}};const good=document.createElement('button');good.className='td-response-rating';good.textContent='👍 Faydalı';good.onclick=()=>api('/api/response-rating',{method:'POST',body:JSON.stringify({rating:1,context:location.pathname})}).then(()=>tdToast('Geri bildirimin için teşekkürler.')).catch(()=>tdToast('Puan kaydedilemedi.'));const bad=document.createElement('button');bad.className='td-response-rating';bad.textContent='👎 Geliştir';bad.onclick=()=>api('/api/response-rating',{method:'POST',body:JSON.stringify({rating:-1,context:location.pathname})}).then(()=>tdToast('Geri bildirimin için teşekkürler.')).catch(()=>tdToast('Puan kaydedilemedi.'));const note=document.createElement('button');note.className='secondary';note.textContent='📝 Nota dönüştür';note.onclick=()=>{tdOpenTools();$('tdNoteTitle').value=(String(content).split('\n').find(x=>x.trim())||'Yanıt notu').slice(0,120);$('tdNoteContent').value=String(content).slice(0,12000)};const word=document.createElement('button');word.className='secondary';word.textContent='📝 Word';word.title='Yanıtı düzenlenebilir Word dosyası olarak indir';word.onclick=()=>tdDownloadWord(String(content),sources);const pdf=document.createElement('button');pdf.className='secondary';pdf.textContent='📄 PDF';pdf.title='Yanıtı yazdırma penceresinde PDF olarak kaydet';pdf.onclick=()=>tdPrintPdf(String(content),sources,tdDocTitle(content));window.tdLastAssistant=String(content||'');window.tdLastAssistantSources=Array.isArray(sources)?sources:[];tools.append(copy,save,good,bad,note,word,pdf);node.appendChild(tools)}return node};
 // Keyboard-first workflow and safe modal close handling.
 document.addEventListener('keydown',e=>{const mod=e.ctrlKey||e.metaKey;if(mod&&e.key.toLowerCase()==='k'){e.preventDefault();tdBack.style.display==='flex'?tdCloseTools():tdOpenTools()}if(mod&&e.key==='Enter'){e.preventDefault();if($('prompt').value.trim())send()}if(mod&&e.shiftKey&&e.key.toLowerCase()==='n'){e.preventDefault();newChat()}if(e.key==='Escape'){tdCloseTools()}});
 // Drag-and-drop files onto the chat area, with the same 12 MB safety limit as the picker.
@@ -6153,7 +6403,7 @@ HTML = r"""<!doctype html>
 .pro-mini{display:inline-flex;align-items:center;gap:5px;background:#eaf3ff;color:#075fcf;border:1px solid #cfe3ff;border-radius:8px;padding:4px 7px;font-size:11px;font-weight:800}
 @media(max-width:1380px){.layout{grid-template-columns:235px minmax(0,1fr)}}
 @media(max-width:1050px){.topnav{display:none}}
-@media(max-width:720px){.layout{grid-template-columns:1fr}.sidebar{display:none}.mobile{display:inline-block}.messages{padding:20px 14px}.top{padding:10px 12px}.composerwrap{padding:8px 10px 12px}.welcomegrid{grid-template-columns:1fr}.feature{min-height:auto}.topnav{display:none}}
+@media(max-width:720px){.layout{grid-template-columns:1fr}.sidebar{display:none}.mobile{display:inline-block}.messages{padding:16px 12px 22px}.top{padding:9px 10px;min-height:58px}.composerwrap{padding:8px 10px calc(10px + env(safe-area-inset-bottom));}.welcomegrid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:18px 0}.feature{min-height:86px;padding:12px;text-align:left}.feature small{font-size:11px;line-height:1.35}.topnav{display:none}.sidebar.mobile-open{display:flex!important;position:fixed;inset:0 auto 0 0;width:min(320px,88vw);height:100dvh;max-height:100dvh;z-index:120;overflow:auto;box-shadow:14px 0 42px #0b1e3a35;border-right:1px solid var(--line)}#mobileSidebarClose{display:block!important}#mobileToolsMenu{max-height:calc(100dvh - 84px);overflow:auto}.toolleft #searchBtn{display:inline-flex!important}.toolleft #imageBtn,.toolleft #dictationBtn,.toolleft #voiceBtn{display:none!important}.toolleft{display:flex;gap:6px;flex-wrap:wrap;flex:1}.status{flex-basis:100%;white-space:normal}.tools{align-items:flex-end;gap:8px}.composer textarea{min-height:64px;max-height:30dvh;font-size:16px}.composer{border-radius:16px}.notice{font-size:11px}.bubble{max-width:100%;padding:13px}.tdBubbleTools{gap:5px}.tdBubbleTools button{padding:7px 8px;font-size:11px}.top>div:first-of-type{min-width:0}.top strong{font-size:15px}}
 .garage-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:12px 0}.garage-item{border:1px solid #355b79;border-radius:12px;padding:10px;background:#0b1b2d;color:#eaf6ff;text-align:left;cursor:pointer}.garage-item:disabled{opacity:.45;cursor:not-allowed}.garage-item strong{display:block;margin-bottom:4px}.toast{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:3;background:#061423ed;border:1px solid #4de8ff;border-radius:999px;padding:8px 13px;color:#fff;pointer-events:none;white-space:nowrap}.badge-row{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}.mini-badge{background:#172c43;border:1px solid #375675;border-radius:8px;padding:6px 8px;font-size:12px}
 
 /* Tekden AI: sade alt alan ve mobil araç menüsü */
@@ -6167,10 +6417,11 @@ HTML = r"""<!doctype html>
   #mobileToolsMenu.open{display:grid}
   #mobileToolsMenu button{display:flex;align-items:center;gap:7px;justify-content:flex-start;padding:10px 9px;font-size:13px;min-width:0}
   #mobileToolsMenu button .menuIcon{font-size:18px;width:22px;text-align:center;flex:0 0 22px}
-  .welcomegrid{display:none!important}
+  .welcomegrid{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
   .welcome p{margin:8px auto 0;max-width:320px;font-size:14px}
   .topnav{display:none!important}
-  .toolleft #searchBtn,.toolleft #imageBtn,.toolleft #dictationBtn,.toolleft #voiceBtn{display:none!important}
+  .toolleft #imageBtn,.toolleft #dictationBtn,.toolleft #voiceBtn{display:none!important}
+  .toolleft #searchBtn{display:inline-flex!important}
   .toolleft{min-width:0}
   .status{font-size:11px}
   .composer textarea{min-height:52px}
@@ -6179,11 +6430,18 @@ HTML = r"""<!doctype html>
 @media(max-width:720px){#tkFloatingLinks{display:none!important}}
 </style></head><body>
 <div class="layout"><aside class="sidebar"><div class="brand">Tekden <span>AI</span></div>
-<div class="sideactions"><button id="newChat">＋ Yeni sohbet</button><button id="proStudioBtn" class="secondary" style="display:none;border-color:#c5a4ff;color:#6132b8;background:linear-gradient(110deg,#f4edff,#edf5ff)" onclick="location.href='/pro-studio'">✦ Pro Stüdyo</button><button class="secondary" onclick="openSongStudio()" style="border-color:#d8c9ff;color:#6941b6;background:#faf7ff">🎤 Şarkı Stüdyosu</button></div>
+<div class="sideactions"><button id="mobileSidebarClose" class="secondary" type="button" style="display:none">✕ Menüyü kapat</button><button id="newChat">＋ Yeni sohbet</button><button id="proStudioBtn" class="secondary" style="display:none;border-color:#c5a4ff;color:#6132b8;background:linear-gradient(110deg,#f4edff,#edf5ff)" onclick="location.href='/pro-studio'">✦ Pro Stüdyo</button><button class="secondary" onclick="openSongStudio()" style="border-color:#d8c9ff;color:#6941b6;background:#faf7ff">🎤 Şarkı Stüdyosu</button></div>
 <div><small style="color:var(--muted)">SOHBETLER</small></div><div class="sideutility"><button class="secondary" id="activeChatsBtn">Son sohbetler</button><button class="secondary" id="archivedChatsBtn">Arşiv</button></div><div class="history" id="history"><div class="notice">Geçmişi görmek için giriş yap.</div></div>
 <div class="userbar" id="userbar"><div class="notice">Misafir modu · Sohbetler kaydedilmez.</div></div></aside>
-<main class="main"><header class="top"><button class="secondary mobile" id="mobileNew">＋</button><div><strong>Tekden AI</strong><br><small>Yardımcı yapay zekân</small></div><nav class="topnav"><button class="active" onclick="newChat()">◉ Sohbet</button><button onclick="$('prompt').value='Görsel oluştur: ';$('prompt').focus()">▧ Görsel</button><button onclick="$('fileInput').click()">▤ Dosya Analizi</button><button onclick="forceSearch=true;$('searchBtn').style.borderColor='var(--accent)';$('prompt').focus()">⌕ Web Arama</button><button onclick="$('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';$('prompt').focus()">▣ Uygulama</button><button onclick="$('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: '; $('prompt').focus()">🎮 Oyun</button><button onclick="openSongStudio()">🎤 Şarkı</button><button onclick="location.href='/kesfet'">✦ Keşfet</button></nav><div style="display:flex;gap:8px;align-items:center"><button class="secondary" id="mobileToolsBtn" type="button" aria-label="Diğer araçlar" aria-expanded="false">⋮</button><button class="secondary profilebtn" id="profileBtn" aria-label="Profil"><span class="avatar" id="topAvatar">?</span><span id="profileButtonText">Profil</span></button></div></header>
+<main class="main"><header class="top"><button class="secondary mobile" id="mobileNew">＋</button><div><strong>Tekden AI</strong><br><small>Yardımcı yapay zekân</small></div><nav class="topnav"><button class="active" onclick="newChat()">◉ Sohbet</button><button onclick="$('prompt').value='Görsel oluştur: ';$('prompt').focus()">▧ Görsel</button><button onclick="$('fileInput').click()">▤ Dosya Analizi</button><button onclick="forceSearch=true;$('searchBtn').style.borderColor='var(--accent)';$('prompt').focus()">⌕ Web Arama</button><button onclick="$('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';$('prompt').focus()">▣ Uygulama</button><button onclick="$('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: '; $('prompt').focus()">🎮 Oyun</button><button onclick="openSongStudio()">🎤 Şarkı</button><button onclick="location.href='/kesfet'">✦ Keşfet</button><button id="adminNavBtn" style="display:none" onclick="location.href='/yonetim'">⚙ Yönetim</button></nav><div style="display:flex;gap:8px;align-items:center"><button class="secondary" id="mobileToolsBtn" type="button" aria-label="Diğer araçlar" aria-expanded="false">⋮</button><button class="secondary profilebtn" id="profileBtn" aria-label="Profil"><span class="avatar" id="topAvatar">?</span><span id="profileButtonText">Profil</span></button></div></header>
 <div id="mobileToolsMenu" aria-label="Diğer araçlar">
+<button class="secondary" type="button" data-mobile-action="history"><span class="menuIcon">☰</span>Sohbet geçmişi</button>
+<button class="secondary" type="button" data-mobile-action="mind"><span class="menuIcon">✦</span>Zihin Atölyesi</button>
+<button class="secondary" type="button" data-mobile-action="studio"><span class="menuIcon">▣</span>Pro Stüdyo</button>
+<button class="secondary" type="button" data-mobile-action="discover"><span class="menuIcon">✧</span>Keşfet</button>
+<button class="secondary" type="button" data-mobile-action="plans"><span class="menuIcon">✦</span>Planlar</button>
+<button class="secondary" type="button" data-mobile-action="docx"><span class="menuIcon">📝</span>Son yanıtı Word indir</button>
+<button class="secondary" type="button" data-mobile-action="pdf"><span class="menuIcon">📄</span>Son yanıtı PDF kaydet</button>
 <button class="secondary" type="button" data-mobile-action="image"><span class="menuIcon">▧</span>Görsel oluştur</button>
 <button class="secondary" type="button" data-mobile-action="file"><span class="menuIcon">▤</span>Dosya analizi</button>
 <button class="secondary" type="button" data-mobile-action="web"><span class="menuIcon">⌕</span>Web arama</button>
@@ -6192,6 +6450,7 @@ HTML = r"""<!doctype html>
 <button class="secondary" type="button" data-mobile-action="song"><span class="menuIcon">🎵</span>Şarkı</button>
 <button class="secondary" type="button" data-mobile-action="dictation" aria-label="Dikte"><span class="menuIcon">🎙</span>Dikte</button>
 <button class="secondary" type="button" data-mobile-action="voice" aria-label="Sesli sohbet"><span class="menuIcon">🔊</span>Sesli sohbet</button>
+<button class="secondary" id="mobileAdminBtn" type="button" data-mobile-action="admin" style="display:none"><span class="menuIcon">⚙</span>Yönetim</button>
 </div>
 <section class="messages" id="messages"><div class="welcome" id="welcome"><div class="welcome-logo">Tekden <span>AI</span><span class="spark">✦</span></div><h1>Tekden AI'ye Hoş Geldin <span class="blue">✦</span></h1><p>Sana nasıl yardımcı olabilirim? Bir mesaj yazman yeterli; diğer araçlar gerektiğinde hazır.</p><div class="welcomegrid"><button class="feature suggestion" data-kind="chat"><span class="ico">◉</span><span><b>Sohbet</b><small>Konuları açıkla, sorularını yanıtla ve adım adım ilerle.</small></span></button><button class="feature suggestion" data-kind="image"><span class="ico">▧</span><span><b>Görsel Oluştur</b><small>İstediğin sahneyi tarif et, görselini üret.</small></span></button><button class="feature suggestion" data-kind="file"><span class="ico">▤</span><span><b>Dosya Analizi</b><small>PDF, belge ve görsellerdeki içeriği incele.</small></span></button><button class="feature suggestion" data-kind="web"><span class="ico">⌕</span><span><b>Web Arama</b><small>Güncel bilgileri kaynaklarıyla araştır.</small></span></button><button class="feature suggestion" data-kind="app"><span class="ico">⌘</span><span><b>Uygulama Geliştir</b><small>Kod, site ve proje fikirleri üzerinde çalış.</small></span></button><button class="feature suggestion" data-kind="game"><span class="ico">♧</span><span><b>Oyun Tasarla</b><small>Free ile arcade oyna; Pro ile tarifinden özgün, oynanabilir oyun üret.</small></span></button><button class="feature songstudio" type="button" onclick="openSongStudio()"><span class="ico">🎤</span><span><b>Vokalli Şarkı Stüdyosu</b><small>Pro üyelerine özel: Tekden AI içinde vokalli şarkı üret.</small></span></button></div></div></section>
 <div class="composerwrap"><div class="composer"><textarea id="prompt" placeholder="Tekden AI'a mesaj yaz..."></textarea><div class="attachrow"><label class="attachlabel" for="fileInput">📎 Dosya / görsel ekle</label><input id="fileInput" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.docx" hidden><span class="attachname" id="fileName">Dosya seçilmedi</span></div><div class="tools"><div class="toolleft"><button class="secondary" id="searchBtn" title="İnternette ara">⌕ Web ara</button><button class="secondary" id="imageBtn" title="Görsel oluştur">▧ Görsel</button><button class="secondary" id="dictationBtn" title="Konuşarak yaz">🎙 Dikte et</button><button class="secondary" id="voiceBtn" title="Sesli sohbet">🔊 Sesli sohbet</button><span class="status" id="status">Hazır</span></div><button id="sendBtn">Gönder ↑</button></div></div><div class="notice" style="text-align:center;margin-top:8px">Misafir sohbetleri bu tarayıcıda saklanır; hesap açarsan sohbet geçmişin hesabına kaydedilir.</div></div></main></div>
@@ -6240,6 +6499,8 @@ async function refreshMe(){try{const d=await api('/api/me');user=d.user;renderUs
 function renderUser(){
  $('topAvatar').textContent=user?(user.username[0]||'U').toUpperCase():'?';
  $('profileButtonText').textContent=user?user.username:'Profil';
+ const adminNav=$('adminNavBtn');if(adminNav)adminNav.style.display=user&&user.is_owner?'inline-flex':'none';
+ const mobileAdmin=$('mobileAdminBtn');if(mobileAdmin)mobileAdmin.style.display=user&&user.is_owner?'flex':'none';
  const studioButton=$('proStudioBtn');if(studioButton)studioButton.style.display=user&&['pro','plus'].includes(user.plan)?'block':'none';
  $('profileUsername').textContent=user?user.username:'Misafir';
  $('profilePlan').textContent=user?(user.plan==='plus'?'Tekden AI Plus':(user.plan==='pro'?'Tekden AI Pro':'Free')):'Giriş yapılmadı';
@@ -6370,15 +6631,17 @@ async function analyzeAttachment(question,file){
 }
 async function send(){
  const text=$('prompt').value.trim();const file=selectedFile;if(!text&&!file)return;
+ const docIntent=(!file&&!looksLikeGameRequest(text)&&!looksLikeImageRequest(text))?tdDetectDocumentRequest(text):null;
+ const pdfWindow=docIntent?.format==='pdf'?window.open('about:blank','_blank'):null;
  $('prompt').value='';bubble('user',(text||'Ekli dosyayı analiz et.')+(file?'\n📎 '+file.name:''));
  setStatus(file?'Dosya analiz ediliyor…':looksLikeImageRequest(text)?'İstenen görsel oluşturuluyor…':(forceSearch?'Derin web araması yapılıyor…':'Yanıt hazırlanıyor…'));$('sendBtn').disabled=true;
  try{
   if(file){const answer=await analyzeAttachment(text,file);bubble('assistant',answer);if(user){try{const saved=await api('/api/save-analysis',{method:'POST',body:JSON.stringify({question:text||'Ekli dosyayı analiz et.',answer,filename:file.name,chat_id:chatId})});if(saved.chat_id)chatId=saved.chat_id;loadChats()}catch(saveError){console.warn('Dosya analizi geçmişe kaydedilemedi',saveError)}}else {guestHistory.push({role:'user',content:(text||'Ekli dosyayı analiz et.')+' [Dosya: '+file.name+']'},{role:'assistant',content:answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}selectedFile=null;$('fileInput').value='';$('fileName').textContent='Dosya seçilmedi';setStatus('Dosya analizi tamamlandı');}
   else if(looksLikeGameRequest(text)){const game=await api('/api/game',{method:'POST',body:JSON.stringify({prompt:text})});gameBubble(game.html);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İsteğine göre oynanabilir bir oyun oluşturuldu.'});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Oyun hazır');}
   else if(looksLikeImageRequest(text)){await createAndShowImage(text);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İstenen görsel oluşturuldu. İstek: '+text});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Görsel hazır');}
-  else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus('UYARI: Bu mesaj Supabase’e kaydedilmedi. Hesabından çıkış yapıp yeniden giriş yap.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else setStatus(forceSearch?'Kaynak bulunamadı; yanıt doğrulanamadı':'Tamamlandı');}
+  else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(docIntent?.format==='docx'){await tdDownloadWord(d.answer,d.sources||[],docIntent.title)}else if(docIntent?.format==='pdf'){tdPrintPdf(d.answer,d.sources||[],docIntent.title,pdfWindow)}if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus('UYARI: Bu mesaj Supabase’e kaydedilmedi. Hesabından çıkış yapıp yeniden giriş yap.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else setStatus(forceSearch?'Kaynak bulunamadı; yanıt doğrulanamadı':'Tamamlandı');}
  }catch(e){bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeGameRequest(text)?'Oyun oluşturulamadı: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}
- finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)'}
+ finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)';$('searchBtn').textContent='⌕ Web ara'}
 }
 
 async function generateImage(){const requestText=$('prompt').value.trim();if(!requestText){alert('Önce oluşturmak istediğin görseli ayrıntılarıyla yaz.');return}bubble('user','Görsel oluştur: '+requestText);$('prompt').value='';setStatus('İstediğin görsel oluşturuluyor…');$('imageBtn').disabled=true;try{await createAndShowImage(requestText);if(!user){guestHistory.push({role:'user',content:'Görsel oluştur: '+requestText},{role:'assistant',content:'İstenen görsel oluşturuldu. İstek: '+requestText});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Görsel hazır')}catch(e){bubble('assistant','Görsel oluşturulamadı: '+e.message);setStatus('Hata')}finally{$('imageBtn').disabled=false}}
@@ -6423,7 +6686,7 @@ $('dictationBtn').onclick=()=>{
 $('voiceBtn').onclick=()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){setStatus('Sesli sohbet bu tarayıcıda desteklenmiyor. Chrome veya Edge deneyebilirsin.');return}if(!('speechSynthesis' in window)){setStatus('Bu tarayıcı sesli yanıtı desteklemiyor.');return}voiceMode=true;recognition=makeRecognition();if(!recognition){voiceMode=false;return}$('voiceBtn').textContent='🎙 Dinleniyor…';setStatus('Seni dinliyorum. Bitirince yanıtını sesli okuyacağım.');try{recognition.start()}catch(e){voiceMode=false;recognition=null;$('voiceBtn').textContent='🔊 Sesli sohbet';setStatus('Sesli sohbet başlatılamadı: '+e.message)}};
 const oldBubble=bubble; bubble=function(role,content,sources=[]){const el=oldBubble(role,content,sources);if(role==='assistant'&&(voiceMode||speakNext)&&'speechSynthesis'in window){speakNext=false;const u=new SpeechSynthesisUtterance(cleanAnswer(content));u.lang='tr-TR';window.speechSynthesis.cancel();window.speechSynthesis.speak(u)}return el};
 $('sendBtn').onclick=send;
-$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('fileInput').onchange=e=>{selectedFile=e.target.files?.[0]||null;if(selectedFile&&selectedFile.size>12*1024*1024){alert('Dosya en fazla 12 MB olabilir.');selectedFile=null;$('fileInput').value=''}$('fileName').textContent=selectedFile?selectedFile.name:'Dosya seçilmedi';if(selectedFile)setStatus("Dosya hazır · sorunu yazıp Gönder'e bas")};$('imageBtn').onclick=generateImage;$('searchBtn').onclick=()=>{forceSearch=!forceSearch;$('searchBtn').style.borderColor=forceSearch?'#a78bfa':'var(--line)';setStatus(forceSearch?'Web araması açık':'Otomatik arama')};$('newChat').onclick=newChat;$('mobileNew').onclick=newChat;$('closeModal').onclick=closeModal;$('modalback').onclick=e=>{if(e.target===$('modalback'))closeModal()};
+$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('fileInput').onchange=e=>{selectedFile=e.target.files?.[0]||null;if(selectedFile&&selectedFile.size>12*1024*1024){alert('Dosya en fazla 12 MB olabilir.');selectedFile=null;$('fileInput').value=''}$('fileName').textContent=selectedFile?selectedFile.name:'Dosya seçilmedi';if(selectedFile)setStatus("Dosya hazır · sorunu yazıp Gönder'e bas")};$('imageBtn').onclick=generateImage;$('searchBtn').onclick=()=>{forceSearch=!forceSearch;$('searchBtn').style.borderColor=forceSearch?'#a78bfa':'var(--line)';$('searchBtn').textContent=forceSearch?'⌕ Web açık':'⌕ Web ara';setStatus(forceSearch?'Bu mesajda web araması zorunlu':'Otomatik arama; gerekirse kendiliğinden çalışır')};$('newChat').onclick=newChat;$('mobileNew').onclick=newChat;$('closeModal').onclick=closeModal;$('modalback').onclick=e=>{if(e.target===$('modalback'))closeModal()};
 let authMode='login';$('authSubmit').onclick=()=>auth('login');$('registerBtn').onclick=()=>auth('register');
 async function auth(mode){authMode=mode;const username=$('authUser').value.trim(),password=$('authPass').value;try{const d=await api('/api/'+mode,{method:'POST',body:JSON.stringify({username,password})});user=d.user;if(user&&user.plan==='plus'){location.reload();return}showArchived=false;closeModal();renderUser();newChat();loadChats()}catch(e){$('authError').textContent=e.message}}
 function openSongStudio(){if(!user){showModal();$('authError').textContent='Vokalli şarkı üretimi yalnızca Pro üyelerine açık. Önce Pro hesabına giriş yap.';return}if(!(['pro','plus'].includes(user.plan))){ $('plansBack').style.display='flex'; return }const b=$('songStudioBack');if(b)b.style.display='flex'}
@@ -6443,7 +6706,9 @@ restoreGuestHistory();refreshMe();
 (function(){
  const menu=document.getElementById('mobileToolsMenu');
  const trigger=document.getElementById('mobileToolsBtn');
+ const sidebarClose=document.getElementById('mobileSidebarClose');
  if(!menu||!trigger)return;
+ sidebarClose?.addEventListener('click',()=>document.querySelector('.sidebar')?.classList.remove('mobile-open'));
  trigger.addEventListener('click',function(e){
    e.stopPropagation();
    const opened=menu.classList.toggle('open');
@@ -6458,14 +6723,22 @@ restoreGuestHistory();refreshMe();
    const b=e.target.closest('[data-mobile-action]');if(!b)return;
    const action=b.dataset.mobileAction;
    menu.classList.remove('open');trigger.setAttribute('aria-expanded','false');
-   if(action==='image'){document.getElementById('prompt').value='Görsel oluştur: ';document.getElementById('prompt').focus();}
+   if(action==='history'){const side=document.querySelector('.sidebar');if(side)side.classList.add('mobile-open');document.getElementById('activeChatsBtn')?.click();}
+   else if(action==='mind'){const x=document.getElementById('tkMindOpen')||document.getElementById('tkMindLockedOpen');if(x)x.click();else alert('Zihin Atölyesi bu hesapta görüntülenemiyor.');}
+   else if(action==='studio'){location.href='/pro-studio';}
+   else if(action==='discover'){location.href='/kesfet';}
+   else if(action==='plans'){document.getElementById('plansBack').style.display='flex';}
+   else if(action==='docx'){if(!window.tdLastAssistant){alert('Önce bir yanıt oluştur.');return;}tdDownloadWord(window.tdLastAssistant,window.tdLastAssistantSources||[]);}
+   else if(action==='pdf'){if(!window.tdLastAssistant){alert('Önce bir yanıt oluştur.');return;}tdPrintPdf(window.tdLastAssistant,window.tdLastAssistantSources||[],tdDocTitle(window.tdLastAssistant));}
+   else if(action==='image'){document.getElementById('prompt').value='Görsel oluştur: ';document.getElementById('prompt').focus();}
    else if(action==='file'){document.getElementById('fileInput').click();}
-   else if(action==='web'){window.forceSearch=true;const x=document.getElementById('searchBtn');if(x)x.style.borderColor='var(--accent)';document.getElementById('prompt').focus();}
+   else if(action==='web'){forceSearch=true;const x=document.getElementById('searchBtn');if(x){x.style.borderColor='var(--accent)';x.textContent='⌕ Web açık';}document.getElementById('prompt').focus();}
    else if(action==='app'){document.getElementById('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';document.getElementById('prompt').focus();}
    else if(action==='game'){document.getElementById('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: ';document.getElementById('prompt').focus();}
    else if(action==='song'&&typeof openSongStudio==='function'){openSongStudio();}
    else if(action==='dictation'){const x=document.getElementById('dictationBtn');if(x)x.click();}
    else if(action==='voice'){const x=document.getElementById('voiceBtn');if(x)x.click();}
+   else if(action==='admin'){if(user&&user.is_owner)location.href='/yonetim';else alert('Yönetim alanı yalnızca site sahibine açıktır.');}
  });
 })();
 
@@ -6803,6 +7076,8 @@ MIND_LAB_HTML = r"""
  #tkMindBox button{max-width:100%;min-height:40px;white-space:normal;overflow-wrap:anywhere}
  #tkMindBox .tkPrimary,#tkMindBox .tkSecondary{margin:4px 4px 0 0}
  .tk25Grid{grid-template-columns:minmax(0,1fr)!important}
+ .tkMindTabs{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .tkMindPanel .tkMindCard{padding:12px}
  .tk25Card{width:100%;min-width:0;text-align:left}
  .tk25Runner{position:relative}
  .tkProjectItem{flex-wrap:wrap}
@@ -6838,8 +7113,8 @@ MIND_LAB_HTML = r"""
    <button type="button" data-tk-tab="retro">Proje geçmişini yeniden kur</button>
    <button type="button" data-tk-tab="evolution">Arka plan kod evrimi</button>
    <button type="button" data-tk-tab="brainware">Nöral arayüz</button>
-   <button type="button" data-tk-tab="synapse">10 gelişmiş motor</button>
-   <button type="button" data-tk-tab="all25">25 yeni özellik</button>
+   <button type="button" data-tk-tab="synapse">Gelişmiş motorlar</button>
+   <button type="button" data-tk-tab="all25">46 motor</button>
   </div>
   <section class="tkMindPanel active" data-tk-panel="projects">
    <div class="tkMindGrid"><div class="tkMindCard">
@@ -6900,8 +7175,8 @@ MIND_LAB_HTML = r"""
   <section class="tkMindPanel" data-tk-panel="evolution"><div class="tkMindCard"><strong>Arka plan kod evrimi</strong><p>Gönderdiğin kod bakım incelemesi için kuyruğa alınır. Servis çalışıyorken işçi kodu analiz eder, teknik borç ve iyileştirme yamaları önerir. Kod çalıştırılmaz, kaynak dosyan değiştirilmez ve otomatik dağıtım yapılmaz. Render servisi uykuya geçer veya yeniden başlarsa işin tamamlanması gecikebilir. Kod Ollama Cloud modeline analiz için gönderilir; gizli anahtarları ve kişisel verileri göndermeden önce sil.</p><label for="tkEvolutionName">Proje adı</label><input id="tkEvolutionName" maxlength="100" value="Tekden AI"><label for="tkEvolutionGoal">İnceleme hedefi</label><input id="tkEvolutionGoal" maxlength="800" value="Bakım risklerini bul, 6-12-36 aylık risk senaryoları ve iyileştirme yamaları öner"><label for="tkEvolutionCode">İncelenecek kod</label><textarea id="tkEvolutionCode" maxlength="24000" placeholder="İncelemek istediğin kodu buraya yapıştır..."></textarea><button class="tkPrimary" id="tkEvolutionStart" type="button">Arka plan incelemesini başlat</button><p id="tkEvolutionStatus" role="status">Henüz iş başlatılmadı.</p><pre id="tkEvolutionResult" hidden></pre></div></section>
   <section class="tkMindPanel" data-tk-panel="all25">
    <div class="tkMindCard">
-    <strong>30 Gelişmiş Zihin & Nöral Entegrasyon Motoru</strong>
-    <p>Bu bölüm, gönderdiğin 30 özelliğin tamamını Zihin Atölyesi içine taşır. Bir kart seç, aşağıya proje/kod/isteğini yaz ve seçili motoru çalıştır. Her araç gerçek kapasitesi ölçüsünde analiz, prototip veya plan üretir.</p>
+    <strong>46 Bütünleşik Zihin ve Araştırma Motoru</strong>
+    <p>Bu merkez, daha önceki motorları ve gönderdiğin 30 proje fikrini birleştirir. Bir kart seç, proje/kod/isteğini yaz ve çalıştır. Her araç analiz, araştırma, prototip veya uygulanabilir plan üretir; fiziksel olarak imkânsız yetenekleri gerçekmiş gibi sunmaz.</p>
     <div class="tk25Grid">
      <button type="button" class="tk25Card" data-feature="thought_physics"><b>1. Nöro-Mekanik Fizik Motoru</b><span>Fikir ve etkileşim tarifinden Canvas/JavaScript fizik prototipi üretir.</span></button>
      <button type="button" class="tk25Card" data-feature="bio_ui"><b>2. Biyo-Ritmik Arayüz Adaptasyonu</b><span>İzinli sinyal özeti ve tercihlere göre erişilebilir arayüz önerir.</span></button>
@@ -6938,6 +7213,17 @@ MIND_LAB_HTML = r"""
      <button type="button" class="tk25Card" data-feature="chronos_rewrite"><b>33. Chronos Senaryo Motoru</b><span>Gelecek tahmini değil; koşullu etki senaryoları ve bugünden önlem planı üretir.</span></button>
      <button type="button" class="tk25Card" data-feature="digital_bio_transcoder"><b>34. Dijital-Biyolojik Tasarımcı</b><span>Biyoinformatik kavramlarını güvenli, teorik ve laboratuvar dışı tasarım notlarına dönüştürür.</span></button>
      <button type="button" class="tk25Card" data-feature="omniscience_core"><b>35. Mutlak Bilgi Araştırma Merkezi</b><span>Bilinen kaynakları tarar, belirsizlikleri ve doğrulanamayan iddiaları ayırır.</span></button>
+     <button type="button" class="tk25Card" data-feature="omniscient_research"><b>36. OMNISCIENT + ZERO · Bilimsel Keşif Masası</b><span>Bilim dallarını birleştirir, web kaynaklarını karşılaştırır, test edilebilir hipotez ve araştırma planı çıkarır.</span></button>
+     <button type="button" class="tk25Card" data-feature="genesis_life"><b>37. GENESIS + LIFE · Yaşayan Evren Tasarımcısı</b><span>Kurgusal gezegenler, ekosistemler, canlı türleri, medeniyetler ve simülasyon kuralları tasarlar.</span></button>
+     <button type="button" class="tk25Card" data-feature="eternal_mirror"><b>38. ETERNAL + MIRROR · Proje Hafızası ve Kontrollü Öğrenme</b><span>Açıkça kaydedilen projeleri ilişkilendirir; diff, test, onay, sürüm ve geri alma akışı tasarlar.</span></button>
+     <button type="button" class="tk25Card" data-feature="atlas_time"><b>39. ATLAS + TIME · Dijital Dünya ve Gelecek Senaryoları</b><span>Verilen verilere dayalı dijital ikiz, varsayım haritası ve 1-10 yıllık olasılık senaryoları çıkarır.</span></button>
+     <button type="button" class="tk25Card" data-feature="multiverse_lab"><b>40. MULTIVERSE · Paralel Alternatif Laboratuvarı</b><span>5-20 çözüm dalını varsayım, maliyet, risk ve test ölçütleriyle karşılaştırır.</span></button>
+     <button type="button" class="tk25Card" data-feature="telepath_collab"><b>41. TELEPATH · İzinli İş Birliği ve BCI Tasarımı</b><span>Paylaşılan projeleri eşzamanlar; zihin okuma iddiası olmadan cihaz entegrasyon planı sunar.</span></button>
+     <button type="button" class="tk25Card" data-feature="molecule_lab"><b>42. MOLECULE · Moleküler Bilim Araştırması</b><span>Protein, biyomalzeme ve biyoinformatik literatürünü güvenli, teorik ve hesaplamalı düzeyde inceler.</span></button>
+     <button type="button" class="tk25Card" data-feature="polyglot_archive"><b>43. POLYGLOT · Çok Dilli ve Tarihî Arşiv</b><span>Çok dilli çeviri, lehçe karşılaştırması, terim sözlüğü ve belirsizlik analizi üretir.</span></button>
+     <button type="button" class="tk25Card" data-feature="architect_product"><b>44. ARCHITECT · Fikirden Ürüne Mühendislik</b><span>Fikri gereksinim, ekran, mimari, API, sprint, kabul kriteri ve test planına dönüştürür.</span></button>
+     <button type="button" class="tk25Card" data-feature="autonomy_council"><b>45. AUTONOMY + SINGULARITY · Uzman Konseyi</b><span>Ürün, yazılım, test, güvenlik ve pazarlama perspektiflerini tek model içinde tartıştırır.</span></button>
+     <button type="button" class="tk25Card" data-feature="screen_tutor"><b>46. Canlı Ekran Öğretmeni</b><span>Yüklenen ekran görüntülerindeki menüleri adım adım açıklar; canlı ekranı kendiliğinden izlemez.</span></button>
     </div>
     <div class="tk25Runner">
      <div class="tk25Selected" id="tk25Selected">Bir motor seçerek başla.</div>
@@ -6951,7 +7237,7 @@ MIND_LAB_HTML = r"""
   <section class="tkMindPanel" data-tk-panel="synapse"><div class="tkMindCard"><strong>Tekden AI · Gelişmiş Synapse Motorları</strong><p>Bu araçlar verdiğin içerikten prototip, analiz, plan ve kod taslağı üretir. İzin verilmeyen cihaz verilerini okumaz; kodu onaysız biçimde canlı projene yazmaz.</p>
    <label for="tkSynapseMode">Çalıştırılacak motor</label><select id="tkSynapseMode">
     <option value="thought_physics">1 · Nöro-Mekanik Fizik Motoru</option><option value="bio_ui">2 · Biyo-Ritmik Arayüz Adaptasyonu</option><option value="multiverse_compile">3 · 10 Alternatif Kod Derleyici</option><option value="chaos">4 · Kriz ve Çöküş Simülatörü</option><option value="collective">5 · Kolektif Synapse Havuzu</option><option value="audio_mood">6 · Duygu-Melodi Çevirmeni</option><option value="ip_sentinel">7 · Dijital Telif Kalkanı</option><option value="temporal">8 · Zamanlayıcı Görev Planlayıcı</option><option value="logic_map">9 · Mantık Haritalama</option><option value="persona">10 · Öğrenen Dijital Persona</option>
-    <option value="micro_focus">11 · Mikro-Mimik / Göz Kırpma Analizi</option><option value="neuro_audio">12 · Nöro-Akustik Ses Tasarımı</option><option value="debug_cue">13 · Görünür Hata İpuçları</option><option value="emotional_ui">14 · Duygu Tercihine Göre Arayüz</option><option value="circadian_workflow">15 · Biyolojik Saat Tercihine Göre İş Akışı</option><option value="acoustic_architecture">16 · Akustikten Oyun Mimarisi</option><option value="immortal_code">17 · Ölümsüz Kod Arşivi Tasarımı</option><option value="chaos_hacker">18 · Güvenli Hacker / Kaos Testi</option><option value="dialectic_council">19 · Çoklu Persona Fikir Meclisi</option><option value="predictive_aging">20 · Kod Yaşlandırma Analizi</option><option value="global_synapse">21 · Global Anonim Akıl Havuzu</option><option value="growth_launch">22 · Otonom Lansman ve Büyüme Ajanı</option><option value="logic_galaxy">23 · Holografik Mantık Galaksisi</option><option value="synthetic_twin">24 · Sentetik Dijital İkiz</option><option value="retrocausal_rebuild">25 · Geçmiş Proje Yeniden İnşası</option><option value="direct_brainware">26 · Nöral Doğrudan Aktarım / EEG</option><option value="organic_code">27 · Kontrollü Öz-Evrimleşen Kod</option><option value="zero_latency">28 · Gecikme ve Performans Motoru</option><option value="emotional_audio">29 · Duygu-Melodi Eş Zamanlı Stüdyo</option>
+    <option value="micro_focus">11 · Mikro-Mimik / Göz Kırpma Analizi</option><option value="neuro_audio">12 · Nöro-Akustik Ses Tasarımı</option><option value="debug_cue">13 · Görünür Hata İpuçları</option><option value="emotional_ui">14 · Duygu Tercihine Göre Arayüz</option><option value="circadian_workflow">15 · Biyolojik Saat Tercihine Göre İş Akışı</option><option value="acoustic_architecture">16 · Akustikten Oyun Mimarisi</option><option value="immortal_code">17 · Ölümsüz Kod Arşivi Tasarımı</option><option value="chaos_hacker">18 · Güvenli Hacker / Kaos Testi</option><option value="dialectic_council">19 · Çoklu Persona Fikir Meclisi</option><option value="predictive_aging">20 · Kod Yaşlandırma Analizi</option><option value="global_synapse">21 · Global Anonim Akıl Havuzu</option><option value="growth_launch">22 · Otonom Lansman ve Büyüme Ajanı</option><option value="logic_galaxy">23 · Holografik Mantık Galaksisi</option><option value="synthetic_twin">24 · Sentetik Dijital İkiz</option><option value="retrocausal_rebuild">25 · Geçmiş Proje Yeniden İnşası</option><option value="direct_brainware">26 · Nöral Doğrudan Aktarım / EEG</option><option value="organic_code">27 · Kontrollü Öz-Evrimleşen Kod</option><option value="zero_latency">28 · Gecikme ve Performans Motoru</option><option value="emotional_audio">29 · Duygu-Melodi Eş Zamanlı Stüdyo</option><option value="omniscient_research">36 · OMNISCIENT + ZERO Bilimsel Araştırma</option><option value="genesis_life">37 · GENESIS + LIFE Evren ve Ekosistem</option><option value="eternal_mirror">38 · ETERNAL + MIRROR Proje Hafızası</option><option value="atlas_time">39 · ATLAS + TIME Dijital İkiz ve Senaryo</option><option value="multiverse_lab">40 · MULTIVERSE Alternatif Senaryo Laboratuvarı</option><option value="telepath_collab">41 · TELEPATH İzinli İş Birliği</option><option value="molecule_lab">42 · MOLECULE Güvenli Moleküler Araştırma</option><option value="polyglot_archive">43 · POLYGLOT Dil ve Arşiv Motoru</option><option value="architect_product">44 · ARCHITECT Fikirden Ürüne</option><option value="autonomy_council">45 · AUTONOMY + SINGULARITY Uzman Konseyi</option><option value="screen_tutor">46 · Canlı Ekran Öğretmeni</option>
    </select><label for="tkSynapseMaterial">İçerik, kod, proje veya tarif</label><textarea id="tkSynapseMaterial" maxlength="16000" placeholder="İncelenecek proje, kod, ritim tarifi veya hedef..."></textarea><label for="tkSynapseContext">Ek bağlam ve kısıtlar</label><textarea id="tkSynapseContext" maxlength="4000" placeholder="Teknoloji, hedef cihaz, bütçe, tercih ve sınırlar..."></textarea><button class="tkPrimary" id="tkSynapseRun" type="button">Motoru çalıştır</button><pre id="tkSynapseResult" hidden></pre>
    <div class="tkMindCard" style="margin-top:12px"><strong>Holografik Mantık Galaksisi · Etkileşimli harita</strong><p>Motor seçimini “Holografik Mantık Galaksisi” yapıp proje mimarini gönder. Model geçerli düğüm/bağlantı verisi döndürürse aşağıda dönen 3B perspektifli bir Canvas haritası gösterilir.</p><canvas id="tkLogicGalaxy" width="900" height="480" style="width:100%;height:auto;display:block;background:#07162b;border-radius:12px" aria-label="Proje bileşenlerinin etkileşimli mantık haritası"></canvas><p id="tkLogicGalaxyStatus" role="status">Henüz harita oluşturulmadı.</p></div>
   </div><div class="tkMindCard" style="margin-top:12px"><strong>Yerel etkileşim uyumu</strong><p>Bu sekme açıkken tuşların basılma zamanlaması ve yazma temposu yalnızca tarayıcı belleğinde özetlenir; tuş içeriği kaydedilmez veya gönderilmez. Fiziksel basma kuvveti standart klavyeden okunamaz.</p><p id="tkTypingCue" role="status">Yazma ritmi henüz ölçülmedi.</p><label><input id="tkAdaptiveUI" type="checkbox" style="width:auto"> Yazma temposu çok düştüğünde arayüzü sadeleştir (yalnızca bu sekmede)</label></div>
@@ -6985,7 +7271,7 @@ MIND_LAB_HTML = r"""
  $('tkMindOpen').addEventListener('click',()=>{$('tkMindShade').style.display='flex';loadProjects().catch(e=>status(e.message))});
  $('tkMindClose').addEventListener('click',()=>{$('tkMindShade').style.display='none';if(cameraStream)setCameraStatus('Kamera açık; sohbet ekranında da yüz ifadesi ipuçlarını izliyor. Görüntü bu cihazda kalır.')});
  $('tkMindShade').addEventListener('click',e=>{if(e.target===$('tkMindShade')){$('tkMindShade').style.display='none';if(cameraStream)setCameraStatus('Kamera açık; sohbet ekranında da yüz ifadesi ipuçlarını izliyor. Görüntü bu cihazda kalır.')}});
- document.querySelectorAll('[data-tk-tab]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-tk-tab]').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('[data-tk-panel]').forEach(x=>x.classList.toggle('active',x.dataset.tkPanel===b.dataset.tkTab));status('')}));
+ document.querySelectorAll('[data-tk-tab]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-tk-tab]').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('[data-tk-panel]').forEach(x=>x.classList.toggle('active',x.dataset.tkPanel===b.dataset.tkTab));if(b.dataset.tkTab==='control')loadControlCenter();status('')}));
  async function loadProjects(){try{const d=await req('/api/mind/projects');const root=$('tkProjectList');root.textContent='';if(!d.items.length){root.textContent='Henüz proje kaydedilmedi.';return}d.items.forEach(item=>{const wrap=document.createElement('div');wrap.className='tkProjectItem';const info=document.createElement('div');const title=document.createElement('strong');title.textContent=item.project_name;const small=document.createElement('small');small.textContent=(item.summary||'').slice(0,180);info.append(title,small);const actions=document.createElement('div');actions.style.display='grid';actions.style.gap='5px';const review=document.createElement('button');review.className='tkSecondary';review.textContent='Gözden geçir';review.addEventListener('click',async()=>{review.disabled=true;status('Proje değerlendirmesi hazırlanıyor…');try{const x=await req('/api/mind/projects/'+item.id+'/review',{method:'POST',body:'{}'});small.textContent=x.suggestion.slice(0,260);status('Sonraki adım önerisi hazır. Proje hafızasına kaydedildi.')}catch(e){status(e.message)}finally{review.disabled=false}});const del=document.createElement('button');del.className='tkSecondary';del.textContent='Sil';del.addEventListener('click',async()=>{if(!confirm('Bu proje hafızası silinsin mi?'))return;try{await req('/api/mind/projects/'+item.id,{method:'DELETE'});loadProjects()}catch(e){status(e.message)}});actions.append(review,del);wrap.append(info,actions);root.append(wrap)})}catch(e){$('tkProjectList').textContent=e.message;throw e}}
  $('tkProjectSave').addEventListener('click',async()=>{const project_name=$('tkProjectName').value.trim(),summary=$('tkProjectSummary').value.trim(),next_actions=$('tkProjectNext').value.trim();if(project_name.length<2||summary.length<5){status('Proje adı ve en az birkaç cümlelik özet gerekli.');return}try{await req('/api/mind/projects',{method:'POST',body:JSON.stringify({project_name,summary,next_actions})});status('Proje hafızası kaydedildi.');await loadProjects()}catch(e){status(e.message)}});
  function refreshSensorFocus(){
@@ -7164,8 +7450,9 @@ MIND_LAB_HTML = r"""
  let typingTimes=[];let typingAdaptive=false;document.addEventListener('keydown',ev=>{if(!document.querySelector('[data-tk-panel=\"synapse\"].active'))return;if(ev.key.length!==1)return;const now=Date.now();typingTimes.push(now);typingTimes=typingTimes.filter(t=>now-t<20000);if(typingTimes.length>=5){const gaps=typingTimes.slice(1).map((t,i)=>t-typingTimes[i]);const avg=gaps.reduce((a,b)=>a+b,0)/gaps.length;$('tkTypingCue').textContent='Son yazma temposu: yaklaşık '+Math.round(60000/Math.max(avg,1))+' tuş/dakika. Bu yalnızca etkileşim ritmidir.';if($('tkAdaptiveUI').checked&&avg>1800){document.documentElement.style.setProperty('--tk-density','1.08');$('tkTypingCue').textContent+=' · Daha geniş arayüz aralığı etkin.';}else{document.documentElement.style.removeProperty('--tk-density');}}});
  $('tkAdaptiveUI').addEventListener('change',()=>{if(!$('tkAdaptiveUI').checked)document.documentElement.style.removeProperty('--tk-density');});
  function renderLogicGalaxy(raw){const canvas=$('tkLogicGalaxy'),ctx=canvas.getContext('2d');let data;try{const a=raw.indexOf('{'),b=raw.lastIndexOf('}');if(a<0||b<=a)throw Error('JSON bulunamadı');data=JSON.parse(raw.slice(a,b+1));}catch(e){$('tkLogicGalaxyStatus').textContent='Harita verisi okunamadı. Model çıktısını metin olarak inceleyebilirsin.';return;}if(!Array.isArray(data.nodes)||!Array.isArray(data.edges)||!data.nodes.length){$('tkLogicGalaxyStatus').textContent='Geçerli düğüm/bağlantı verisi bulunamadı.';return;}const nodes=data.nodes.slice(0,24),edges=data.edges.slice(0,60);const pos={};nodes.forEach((n,i)=>{const phi=Math.acos(1-2*(i+.5)/nodes.length),theta=i*2.3999632297;pos[n.id]={x:Math.cos(theta)*Math.sin(phi),y:Math.sin(theta)*Math.sin(phi),z:Math.cos(phi),label:String(n.label||n.id).slice(0,42)};});let angle=0,dragging=false,lastX=0;canvas.onpointerdown=e=>{dragging=true;lastX=e.clientX;canvas.setPointerCapture(e.pointerId)};canvas.onpointermove=e=>{if(dragging){angle+=(e.clientX-lastX)*.008;lastX=e.clientX;draw()}};canvas.onpointerup=()=>dragging=false;canvas.onpointercancel=()=>dragging=false;function draw(){const w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);ctx.fillStyle='#07162b';ctx.fillRect(0,0,w,h);const projected={};nodes.forEach(n=>{const p=pos[n.id],x=p.x*Math.cos(angle)-p.z*Math.sin(angle),z=p.x*Math.sin(angle)+p.z*Math.cos(angle),scale=260/(3.1+z);projected[n.id]={x:w/2+x*scale,y:h/2+p.y*scale,z,scale};});ctx.lineWidth=1.6;edges.forEach(e=>{const a=projected[e.from],b=projected[e.to];if(!a||!b)return;ctx.strokeStyle='rgba(86,180,255,.38)';ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();});nodes.forEach(n=>{const p=projected[n.id];if(!p)return;const r=Math.max(5,Math.min(13,8+p.z*3));ctx.beginPath();ctx.arc(p.x,p.y,r,0,Math.PI*2);ctx.fillStyle=p.z>.2?'#82e6ff':'#b58cff';ctx.shadowColor=ctx.fillStyle;ctx.shadowBlur=16;ctx.fill();ctx.shadowBlur=0;ctx.font='13px system-ui';ctx.fillStyle='#ecf5ff';ctx.textAlign='center';ctx.fillText(pos[n.id].label,p.x,p.y+r+16);});}draw();$('tkLogicGalaxyStatus').textContent=nodes.length+' bileşen ve '+edges.length+' bağlantı gösteriliyor. Fareyle sürükleyerek görünümü döndürebilirsin.';}
+
  $('tkSynapseRun').addEventListener('click',async()=>{const b=$('tkSynapseRun');b.disabled=true;try{status('Seçilen motor çalışıyor…');const feature=$('tkSynapseMode').value;const d=await req('/api/mind/advanced-synapse',{method:'POST',body:JSON.stringify({feature,material:$('tkSynapseMaterial').value,context:$('tkSynapseContext').value})});show('tkSynapseResult',d.result||JSON.stringify(d,null,2));if(feature==='logic_galaxy')renderLogicGalaxy(d.result||'');status('Motor çıktısı hazır. Önerileri inceleyip onaylayarak kullan.');}catch(e){status(e.message)}finally{b.disabled=false}});
- const tk25Names={thought_physics:'Nöro-Mekanik Fizik Motoru',bio_ui:'Biyo-Ritmik Arayüz Adaptasyonu',multiverse_compile:'Kuantum Çoklu Evren Kod Derleyicisi',chaos:'Otonom Kriz ve Çöküş Simülatörü',collective:'Kolektif Zihin Akordajı',micro_focus:'Mikro-Mimik Odak Analizi',neuro_audio:'Nöro-Akustik Frekans Senkronizasyonu',debug_cue:'Görünür Hata Ayıklama Asistanı',emotional_ui:'Duygu Temelli Arayüz Uyarlaması',circadian_workflow:'Biyo-Ritmik Görev Zamanlayıcı',acoustic_architecture:'Tersine Mühendislik Sesli Çevirmeni',immortal_code:'Ölümsüz Kod Arşivi',chaos_hacker:'Otonom Test ve Kaos Simülatörü',dialectic_council:'Çoklu Persona Fikir Meclisi',predictive_aging:'Akıllı Kod Yaşlandırma Analizi',global_synapse:'Global Anonim Akıl Havuzu',growth_launch:'Otonom Lansman ve Büyüme Ajanı',ip_sentinel:'Telif ve Lisans Kalkanı',logic_galaxy:'Holografik Mantık Galaksisi',synthetic_twin:'Canlı Sentetik Dijital İkiz',retrocausal_rebuild:'Geçmişi Yeniden İnşa Etme',direct_brainware:'Nöral Doğrudan Aktarım',organic_code:'Kendi Kendine Evrimleşen Organik Kod',zero_latency:'Sıfır Gecikmeli Dünya Motoru',emotional_audio:'Duygu-Melodi Eş Zamanlı Stüdyo',ex_nihilo:'Yoktan Vareden Evren Motoru',subjective_reality:'Zihinsel Alternatif Evren',chronos_rewrite:'Chronos Senaryo Motoru',digital_bio_transcoder:'Dijital-Biyolojik Tasarımcı',omniscience_core:'Mutlak Bilgi Araştırma Merkezi'};
+ const tk25Names={omniscient_research:'OMNISCIENT + ZERO · Bilimsel Keşif Masası',genesis_life:'GENESIS + LIFE · Yaşayan Evren Tasarımcısı',eternal_mirror:'ETERNAL + MIRROR · Proje Hafızası',atlas_time:'ATLAS + TIME · Dijital Dünya ve Senaryo',multiverse_lab:'MULTIVERSE · Paralel Alternatif Laboratuvarı',telepath_collab:'TELEPATH · İzinli İş Birliği',molecule_lab:'MOLECULE · Moleküler Bilim Araştırması',polyglot_archive:'POLYGLOT · Çok Dilli Arşiv',architect_product:'ARCHITECT · Fikirden Ürüne',autonomy_council:'AUTONOMY + SINGULARITY · Uzman Konseyi',screen_tutor:'Canlı Ekran Öğretmeni',thought_physics:'Nöro-Mekanik Fizik Motoru',bio_ui:'Biyo-Ritmik Arayüz Adaptasyonu',multiverse_compile:'Kuantum Çoklu Evren Kod Derleyicisi',chaos:'Otonom Kriz ve Çöküş Simülatörü',collective:'Kolektif Zihin Akordajı',micro_focus:'Mikro-Mimik Odak Analizi',neuro_audio:'Nöro-Akustik Frekans Senkronizasyonu',debug_cue:'Görünür Hata Ayıklama Asistanı',emotional_ui:'Duygu Temelli Arayüz Uyarlaması',circadian_workflow:'Biyo-Ritmik Görev Zamanlayıcı',acoustic_architecture:'Tersine Mühendislik Sesli Çevirmeni',immortal_code:'Ölümsüz Kod Arşivi',chaos_hacker:'Otonom Test ve Kaos Simülatörü',dialectic_council:'Çoklu Persona Fikir Meclisi',predictive_aging:'Akıllı Kod Yaşlandırma Analizi',global_synapse:'Global Anonim Akıl Havuzu',growth_launch:'Otonom Lansman ve Büyüme Ajanı',ip_sentinel:'Telif ve Lisans Kalkanı',logic_galaxy:'Holografik Mantık Galaksisi',synthetic_twin:'Canlı Sentetik Dijital İkiz',retrocausal_rebuild:'Geçmişi Yeniden İnşa Etme',direct_brainware:'Nöral Doğrudan Aktarım',organic_code:'Kendi Kendine Evrimleşen Organik Kod',zero_latency:'Sıfır Gecikmeli Dünya Motoru',emotional_audio:'Duygu-Melodi Eş Zamanlı Stüdyo',ex_nihilo:'Yoktan Vareden Evren Motoru',subjective_reality:'Zihinsel Alternatif Evren',chronos_rewrite:'Chronos Senaryo Motoru',digital_bio_transcoder:'Dijital-Biyolojik Tasarımcı',omniscience_core:'Mutlak Bilgi Araştırma Merkezi'};
  let tk25Feature='';
  document.querySelectorAll('.tk25Card').forEach(card=>card.addEventListener('click',()=>{document.querySelectorAll('.tk25Card').forEach(x=>x.classList.remove('selected'));card.classList.add('selected');tk25Feature=card.dataset.feature;$('tk25Selected').textContent='Seçili motor: '+tk25Names[tk25Feature];$('tk25Run').disabled=false;$('tk25Material').focus();}));
  $('tk25Run').addEventListener('click',async()=>{if(!tk25Feature){status('Önce bir motor seç.');return}const material=$('tk25Material').value.trim();if(material.length<5){status('Lütfen en az 5 karakterlik proje, fikir veya içerik gir.');return}const b=$('tk25Run');b.disabled=true;try{status(tk25Names[tk25Feature]+' çalışıyor…');const d=await req('/api/mind/advanced-synapse',{method:'POST',body:JSON.stringify({feature:tk25Feature,material,context:$('tk25Context').value})});show('tk25Result',d.result||JSON.stringify(d,null,2));if(tk25Feature==='logic_galaxy')renderLogicGalaxy(d.result||'');status('Sonuç hazır. Önerileri inceleyip doğrulayarak kullan.');}catch(e){status(e.message)}finally{b.disabled=false}});
@@ -7253,6 +7540,166 @@ def home(request: Request):
     additions = monetization_link + zihin_atolyesi_ui
     page = HTML.replace("</body>", additions + "</body>", 1) if "</body>" in HTML else HTML + additions
     return HTMLResponse(page)
+
+ACCESS_HTML = r"""<!doctype html>
+<html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Tekden AI · Güvenli Giriş</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:22px;background:radial-gradient(circle at 15% 10%,#173a75 0,transparent 38%),radial-gradient(circle at 90% 85%,#0a797e 0,transparent 35%),#07111f;color:#edf6ff;font:16px/1.5 system-ui,Segoe UI,sans-serif}
+.card{width:min(100%,440px);padding:32px;border:1px solid #ffffff26;border-radius:26px;background:#0d1b30eF;box-shadow:0 26px 90px #0008;backdrop-filter:blur(18px)}.logo{font-size:13px;letter-spacing:.18em;text-transform:uppercase;color:#8fdcff;font-weight:800}.mark{width:56px;height:56px;display:grid;place-items:center;margin-bottom:22px;border-radius:17px;background:linear-gradient(135deg,#0757e8,#22d3ee);font-weight:900;font-size:30px;box-shadow:0 10px 30px #087cfb55}h1{margin:12px 0 8px;font-size:30px;letter-spacing:-.04em}p{color:#a9bfd8;margin:0 0 24px}.field{display:flex;gap:8px}.field input{min-width:0;flex:1;padding:15px 16px;border-radius:13px;border:1px solid #34516f;background:#071426;color:white;font-size:22px;letter-spacing:.28em;outline:none}.field input:focus{border-color:#36c9f5;box-shadow:0 0 0 3px #36c9f522}button{border:0;border-radius:13px;padding:0 20px;background:linear-gradient(110deg,#1264f3,#19bfe7);color:white;font-weight:800;cursor:pointer}button:disabled{opacity:.55;cursor:wait}#status{min-height:24px;margin-top:15px;color:#ffb7b7;font-size:14px}.foot{margin-top:20px;color:#718ba8;font-size:12px}
+@media(max-width:480px){.card{padding:24px}.field{flex-direction:column}.field button{min-height:50px}.field input{width:100%}}
+</style></head><body><main class="card"><div class="mark">T</div><div class="logo">Tekden AI · Secure Access</div><h1>Site erişim kodu</h1><p>Tekden AI'ye devam etmek için sana verilen erişim kodunu gir.</p><form id="gateForm"><div class="field"><input id="pin" inputmode="numeric" autocomplete="one-time-code" maxlength="32" placeholder="••••" aria-label="Site erişim kodu" required><button id="submit" type="submit">Giriş yap</button></div></form><div id="status" role="status"></div><div class="foot">Bu ekran site erişimini korur. Yönetim alanı ayrıca sahip hesabı doğrulaması ister.</div></main>
+<script>
+(async()=>{const status=document.getElementById('status'),form=document.getElementById('gateForm'),input=document.getElementById('pin'),button=document.getElementById('submit');try{const s=await fetch('/api/access/status',{credentials:'same-origin'}).then(r=>r.json());if(s.unlocked)location.replace('/')}catch{}form.addEventListener('submit',async e=>{e.preventDefault();button.disabled=true;button.textContent='Kontrol ediliyor…';status.textContent='';try{const r=await fetch('/api/access/login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({pin:input.value})});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||'Kod doğrulanamadı.');status.style.color='#9af0c0';status.textContent='Kod doğrulandı. Tekden AI açılıyor…';location.replace('/')}catch(err){status.style.color='#ffb7b7';status.textContent=err.message;input.select()}finally{button.disabled=false;button.textContent='Giriş yap'}});input.focus()})();
+</script></body></html>"""
+
+ADMIN_HTML = r"""<!doctype html>
+<html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Tekden AI · Yönetim</title>
+<style>
+:root{color-scheme:dark;--bg:#07111f;--panel:#101f34;--line:#243c59;--text:#eaf3ff;--muted:#9bb1ca;--blue:#2785ff;--cyan:#19c7e8}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 10% 0,#12366a 0,transparent 34%),var(--bg);color:var(--text);font:15px/1.55 system-ui,Segoe UI,sans-serif}.wrap{max-width:1180px;margin:auto;padding:24px 18px 60px}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.brand{font-size:13px;letter-spacing:.15em;color:#7cdcff;font-weight:900}.top a{color:#bfdfff;text-decoration:none}.top button,.tabs button,.table button{border:1px solid var(--line);background:#12243a;color:var(--text);border-radius:11px;padding:10px 14px;cursor:pointer}.hero{margin:30px 0 22px}.hero h1{font-size:clamp(29px,5vw,42px);letter-spacing:-.04em;margin:0 0 5px}.hero p{margin:0;color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{background:linear-gradient(145deg,#142941,#0d1a2b);border:1px solid var(--line);border-radius:17px;padding:18px;min-width:0}.card small{color:var(--muted)}.value{font-size:30px;font-weight:850;margin-top:8px}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:24px 0 14px}.tabs button.active{background:linear-gradient(110deg,#155fe8,#0e8da9);border-color:#36bdf2}.view{display:none}.view.active{display:block}.table{width:100%;border-collapse:collapse;min-width:650px}.table th,.table td{text-align:left;padding:12px 10px;border-bottom:1px solid var(--line);vertical-align:top}.table th{color:#9fc7e8;font-size:12px;text-transform:uppercase;letter-spacing:.06em}.scroll{overflow:auto}.pill{display:inline-block;border:1px solid #35516f;border-radius:999px;padding:3px 9px;font-size:12px;color:#b6d6f3}.ok{color:#82edbd}.warn{color:#ffd18a}.muted{color:var(--muted)}.empty{padding:18px;color:var(--muted)}.error{color:#ffaaa7}.servicegrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}.service{border:1px solid var(--line);border-radius:13px;padding:14px;background:#0c1a2b}.service b{display:block;margin-bottom:4px}.actions{display:flex;gap:8px;align-items:center}.table button{padding:6px 9px;font-size:12px}.notice{padding:12px 14px;background:#102945;border:1px solid #28527a;border-radius:12px;color:#bddcff;margin-bottom:14px}
+@media(max-width:760px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.servicegrid{grid-template-columns:repeat(2,minmax(0,1fr))}.wrap{padding:16px 12px 38px}.card{padding:14px}.value{font-size:25px}.table{font-size:13px}}
+@media(max-width:420px){.grid,.servicegrid{grid-template-columns:1fr 1fr}.top{align-items:flex-start}}
+</style></head><body><main class="wrap"><div class="top"><div><div class="brand">TEKDEN AI / OWNER CONSOLE</div><small class="muted">Yalnızca site sahibine açık yönetim alanı</small></div><div class="actions"><a href="/">← Siteye dön</a><button id="refresh">↻ Yenile</button></div></div>
+<section class="hero"><h1>Yönetim Paneli</h1><p>Üyelik, kullanım, moderasyon ve servis yapılandırmasının genel görünümü.</p></section>
+<div id="notice" class="notice">Yönetim verileri yükleniyor…</div>
+<section class="grid" id="stats"><div class="card"><small>Üye sayısı</small><div class="value">—</div></div><div class="card"><small>Sohbet sayısı</small><div class="value">—</div></div><div class="card"><small>Mesaj sayısı</small><div class="value">—</div></div><div class="card"><small>Aktif erişim engeli</small><div class="value">—</div></div></section>
+<nav class="tabs"><button class="active" data-view="overview">Genel bakış</button><button data-view="users">Üyeler</button><button data-view="bans">Erişim engelleri</button><button data-view="services">Servisler</button></nav>
+<section class="view active" id="view-overview"><div class="grid" id="plans"></div><div class="card" style="margin-top:12px"><b>Son 7 gündeki yeni üyeler</b><div class="value" id="newUsers">—</div><small class="muted">Veritabanındaki kayıt tarihine göre</small></div></section>
+<section class="view" id="view-users"><div class="card"><b>Son üyeler</b><div class="scroll" id="usersTable"><div class="empty">Yükleniyor…</div></div></div></section>
+<section class="view" id="view-bans"><div class="card"><b>Aktif moderasyon engelleri</b><div class="scroll" id="bansTable"><div class="empty">Yükleniyor…</div></div></div></section>
+<section class="view" id="view-services"><div class="card"><b>Yapılandırma durumu</b><p class="muted">Buradaki göstergeler gizli anahtarların değerini göstermez. Çoğu yalnızca ortam değişkeninin tanımlı olup olmadığını belirtir; sağlayıcının canlı çalıştığını garanti etmez.</p><div class="servicegrid" id="servicesGrid"></div></div></section>
+</main><script>
+const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(url,opts={}){const r=await fetch(url,{credentials:'same-origin',...opts,headers:{'Content-Type':'application/json',...(opts.headers||{})}});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||'İstek başarısız');return d}
+function table(headers,rows){return '<table class="table"><thead><tr>'+headers.map(x=>'<th>'+x+'</th>').join('')+'</tr></thead><tbody>'+rows+'</tbody></table>'}
+async function load(){ $('notice').textContent='Yönetim verileri güncelleniyor…';try{const [o,u,b]=await Promise.all([api('/api/admin/overview'),api('/api/admin/users'),api('/api/admin/bans')]);const c=o.counts;$('stats').innerHTML=[['Üye sayısı',c.users],['Sohbet sayısı',c.chats],['Mesaj sayısı',c.messages],['Aktif erişim engeli',c.active_bans]].map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');$('plans').innerHTML=Object.entries(o.plans).map(([k,v])=>'<div class="card"><small>'+esc(k.toUpperCase())+' üyeleri</small><div class="value">'+v+'</div></div>').join('');$('newUsers').textContent=c.new_users_7d;$('usersTable').innerHTML=table(['Kullanıcı','Plan','Kayıt tarihi'],u.users.map(x=>'<tr><td>'+esc(x.username)+'</td><td><span class="pill">'+esc(x.plan)+'</span></td><td>'+esc(x.created_at||'')+'</td></tr>').join('')||'<tr><td colspan="3">Henüz üye yok.</td></tr>');$('bansTable').innerHTML=table(['IP / Hesap','Neden','Bitiş','İşlem'],b.bans.map(x=>'<tr><td>'+esc(x.ip_address)+(x.user_id?' · kullanıcı #'+esc(x.user_id):'')+'</td><td>'+esc(x.reason)+'</td><td>'+esc(x.expires_at||'')+'</td><td><button data-revoke="'+x.id+'">Engeli kaldır</button></td></tr>').join('')||'<tr><td colspan="4">Aktif engel yok.</td></tr>');$('servicesGrid').innerHTML=o.services.map(x=>'<div class="service"><b class="'+(x.configured?'ok':'warn')+'">'+(x.configured?'● ':'○ ')+esc(x.name)+'</b><small class="muted">'+esc(x.detail)+'</small></div>').join('');$('notice').textContent='Son güncelleme: '+new Date().toLocaleString('tr-TR')+'. Bu panel yalnızca yönetim özetlerini gösterir.';}catch(e){$('notice').className='notice error';$('notice').textContent=e.message}}
+document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-view]').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('.view').forEach(x=>x.classList.toggle('active',x.id==='view-'+b.dataset.view))}));$('refresh').addEventListener('click',load);$('bansTable').addEventListener('click',async e=>{const b=e.target.closest('[data-revoke]');if(!b)return;if(!confirm('Bu erişim engelini kaldırmak istiyor musun?'))return;try{await api('/api/admin/bans/'+b.dataset.revoke,{method:'DELETE'});await load()}catch(err){alert(err.message)}});load();
+</script></body></html>"""
+
+@app.get("/access", response_class=HTMLResponse)
+def site_access_page(request: Request):
+    if has_site_access(request):
+        return RedirectResponse("/", status_code=303)
+    return HTMLResponse(ACCESS_HTML, headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"})
+
+
+@app.get("/api/access/status")
+def site_access_status(request: Request):
+    return {"configured": bool(SITE_ACCESS_PIN and SESSION_SECRET and len(SESSION_SECRET) >= 32), "unlocked": has_site_access(request)}
+
+
+@app.post("/api/access/login")
+async def site_access_login(request: Request):
+    if not SITE_ACCESS_PIN:
+        raise HTTPException(503, "Site erişim kodu tanımlı değil. Render Environment bölümüne SITE_ACCESS_PIN eklenmeli.")
+    if not SESSION_SECRET or len(SESSION_SECRET) < 32:
+        raise HTTPException(503, "SESSION_SECRET en az 32 karakter olmalı.")
+    key = site_pin_throttle_key(request)
+    now = time.monotonic()
+    attempt = _SITE_PIN_ATTEMPTS.get(key, {"count": 0, "window": now + 900, "locked": 0})
+    if attempt["locked"] > now:
+        retry = max(1, int(attempt["locked"] - now))
+        raise HTTPException(429, f"Çok fazla hatalı deneme. {retry} saniye sonra tekrar dene.", headers={"Retry-After": str(retry)})
+    if attempt["window"] <= now:
+        attempt = {"count": 0, "window": now + 900, "locked": 0}
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    supplied = str(data.get("pin", ""))[:32] if isinstance(data, dict) else ""
+    if not hmac.compare_digest(supplied, SITE_ACCESS_PIN):
+        attempt["count"] += 1
+        if attempt["count"] >= 5:
+            attempt["locked"] = now + 900
+        _SITE_PIN_ATTEMPTS[key] = attempt
+        raise HTTPException(401, "Site erişim kodu hatalı.")
+    _SITE_PIN_ATTEMPTS.pop(key, None)
+    out = JSONResponse({"ok": True})
+    out.set_cookie(
+        SITE_ACCESS_COOKIE,
+        make_site_access_token(),
+        httponly=True,
+        secure=(request.url.scheme == "https"),
+        samesite="strict",
+        max_age=SITE_ACCESS_SECONDS,
+        path="/",
+    )
+    return out
+
+
+@app.post("/api/access/logout")
+def site_access_logout():
+    out = JSONResponse({"ok": True})
+    out.delete_cookie(SITE_ACCESS_COOKIE, httponly=True, secure=True, samesite="strict", path="/")
+    return out
+
+
+@app.get("/yonetim", response_class=HTMLResponse)
+def owner_management_page(request: Request):
+    try:
+        user = current_user(request)
+    except Exception:
+        user = None
+    if not is_owner_account(user):
+        return HTMLResponse(
+            "<!doctype html><html lang='tr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Yetkisiz erişim</title><body style='font:16px system-ui;background:#081426;color:#eef;padding:40px'><h1>Yönetim alanı korumalı</h1><p>Bu alan yalnızca site sahibinin hesabına açıktır.</p><a style='color:#8bdcff' href='/'>Tekden AI ana sayfasına dön</a></body></html>",
+            status_code=403,
+            headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"},
+        )
+    return HTMLResponse(ADMIN_HTML, headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"})
+
+
+@app.get("/api/admin/overview")
+def owner_admin_overview(request: Request):
+    require_owner(request)
+    if not DATABASE_URL:
+        raise HTTPException(503, "Veritabanı yapılandırılmamış.")
+    with db() as conn:
+        counts = conn.execute("""SELECT
+            (SELECT COUNT(*) FROM users) AS users,
+            (SELECT COUNT(*) FROM chats) AS chats,
+            (SELECT COUNT(*) FROM messages) AS messages,
+            (SELECT COUNT(*) FROM moderation_bans WHERE expires_at > NOW()) AS active_bans,
+            (SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '7 days') AS new_users_7d
+        """).fetchone()
+        plan_rows = conn.execute("SELECT plan, COUNT(*) AS n FROM users GROUP BY plan").fetchall()
+    services = [
+        {"name": "PostgreSQL / Supabase", "configured": bool(DATABASE_URL), "detail": "Veritabanı adresi tanımlı; gerçek bağlantı yönetim isteğinde test edildi."},
+        {"name": "Ollama sohbet modeli", "configured": bool(OLLAMA_API_KEY and OLLAMA_MODEL), "detail": "Model adı ve API anahtarı tanımlı mı? Canlı model isteği gönderilmedi."},
+        {"name": "Pro model", "configured": bool(OLLAMA_API_KEY and OLLAMA_PRO_MODEL), "detail": "Pro model yapılandırma kontrolü."},
+        {"name": "Web arama", "configured": True, "detail": "Tavily yapılandırılmışsa kullanılır; DDG yedek araması da kodda bulunur."},
+        {"name": "Görsel üretimi", "configured": bool(HF_TOKEN or POLLINATIONS_API_KEY), "detail": "En az bir görsel sağlayıcı anahtarı tanımlı mı?"},
+        {"name": "Müzik üretimi", "configured": bool(EROQ_API_KEY), "detail": "Müzik sağlayıcısı anahtarı tanımlı mı?"},
+        {"name": "Pro ödeme", "configured": bool(STRIPE_SECRET_KEY and STRIPE_PRICE_ID_PRO and STRIPE_WEBHOOK_SECRET), "detail": "Stripe Pro ödeme yapılandırması."},
+        {"name": "Plus ödeme", "configured": bool(STRIPE_SECRET_KEY and STRIPE_PRICE_ID_PLUS and STRIPE_WEBHOOK_SECRET), "detail": "Stripe Plus ödeme yapılandırması."},
+    ]
+    return {"counts": dict(counts), "plans": {str(x["plan"]): x["n"] for x in plan_rows}, "services": services}
+
+
+@app.get("/api/admin/users")
+def owner_admin_users(request: Request):
+    require_owner(request)
+    with db() as conn:
+        users = conn.execute("SELECT id, username, plan, created_at FROM users ORDER BY created_at DESC LIMIT 100").fetchall()
+    return {"users": [{**dict(x), "created_at": x["created_at"].isoformat() if x.get("created_at") else ""} for x in users]}
+
+
+@app.get("/api/admin/bans")
+def owner_admin_bans(request: Request):
+    require_owner(request)
+    with db() as conn:
+        bans = conn.execute("SELECT id, ip_address, user_id, reason, banned_at, expires_at FROM moderation_bans WHERE expires_at > NOW() ORDER BY expires_at DESC LIMIT 200").fetchall()
+    return {"bans": [{**dict(x), "banned_at": x["banned_at"].isoformat() if x.get("banned_at") else "", "expires_at": x["expires_at"].isoformat() if x.get("expires_at") else ""} for x in bans]}
+
+
+@app.delete("/api/admin/bans/{ban_id}")
+def owner_admin_revoke_ban(ban_id: int, request: Request):
+    require_owner(request)
+    with db() as conn:
+        row = conn.execute("DELETE FROM moderation_bans WHERE id=%s RETURNING id", (ban_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Erişim engeli bulunamadı.")
+    return {"ok": True, "revoked_id": row["id"]}
+
 
 @app.get("/hakkimizda", response_class=HTMLResponse)
 def about_page():
