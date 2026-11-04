@@ -20,6 +20,7 @@ OWNER_USERNAME = os.getenv("OWNER_USERNAME", "AhmetKerim.").strip()
 OWNER_PASSWORD = os.getenv("OWNER_PASSWORD", "").strip()
 # Owner-only admin PIN. The public website does not require this code.
 ADMIN_ACCESS_PIN = os.getenv("ADMIN_ACCESS_PIN", os.getenv("SITE_ACCESS_PIN", "")).strip()
+ADMIN_UI_BUILD_ID = "2026-11-04-admin-mobile-v2"
 SITE_ACCESS_PIN = ADMIN_ACCESS_PIN  # compatibility with signed-token helpers below
 SITE_ACCESS_COOKIE = "tekden_admin_gate"
 SITE_ACCESS_SECONDS = 12 * 60 * 60
@@ -7550,7 +7551,46 @@ def home(request: Request):
     zihin_atolyesi_ui = MIND_LAB_HTML if user_has_plus_access(visitor) else MIND_LAB_LOCKED_HTML
     additions = monetization_link + zihin_atolyesi_ui
     page = HTML.replace("</body>", additions + "</body>", 1) if "</body>" in HTML else HTML + additions
-    return HTMLResponse(page)
+    # A visibly distinct mobile refresh. This is injected into the final served HTML,
+    # not just into an unused stylesheet or a separate page.
+    mobile_refresh_css = r"""
+<style id="tekden-mobile-refresh-v2">
+@media (max-width: 720px) {
+  html, body { height:100%; min-height:100%; overflow:hidden !important; }
+  body { overscroll-behavior:none; }
+  .layout { display:block !important; width:100% !important; height:100dvh !important; min-height:100dvh !important; overflow:hidden !important; }
+  .main { display:flex !important; flex-direction:column !important; width:100% !important; height:100dvh !important; min-height:0 !important; overflow:hidden !important; }
+  .top { display:flex !important; flex:0 0 auto !important; position:sticky !important; top:0 !important; z-index:200 !important; min-height:62px !important; padding:8px 10px !important; gap:8px !important; background:rgba(255,255,255,.97) !important; border-bottom:1px solid #dce8f6 !important; backdrop-filter:blur(14px); }
+  .topnav { display:none !important; }
+  .top > div:first-of-type { min-width:0 !important; flex:1 1 auto !important; }
+  .top strong { font-size:15px !important; }
+  .messages { display:block !important; flex:1 1 auto !important; min-height:0 !important; width:100% !important; overflow-y:auto !important; overscroll-behavior:contain; padding:15px 12px 24px !important; }
+  .welcome { width:100% !important; max-width:none !important; margin:0 auto !important; }
+  .welcome h1 { font-size:clamp(23px,6vw,30px) !important; line-height:1.18 !important; }
+  .welcomegrid { display:grid !important; grid-template-columns:repeat(2,minmax(0,1fr)) !important; gap:9px !important; width:100% !important; margin:17px 0 !important; }
+  .feature { min-width:0 !important; min-height:88px !important; padding:11px !important; border-radius:14px !important; text-align:left !important; }
+  .feature b { font-size:13px !important; }
+  .feature small { display:block !important; font-size:10.5px !important; line-height:1.35 !important; }
+  .composerwrap { display:block !important; flex:0 0 auto !important; position:sticky !important; bottom:0 !important; z-index:190 !important; width:100% !important; padding:8px 10px calc(10px + env(safe-area-inset-bottom)) !important; background:rgba(255,255,255,.98) !important; border-top:1px solid #dce8f6 !important; backdrop-filter:blur(14px); }
+  .composer { width:100% !important; max-width:none !important; border-radius:16px !important; padding:9px !important; box-shadow:0 5px 24px rgba(26,77,130,.10) !important; }
+  .composer textarea { width:100% !important; min-height:54px !important; max-height:24dvh !important; font-size:16px !important; line-height:1.4 !important; }
+  .tools { flex-wrap:wrap !important; gap:6px !important; }
+  .toolleft { display:flex !important; flex-wrap:wrap !important; gap:6px !important; min-width:0 !important; }
+  .toolleft button, .tools button { min-height:40px !important; }
+  #mobileToolsBtn { display:inline-flex !important; flex:0 0 44px !important; width:44px !important; height:44px !important; min-height:44px !important; align-items:center !important; justify-content:center !important; border-radius:13px !important; font-size:25px !important; background:#eaf4ff !important; color:#075db8 !important; border:1px solid #cfe3fb !important; }
+  #mobileToolsMenu { display:none; position:fixed !important; top:68px !important; right:10px !important; z-index:260 !important; width:min(350px,calc(100vw - 20px)) !important; max-height:calc(100dvh - 82px) !important; overflow:auto !important; grid-template-columns:repeat(2,minmax(0,1fr)) !important; gap:8px !important; padding:12px !important; border:1px solid #dce8f6 !important; border-radius:17px !important; background:#fff !important; box-shadow:0 18px 50px rgba(12,38,72,.22) !important; }
+  #mobileToolsMenu.open { display:grid !important; }
+  #mobileToolsMenu button { display:flex !important; align-items:center !important; justify-content:flex-start !important; min-width:0 !important; min-height:48px !important; padding:9px !important; border-radius:12px !important; font-size:12px !important; white-space:normal !important; }
+  #mobileToolsMenu button .menuIcon { flex:0 0 21px !important; width:21px !important; text-align:center !important; }
+  .sidebar.mobile-open { display:flex !important; position:fixed !important; inset:0 auto 0 0 !important; z-index:280 !important; width:min(320px,88vw) !important; height:100dvh !important; max-height:100dvh !important; overflow:auto !important; }
+  #tkFloatingLinks { display:none !important; }
+  .bubble, .bubble.assistant { max-width:100% !important; width:auto; overflow-wrap:anywhere; }
+}
+</style>
+"""
+    if "</head>" in page:
+        page = page.replace("</head>", mobile_refresh_css + f'<meta name="tekden-ui-build" content="{ADMIN_UI_BUILD_ID}"></head>', 1)
+    return HTMLResponse(page, headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache", "X-Tekden-UI-Build": ADMIN_UI_BUILD_ID})
 
 ACCESS_HTML = r"""<!doctype html>
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Tekden AI · Güvenli Giriş</title>
@@ -7650,21 +7690,57 @@ async def owner_admin_pin_login(request: Request):
     return out
 
 
+def _admin_info_page(title: str, message: str, status_code: int = 200):
+    body = """<!doctype html><html lang='tr'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='robots' content='noindex,nofollow'><title>Tekden AI · Yönetim</title><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:20px;background:radial-gradient(circle at 15% 10%,#173d68,#071426 60%);font:16px/1.55 system-ui;color:#eef}.card{width:min(500px,100%);padding:26px;border:1px solid #29496c;border-radius:20px;background:#0d2037;box-shadow:0 24px 80px #0006}.card h1{font-size:23px;margin:0 0 10px}.card p{color:#b8cbe0}.card a{display:inline-block;margin-top:10px;color:#8bdcff;text-decoration:none}.tag{display:inline-block;color:#9af0c0;font-size:12px;font-weight:800;letter-spacing:.08em;margin-bottom:12px}</style></head><body><main class='card'><div class='tag'>TEKDEN AI · OWNER CONSOLE</div><h1>__TITLE__</h1><p>__MESSAGE__</p><a href='/'>← Ana sayfaya dön</a></main></body></html>"""
+    body = body.replace("__TITLE__", html_escape(title)).replace("__MESSAGE__", html_escape(message))
+    return HTMLResponse(body, status_code=status_code, headers={"Cache-Control": "no-store, max-age=0", "X-Robots-Tag": "noindex, nofollow", "X-Tekden-UI-Build": ADMIN_UI_BUILD_ID})
+
+
+@app.get("/api/admin/status")
+def owner_admin_deployment_status(request: Request):
+    """Non-secret deployment diagnostics. Never returns the PIN, password, or secret values."""
+    try:
+        user = current_user(request)
+    except Exception:
+        user = None
+    return {
+        "build": ADMIN_UI_BUILD_ID,
+        "admin_route_installed": True,
+        "owner_account_signed_in": bool(is_owner_account(user)),
+        "owner_environment_ready": bool(OWNER_USERNAME and OWNER_PASSWORD and len(OWNER_PASSWORD) >= 8),
+        "admin_pin_configured": bool(ADMIN_ACCESS_PIN),
+        "session_secret_ready": bool(SESSION_SECRET and len(SESSION_SECRET) >= 32),
+        "database_url_configured": bool(DATABASE_URL),
+        "public_site_pin_required": False,
+    }
+
+
 @app.get("/yonetim", response_class=HTMLResponse)
+@app.get("/yonetim/", response_class=HTMLResponse)
 def owner_management_page(request: Request):
     try:
         user = current_user(request)
     except Exception:
         user = None
+    if not user:
+        return _admin_info_page("Önce yönetici hesabıyla giriş yap", "Ana sayfaya dönüp Tekden AI sahibi hesabınla giriş yap. Ardından bu sayfayı yeniden aç.")
     if not is_owner_account(user):
-        return HTMLResponse(
-            "<!doctype html><html lang='tr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Yetkisiz erişim</title><body style='font:16px system-ui;background:#081426;color:#eef;padding:40px'><h1>Yönetim alanı korumalı</h1><p>Önce site sahibi hesabınla giriş yapmalısın.</p><a style='color:#8bdcff' href='/'>Tekden AI ana sayfasına dön</a></body></html>",
-            status_code=403,
-            headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"},
-        )
+        return _admin_info_page("Bu hesap yönetici hesabı değil", "Giriş yaptığın kullanıcı adı Render ortamındaki OWNER_USERNAME ile eşleşmiyor. Site sahibi hesabınla giriş yap.", 403)
+    if not SESSION_SECRET or len(SESSION_SECRET) < 32:
+        return _admin_info_page("Oturum yapılandırması eksik", "Render Environment bölümündeki SESSION_SECRET en az 32 karakter olmalı. Gizli değerini bu sayfada paylaşma.", 503)
+    if not ADMIN_ACCESS_PIN:
+        return _admin_info_page("Yönetici kodu yapılandırılmamış", "Render Environment bölümünde ADMIN_ACCESS_PIN değişkenine 1932 değerini ekle ve servisi yeniden dağıt.", 503)
     if not has_site_access(request):
-        return HTMLResponse(ADMIN_PIN_HTML, headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"})
-    return HTMLResponse(ADMIN_HTML, headers={"Cache-Control": "no-store", "X-Robots-Tag": "noindex, nofollow"})
+        return HTMLResponse(ADMIN_PIN_HTML, headers={"Cache-Control": "no-store, max-age=0", "X-Robots-Tag": "noindex, nofollow", "X-Tekden-UI-Build": ADMIN_UI_BUILD_ID})
+    return HTMLResponse(ADMIN_HTML, headers={"Cache-Control": "no-store, max-age=0", "X-Robots-Tag": "noindex, nofollow", "X-Tekden-UI-Build": ADMIN_UI_BUILD_ID})
+
+
+@app.get("/admin", include_in_schema=False)
+@app.get("/admin/", include_in_schema=False)
+@app.get("/yonetici", include_in_schema=False)
+@app.get("/yonetim-paneli", include_in_schema=False)
+def owner_management_alias():
+    return RedirectResponse(url="/yonetim", status_code=307)
 
 
 @app.get("/api/admin/overview")
