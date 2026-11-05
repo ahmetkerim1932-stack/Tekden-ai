@@ -6446,23 +6446,47 @@ HTML = r"""<!doctype html>
 <div><small style="color:var(--muted)">SOHBETLER</small></div><div class="sideutility"><button class="secondary" id="activeChatsBtn">Son sohbetler</button><button class="secondary" id="archivedChatsBtn">Arşiv</button></div><div class="history" id="history"><div class="notice">Geçmişi görmek için giriş yap.</div></div>
 <div class="userbar" id="userbar"><div class="notice">Misafir modu · Sohbetler kaydedilmez.</div></div></aside>
 <main class="main"><header class="top"><button class="secondary mobile" id="mobileNew">＋</button><div><strong>Tekden AI</strong><br><small>Yardımcı yapay zekân</small></div><nav class="topnav"><button class="active" onclick="newChat()">◉ Sohbet</button><button onclick="$('prompt').value='Görsel oluştur: ';$('prompt').focus()">▧ Görsel</button><button onclick="$('fileInput').click()">▤ Dosya Analizi</button><button onclick="forceSearch=true;$('searchBtn').style.borderColor='var(--accent)';$('prompt').focus()">⌕ Web Arama</button><button onclick="$('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';$('prompt').focus()">▣ Uygulama</button><button onclick="$('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: '; $('prompt').focus()">🎮 Oyun</button><button onclick="openSongStudio()">🎤 Şarkı</button><button onclick="location.href='/kesfet'">✦ Keşfet</button><button id="adminNavBtn" style="display:none" onclick="location.href='/yonetim'">⚙ Yönetim</button></nav><div style="display:flex;gap:8px;align-items:center"><button class="secondary" id="mobileToolsBtn" type="button" aria-label="Diğer araçlar" aria-expanded="false">⋮</button><button class="secondary profilebtn" id="profileBtn" aria-label="Profil"><span class="avatar" id="topAvatar">?</span><span id="profileButtonText">Profil</span></button></div></header>
-<div id="mobileToolsMenu" aria-label="Diğer araçlar">
-<button class="secondary" type="button" data-mobile-action="history"><span class="menuIcon">☰</span>Sohbet geçmişi</button>
-<button class="secondary" type="button" data-mobile-action="mind"><span class="menuIcon">✦</span>Zihin Atölyesi</button>
-<button class="secondary" type="button" data-mobile-action="studio"><span class="menuIcon">▣</span>Pro Stüdyo</button>
-<button class="secondary" type="button" data-mobile-action="discover"><span class="menuIcon">✧</span>Keşfet</button>
-<button class="secondary" type="button" data-mobile-action="plans"><span class="menuIcon">✦</span>Planlar</button>
-<button class="secondary" type="button" data-mobile-action="docx"><span class="menuIcon">📝</span>Son yanıtı Word indir</button>
-<button class="secondary" type="button" data-mobile-action="pdf"><span class="menuIcon">📄</span>Son yanıtı PDF kaydet</button>
-<button class="secondary" type="button" data-mobile-action="image"><span class="menuIcon">▧</span>Görsel oluştur</button>
-<button class="secondary" type="button" data-mobile-action="file"><span class="menuIcon">▤</span>Dosya analizi</button>
-<button class="secondary" type="button" data-mobile-action="web"><span class="menuIcon">⌕</span>Web arama</button>
-<button class="secondary" type="button" data-mobile-action="app"><span class="menuIcon">⌘</span>Uygulama</button>
-<button class="secondary" type="button" data-mobile-action="game"><span class="menuIcon">🎮</span>Oyun tasarla</button>
-<button class="secondary" type="button" data-mobile-action="song"><span class="menuIcon">🎵</span>Şarkı</button>
-<button class="secondary" type="button" data-mobile-action="dictation" aria-label="Dikte"><span class="menuIcon">🎙</span>Dikte</button>
-<button class="secondary" type="button" data-mobile-action="voice" aria-label="Sesli sohbet"><span class="menuIcon">🔊</span>Sesli sohbet</button>
-<button class="secondary" id="mobileAdminBtn" type="button" data-mobile-action="admin" style="display:none"><span class="menuIcon">⚙</span>Yönetim</button>
+<div id="mobileToolsMenu" aria-label="Tekden AI araçları">
+  <div class="mobile-menu-label">HIZLI ERİŞİM</div>
+  <div class="mobile-menu-shortcuts">
+    <button class="secondary" type="button" data-mobile-action="studio"><span class="menuIcon">▣</span><span>Pro Stüdyo</span></button>
+    <button class="secondary" type="button" data-mobile-action="song"><span class="menuIcon">🎤</span><span>Şarkı Stüdyosu</span></button>
+    <button class="secondary" type="button" data-mobile-action="image"><span class="menuIcon">▧</span><span>Görsel</span></button>
+  </div>
+  <details class="mobile-menu-group">
+    <summary>Üretim ve araştırma</summary>
+    <div class="mobile-menu-items">
+      <button class="secondary" type="button" data-mobile-action="app"><span class="menuIcon">⌘</span>Uygulama geliştir</button>
+      <button class="secondary" type="button" data-mobile-action="game"><span class="menuIcon">🎮</span>Oyun tasarla</button>
+      <button class="secondary" type="button" data-mobile-action="file"><span class="menuIcon">▤</span>Dosya analizi</button>
+      <button class="secondary" type="button" data-mobile-action="web"><span class="menuIcon">⌕</span>Web arama</button>
+    </div>
+  </details>
+  <details class="mobile-menu-group">
+    <summary>Zihin ve keşfet</summary>
+    <div class="mobile-menu-items">
+      <button class="secondary" type="button" data-mobile-action="toolbox"><span class="menuIcon">🧰</span>175 araç kutusu</button>
+      <button class="secondary" type="button" data-mobile-action="mind"><span class="menuIcon">✦</span>Zihin Atölyesi</button>
+      <button class="secondary" type="button" data-mobile-action="discover"><span class="menuIcon">✧</span>Keşfet</button>
+      <button class="secondary" type="button" data-mobile-action="plans"><span class="menuIcon">♢</span>Planlar</button>
+    </div>
+  </details>
+  <details class="mobile-menu-group">
+    <summary>Sohbet ve belgeler</summary>
+    <div class="mobile-menu-items">
+      <button class="secondary" type="button" data-mobile-action="history"><span class="menuIcon">☰</span>Sohbet geçmişi</button>
+      <button class="secondary" type="button" data-mobile-action="docx"><span class="menuIcon">📝</span>Word indir</button>
+      <button class="secondary" type="button" data-mobile-action="pdf"><span class="menuIcon">📄</span>PDF kaydet</button>
+    </div>
+  </details>
+  <details class="mobile-menu-group">
+    <summary>Sesli araçlar</summary>
+    <div class="mobile-menu-items">
+      <button class="secondary" type="button" data-mobile-action="dictation"><span class="menuIcon">🎙</span>Dikte et</button>
+      <button class="secondary" type="button" data-mobile-action="voice"><span class="menuIcon">🔊</span>Sesli sohbet</button>
+    </div>
+  </details>
+  <button class="secondary" id="mobileAdminBtn" type="button" data-mobile-action="admin" style="display:none"><span class="menuIcon">⚙</span>Yönetim</button>
 </div>
 <section class="messages" id="messages"><div class="welcome" id="welcome"><div class="welcome-logo">Tekden <span>AI</span><span class="spark">✦</span></div><h1>Tekden AI'ye Hoş Geldin <span class="blue">✦</span></h1><p>Sana nasıl yardımcı olabilirim? Bir mesaj yazman yeterli; diğer araçlar gerektiğinde hazır.</p><div class="welcomegrid"><button class="feature suggestion" data-kind="chat"><span class="ico">◉</span><span><b>Sohbet</b><small>Konuları açıkla, sorularını yanıtla ve adım adım ilerle.</small></span></button><button class="feature suggestion" data-kind="image"><span class="ico">▧</span><span><b>Görsel Oluştur</b><small>İstediğin sahneyi tarif et, görselini üret.</small></span></button><button class="feature suggestion" data-kind="file"><span class="ico">▤</span><span><b>Dosya Analizi</b><small>PDF, belge ve görsellerdeki içeriği incele.</small></span></button><button class="feature suggestion" data-kind="web"><span class="ico">⌕</span><span><b>Web Arama</b><small>Güncel bilgileri kaynaklarıyla araştır.</small></span></button><button class="feature suggestion" data-kind="app"><span class="ico">⌘</span><span><b>Uygulama Geliştir</b><small>Kod, site ve proje fikirleri üzerinde çalış.</small></span></button><button class="feature suggestion" data-kind="game"><span class="ico">♧</span><span><b>Oyun Tasarla</b><small>Free ile arcade oyna; Pro ile tarifinden özgün, oynanabilir oyun üret.</small></span></button><button class="feature songstudio" type="button" onclick="openSongStudio()"><span class="ico">🎤</span><span><b>Vokalli Şarkı Stüdyosu</b><small>Pro üyelerine özel: Tekden AI içinde vokalli şarkı üret.</small></span></button></div></div></section>
 <div class="composerwrap"><div class="composer"><textarea id="prompt" placeholder="Tekden AI'a mesaj yaz..."></textarea><div class="attachrow"><label class="attachlabel" for="fileInput">📎 Dosya / görsel ekle</label><input id="fileInput" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.docx" hidden><span class="attachname" id="fileName">Dosya seçilmedi</span></div><div class="tools"><div class="toolleft"><button class="secondary" id="searchBtn" title="İnternette ara">⌕ Web ara</button><button class="secondary" id="imageBtn" title="Görsel oluştur">▧ Görsel</button><button class="secondary" id="dictationBtn" title="Konuşarak yaz">🎙 Dikte et</button><button class="secondary" id="voiceBtn" title="Sesli sohbet">🔊 Sesli sohbet</button><span class="status" id="status">Hazır</span></div><button id="sendBtn">Gönder ↑</button></div></div><div class="notice" style="text-align:center;margin-top:8px">Misafir sohbetleri bu tarayıcıda saklanır; hesap açarsan sohbet geçmişin hesabına kaydedilir.</div></div></main></div>
@@ -6736,6 +6760,7 @@ restoreGuestHistory();refreshMe();
    const action=b.dataset.mobileAction;
    menu.classList.remove('open');trigger.setAttribute('aria-expanded','false');
    if(action==='history'){const side=document.querySelector('.sidebar');if(side)side.classList.add('mobile-open');document.getElementById('activeChatsBtn')?.click();}
+   else if(action==='toolbox'){const x=document.getElementById('tdToolsOpen');if(x)x.click();else alert('Araç kutusu şu anda açılamıyor.');}
    else if(action==='mind'){const x=document.getElementById('tkMindOpen')||document.getElementById('tkMindLockedOpen');if(x)x.click();else alert('Zihin Atölyesi bu hesapta görüntülenemiyor.');}
    else if(action==='studio'){location.href='/pro-studio';}
    else if(action==='discover'){location.href='/kesfet';}
@@ -7588,8 +7613,60 @@ def home(request: Request):
 }
 </style>
 """
+    mobile_simplify_css = r"""
+<style id="tekden-mobile-simplify-v1">
+@media (max-width: 720px) {
+  /* This entire layer is mobile-only. Desktop styles and layout are not overridden. */
+  .top { min-height:58px !important; padding:7px 9px !important; gap:7px !important; }
+  .top > div:first-of-type small { display:none !important; }
+  .top strong { font-size:15px !important; letter-spacing:-.2px; }
+  #mobileNew { width:40px !important; height:40px !important; min-height:40px !important; padding:0 !important; border-radius:12px !important; }
+  #mobileToolsBtn { width:42px !important; height:42px !important; flex-basis:42px !important; border-radius:12px !important; }
+  #profileButtonText { display:none !important; }
+  .profilebtn { width:42px !important; min-width:42px !important; height:42px !important; min-height:42px !important; padding:4px !important; justify-content:center !important; }
+
+  /* Keep the chat as the quiet, uncluttered home screen. */
+  .welcomegrid { display:none !important; }
+  .welcome { padding:14px 4px 8px !important; }
+  .welcome h1 { margin:8px 0 !important; font-size:25px !important; }
+  .welcome p { max-width:310px !important; margin:8px auto !important; font-size:13px !important; line-height:1.5 !important; }
+  #tkMindLockedOpen { display:none !important; }
+
+  /* One compact composer: input, attachment, send. The other tools stay in the menu. */
+  .composerwrap { padding:7px 9px calc(8px + env(safe-area-inset-bottom)) !important; }
+  .composer { padding:8px !important; border-radius:15px !important; }
+  .composer textarea { min-height:48px !important; max-height:22dvh !important; padding:9px 10px !important; }
+  .attachrow { display:flex !important; align-items:center !important; gap:6px !important; padding:4px 2px 6px !important; }
+  .attachlabel { display:inline-flex !important; align-items:center !important; min-height:30px !important; padding:5px 9px !important; border-radius:9px !important; font-size:11px !important; }
+  .attachname { display:none !important; }
+  .tools { display:flex !important; align-items:center !important; justify-content:flex-end !important; gap:6px !important; margin-top:3px !important; }
+  .toolleft { display:none !important; }
+  #sendBtn { min-height:40px !important; min-width:90px !important; padding:8px 15px !important; border-radius:11px !important; }
+  .composerwrap > .notice { display:none !important; }
+
+  /* A short, categorized drawer replaces the long flat button list. */
+  #mobileToolsMenu { display:none !important; position:fixed !important; top:64px !important; right:9px !important; left:9px !important; width:auto !important; max-width:480px !important; max-height:calc(100dvh - 76px) !important; overflow-y:auto !important; overscroll-behavior:contain !important; padding:12px !important; border:1px solid #dce8f6 !important; border-radius:17px !important; background:#fff !important; box-shadow:0 18px 48px rgba(12,38,72,.20) !important; display:none !important; grid-template-columns:1fr !important; gap:9px !important; }
+  #mobileToolsMenu.open { display:block !important; }
+  .mobile-menu-label { color:#71839a !important; font-size:10px !important; font-weight:800 !important; letter-spacing:1px !important; padding:1px 2px 0 !important; }
+  .mobile-menu-shortcuts { display:grid !important; grid-template-columns:repeat(3,minmax(0,1fr)) !important; gap:7px !important; margin-bottom:3px !important; }
+  .mobile-menu-shortcuts button { display:flex !important; flex-direction:column !important; align-items:center !important; justify-content:center !important; gap:5px !important; min-width:0 !important; min-height:72px !important; padding:8px 4px !important; border:1px solid #e2eafa !important; border-radius:12px !important; background:#f5f8ff !important; color:#17375c !important; font-size:10.5px !important; line-height:1.2 !important; text-align:center !important; white-space:normal !important; }
+  .mobile-menu-shortcuts .menuIcon { font-size:21px !important; width:auto !important; flex:auto !important; }
+  .mobile-menu-group { display:block !important; margin:0 !important; padding:0 !important; border:1px solid #e8eef7 !important; border-radius:12px !important; background:#fff !important; overflow:hidden !important; }
+  .mobile-menu-group summary { display:flex !important; align-items:center !important; justify-content:space-between !important; min-height:43px !important; padding:10px 12px !important; color:#1e385a !important; font-size:13px !important; font-weight:700 !important; list-style:none !important; cursor:pointer !important; }
+  .mobile-menu-group summary::-webkit-details-marker { display:none !important; }
+  .mobile-menu-group summary:after { content:'＋'; color:#66809f !important; font-size:17px !important; }
+  .mobile-menu-group[open] summary:after { content:'−'; }
+  .mobile-menu-items { display:grid !important; grid-template-columns:repeat(2,minmax(0,1fr)) !important; gap:6px !important; padding:0 8px 9px !important; }
+  .mobile-menu-items button { display:flex !important; align-items:center !important; justify-content:flex-start !important; gap:7px !important; min-width:0 !important; min-height:42px !important; padding:8px 9px !important; border:1px solid #e5edf7 !important; border-radius:10px !important; background:#f7faff !important; color:#17375c !important; font-size:11px !important; line-height:1.25 !important; text-align:left !important; white-space:normal !important; }
+  .mobile-menu-items .menuIcon, #mobileAdminBtn .menuIcon { flex:0 0 19px !important; width:19px !important; font-size:16px !important; text-align:center !important; }
+  #mobileAdminBtn { width:100% !important; min-height:42px !important; margin-top:1px !important; align-items:center !important; justify-content:flex-start !important; gap:7px !important; padding:8px 9px !important; border:1px solid #e5edf7 !important; border-radius:10px !important; background:#f7faff !important; color:#17375c !important; font-size:11px !important; text-align:left !important; }
+  .messages { padding:12px 11px 18px !important; }
+  .bubble, .bubble.assistant { max-width:100% !important; overflow-wrap:anywhere !important; }
+}
+</style>
+"""
     if "</head>" in page:
-        page = page.replace("</head>", mobile_refresh_css + f'<meta name="tekden-ui-build" content="{ADMIN_UI_BUILD_ID}"></head>', 1)
+        page = page.replace("</head>", mobile_refresh_css + mobile_simplify_css + f'<meta name="tekden-ui-build" content="{ADMIN_UI_BUILD_ID}"></head>', 1)
     return HTMLResponse(page, headers={"Cache-Control": "no-store, max-age=0", "Pragma": "no-cache", "X-Tekden-UI-Build": ADMIN_UI_BUILD_ID})
 
 ACCESS_HTML = r"""<!doctype html>
@@ -9900,4 +9977,3 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
-    
