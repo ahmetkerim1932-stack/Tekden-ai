@@ -20,7 +20,7 @@ OWNER_USERNAME = os.getenv("OWNER_USERNAME", "AhmetKerim.").strip()
 OWNER_PASSWORD = os.getenv("OWNER_PASSWORD", "").strip()
 # Owner-only admin PIN. The public website does not require this code.
 ADMIN_ACCESS_PIN = os.getenv("ADMIN_ACCESS_PIN", os.getenv("SITE_ACCESS_PIN", "")).strip()
-ADMIN_UI_BUILD_ID = "2026-11-04-admin-mobile-v2"
+ADMIN_UI_BUILD_ID = "2026-11-05-research-moderation-seo-v1"
 SITE_ACCESS_PIN = ADMIN_ACCESS_PIN  # compatibility with signed-token helpers below
 SITE_ACCESS_COOKIE = "tekden_admin_gate"
 SITE_ACCESS_SECONDS = 12 * 60 * 60
@@ -58,9 +58,9 @@ PUBLIC_BASE_URL = "https://tekden-ai-2.onrender.com"
 
 @app.get("/robots.txt", response_class=PlainTextResponse, include_in_schema=False)
 def robots_txt():
-    # The site is PIN-gated by request; search engines must not index private pages.
+    # Public content is indexable; admin and API routes stay out of search results.
     return PlainTextResponse(
-        "User-agent: *\nDisallow: /\n",
+        "User-agent: *\\nAllow: /\\nDisallow: /yonetim\\nDisallow: /api/\\nSitemap: https://tekden-ai-2.onrender.com/sitemap.xml\\n",
         media_type="text/plain; charset=utf-8",
         headers={"Cache-Control": "no-cache, max-age=0"},
     )
@@ -98,7 +98,7 @@ def google_site_verification():
 @app.get("/ads.txt", response_class=PlainTextResponse, include_in_schema=False)
 def ads_txt():
     return PlainTextResponse(
-        "google.com, pub-3311978441761062, DIRECT, f08c47fec0942fa0\\n",
+        "google.com, pub-3311978441761062, DIRECT, f08c47fec0942fa0\n",
         media_type="text/plain; charset=utf-8",
     )
 
@@ -155,6 +155,25 @@ def active_ip_ban(ip: str):
         conn.execute("DELETE FROM moderation_bans WHERE ip_address=%s AND expires_at <= NOW()", (ip,))
     return None
 
+def device_cookie_hash(request: Request) -> str | None:
+    token = request.cookies.get("tekden_device_id", "")
+    if not token or len(token) < 32 or len(token) > 160:
+        return None
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def active_device_ban(request: Request):
+    token_hash = device_cookie_hash(request)
+    if not DATABASE_URL or not token_hash:
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT expires_at FROM moderation_bans WHERE ip_address=%s AND expires_at>NOW()",
+            ("device:" + token_hash,),
+        ).fetchone()
+        return row["expires_at"] if row else None
+
+
 def active_user_ban(user_id: int):
     if not DATABASE_URL or not user_id:
         return None
@@ -165,10 +184,13 @@ def active_user_ban(user_id: int):
 
 @app.middleware("http")
 async def enforce_moderation_ban(request: Request, call_next):
-    # Applies the ban across the site, not only to chat requests.
-    if request.url.path not in ("/health", "/api/health/db", "/api/health/deep"):
-        try:
+    # Ban checks cover the public site, API, new chats and refreshed sessions.
+    exempt = request.url.path in ("/health", "/api/health/db", "/api/health/deep")
+    try:
+        if not exempt:
             expires = active_ip_ban(client_ip(request))
+            if not expires:
+                expires = active_device_ban(request)
             if not expires:
                 try:
                     session_user = current_user(request)
@@ -179,18 +201,26 @@ async def enforce_moderation_ban(request: Request, call_next):
             if expires:
                 return JSONResponse(
                     status_code=403,
-                    content={"detail": "Tekden AI kullanım kuralları nedeniyle erişimin geçici olarak engellendi.",
+                    content={"detail": "Tekden AI kullanım kuralları nedeniyle erişimin 30 gün boyunca engellendi.",
                              "ban_expires_at": expires.isoformat()},
                 )
-        except Exception:
-            # A database hiccup should not take the whole website offline.
-            pass
-    return await call_next(request)
+        response = await call_next(request)
+        if not request.cookies.get("tekden_device_id"):
+            response.set_cookie(
+                "tekden_device_id", secrets.token_urlsafe(32), max_age=60*60*24*365,
+                httponly=True, secure=request.url.scheme == "https",
+                samesite="lax", path="/",
+            )
+        return response
+    except Exception as exc:
+        # A database outage must not falsely claim that a moderation ban succeeded.
+        print("[Tekden AI] Moderasyon kontrolü:", type(exc).__name__)
+        return await call_next(request)
 
 
-def ban_ip_for_month(ip: str, user_id: int | None = None):
-    if not DATABASE_URL or (ip == "unknown" and not user_id):
-        return
+def ban_ip_for_month(ip: str, user_id: int | None = None, request: Request | None = None):
+    if not DATABASE_URL or (ip == "unknown" and not user_id and not request):
+        raise RuntimeError("Moderasyon veritabanı yapılandırılmamış.")
     with db() as conn:
         if ip != "unknown":
             conn.execute("""
@@ -201,13 +231,20 @@ def ban_ip_for_month(ip: str, user_id: int | None = None):
                     reason=EXCLUDED.reason, banned_at=NOW(), expires_at=NOW() + INTERVAL '30 days'
             """, (ip, user_id))
         elif user_id:
-            # The account-level record also blocks the account from every route after sign-in.
             conn.execute("""
                 INSERT INTO moderation_bans(ip_address, user_id, reason, banned_at, expires_at)
                 VALUES('account:' || %s::text, %s, 'Hakaret/küfür içeren mesaj', NOW(), NOW() + INTERVAL '30 days')
                 ON CONFLICT(ip_address) DO UPDATE SET user_id=EXCLUDED.user_id, reason=EXCLUDED.reason,
                     banned_at=NOW(), expires_at=NOW() + INTERVAL '30 days'
             """, (user_id, user_id))
+        token_hash = device_cookie_hash(request) if request else None
+        if token_hash:
+            conn.execute("""
+                INSERT INTO moderation_bans(ip_address, user_id, reason, banned_at, expires_at)
+                VALUES(%s, %s, 'Hakaret/küfür içeren mesaj', NOW(), NOW() + INTERVAL '30 days')
+                ON CONFLICT(ip_address) DO UPDATE SET user_id=COALESCE(EXCLUDED.user_id, moderation_bans.user_id),
+                    reason=EXCLUDED.reason, banned_at=NOW(), expires_at=NOW() + INTERVAL '30 days'
+            """, ("device:" + token_hash, user_id))
 
 
 def init_db():
@@ -425,7 +462,11 @@ PLAN_FEATURES = {
         "İçerik takvimi ve kampanya planları", "Ürün ve kullanıcı araştırması şablonları",
         "Yazılım kalite kontrol ve yayın öncesi kontrol listeleri",
         "Kişisel çalışma alanı araçları", "Gelişmiş çıktı biçimlendirme şablonları",
-        "Plus araçları yalnızca aktif Plus aboneliği doğrulandığında kullanılabilir"
+        "Plus araçları yalnızca aktif Plus aboneliği doğrulandığında kullanılabilir",
+        "Gelişmiş araştırma modu: çoklu arama sorgusu, kaynak karşılaştırması ve kısa kaynakça",
+        "Uzun görevlerde aşamalı çalışma, ara kontrol noktaları ve sonuç özeti",
+        "Kod ve belge çıktılarında daha kapsamlı kalite kontrol listesi",
+        "Sohbet bağlamından proje hedefleri ve açık işlerin yapılandırılmış özeti"
     ], "disclaimer": "400 TL/ay fiyatı taslaktır; satın alma Stripe fiyatı ve webhook ile doğrulanmadan etkin olmaz."}
 }
 
@@ -675,7 +716,41 @@ def web_search(query: str):
                 cleaned.append({"title":item["title"].strip(), "url":url,
                                 "snippet":item.get("snippet", "").strip()})
             if len(cleaned)>=8: break
-        return cleaned
+        if cleaned:
+            return cleaned
+    except Exception:
+        pass
+    # Last-resort HTML search fallback; no extra Python package or API key required.
+    try:
+        from html.parser import HTMLParser
+        class BingParser(HTMLParser):
+            def __init__(self):
+                super().__init__(); self.items=[]; self.in_result=False; self.capture=None; self.current=None
+            def handle_starttag(self, tag, attrs):
+                a=dict(attrs); cls=a.get("class","")
+                if tag=="li" and "b_algo" in cls:
+                    self.in_result=True; self.current={"title":"","url":"","snippet":""}
+                elif self.in_result and tag=="h2":
+                    self.capture="title"
+                elif self.in_result and tag=="a" and self.capture=="title" and not self.current["url"]:
+                    self.current["url"]=a.get("href","")
+                elif self.in_result and tag=="p":
+                    self.capture="snippet"
+            def handle_data(self,data):
+                if self.in_result and self.current is not None and self.capture in ("title","snippet"):
+                    self.current[self.capture]+=data
+            def handle_endtag(self,tag):
+                if self.in_result and tag=="li":
+                    if self.current and self.current["url"].startswith("http") and self.current["title"].strip():
+                        self.items.append(self.current)
+                    self.current=None; self.in_result=False; self.capture=None
+                elif tag=="h2": self.capture=None
+                elif tag=="p": self.capture=None
+        response=requests.get("https://www.bing.com/search",params={"q":query,"count":8},
+                              headers={"User-Agent":"Mozilla/5.0 (compatible; TekdenAI/1.0)"},timeout=18)
+        response.raise_for_status(); parser=BingParser(); parser.feed(response.text)
+        return [{"title":x["title"].strip(),"url":x["url"],"snippet":x["snippet"].strip()}
+                for x in parser.items[:8]]
     except Exception:
         return []
 
@@ -849,6 +924,16 @@ def clean_short_text(value: str, limit: int = 120) -> str:
     return re.sub(r"\s+", " ", value).strip()[:limit]
 
 
+@app.get("/api/search/status")
+def search_status():
+    return {
+        "search_available": True,
+        "primary_provider_configured": bool(TAVILY_API_KEY),
+        "fallbacks": ["DDGS package if installed", "DuckDuckGo HTML", "Bing HTML"],
+        "note": "API anahtarları gösterilmez. Canlı erişim bir sorguyla doğrulanır."
+    }
+
+
 @app.get("/api/features")
 def product_features():
     """Describe features honestly, including provider-configuration caveats."""
@@ -862,7 +947,8 @@ def product_features():
         "capabilities": {
             "chat": bool(OLLAMA_API_KEY),
             "pro_model_configured": bool(OLLAMA_PRO_MODEL and OLLAMA_API_KEY),
-            "web_search": bool(TAVILY_API_KEY),
+            "web_search": True,
+            "tavily_primary_configured": bool(TAVILY_API_KEY),
             "image_generation": True,
             "custom_game_generation": bool(OLLAMA_API_KEY),
             "billing_configured": bool(STRIPE_SECRET_KEY and STRIPE_PRICE_ID_PRO),
@@ -1448,12 +1534,13 @@ def chat(body: ChatBody, request: Request):
     user = current_user(request)
     if contains_profanity(user_message):
         try:
-            ban_ip_for_month(client_ip(request), user["id"] if user else None)
+            ban_ip_for_month(client_ip(request), user["id"] if user else None, request)
         except Exception as exc:
             print("[Tekden AI] Moderasyon banı kaydedilemedi:", type(exc).__name__)
+            raise HTTPException(503, "Moderasyon kaydı şu anda tamamlanamadı. Lütfen daha sonra tekrar dene.")
         raise HTTPException(
             status_code=403,
-            detail="Mesajında küfür veya hakaret tespit edildi. Tekden AI erişimin 30 gün boyunca engellendi."
+            detail="Uygunsuz ifade nedeniyle bu hesap, tarayıcı cihaz anahtarı ve mevcut ağ adresi 30 gün engellendi."
         )
     plan = "plus" if user and user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else (user or {}).get("plan", "free")
     account_preferences = None
@@ -1466,6 +1553,7 @@ def chat(body: ChatBody, request: Request):
     use_search = body.force_search or should_search(user_message)
     query = user_message.replace("/search ", "", 1)
     sources = (pro_web_search(query) if plan in ("pro", "plus") else web_search(query)) if use_search else []
+    search_failed = bool(use_search and not sources)
     if plan in ("pro", "plus"):
         plan_rules = ("Kullanıcının planı Tekden AI Plus. Pro özelliklerinin tamamı ve Plus iş akışlarına uygun kapsamlı destek sun. " if plan == "plus" else "Kullanıcının planı Tekden AI Pro. ") + "Üst düzey, kişiye özel bir çalışma ortağı gibi davran: isteğin amacını koru, önceki sohbet bağlamını etkin kullan, belirsizlikleri gerektiğinde sor, karmaşık işleri aşamalara böl ve uygulanabilir, tamamlanmış sonuç üret. Web kaynakları mevcutsa çoklu kaynağı karşılaştır, tarihleri kontrol et ve iddiaları kaynaklarla destekle. Kod, tasarım, araştırma ve planlama taleplerinde yalnızca genel tavsiye verme; mümkün olduğunda doğrudan kullanılabilir bir çıktı sun. Dosya/görsel içeriğine sadık kal. Doğal, akıcı Türkçe kullan; gereksiz sembol ve biçimlendirme yapma. Kullanıcı kısa yanıt isterse kısa tut. Gerçekte çalıştırılmamış işlemleri yaptığını iddia etme. Pro modeli kullanılamazsa temel modele geçiş olabilir; bunu gerekiyorsa açıkça belirt."
     else:
@@ -1613,7 +1701,7 @@ Yazım ve anlatım kuralları:
             verify = conn.execute("SELECT COUNT(*) AS n FROM messages WHERE chat_id=%s AND content IN (%s,%s)", (chat_id, user_message, answer)).fetchone()
             if not verify or int(verify.get("n", 0)) < 2:
                 raise RuntimeError("Mesajlar veritabanına yazıldı olarak doğrulanamadı.")
-        return {"answer": answer, "chat_id": chat_id, "sources": sources, "saved": True, "save_status": "saved", "epistemic_check": audit_info}
+        return {"answer": answer, "chat_id": chat_id, "sources": sources, "saved": True, "save_status": "saved", "epistemic_check": audit_info, "search_attempted": use_search, "search_failed": search_failed}
     # Guest chat is intentionally not written to the database.
     for item in body.guest_history[-24:]:
         if isinstance(item, dict) and item.get("role") in ("user","assistant") and isinstance(item.get("content"), str):
@@ -1628,7 +1716,7 @@ Yazım ve anlatım kuralları:
         except Exception as audit_exc:
             audit_info = {"performed": False, "mode": "audit_unavailable"}
             print("[Tekden AI] Misafir yanıt denetimi tamamlanamadı:", type(audit_exc).__name__)
-    return {"answer": answer, "chat_id": None, "sources": sources, "saved": False, "epistemic_check": audit_info}
+    return {"answer": answer, "chat_id": None, "sources": sources, "saved": False, "epistemic_check": audit_info, "search_attempted": use_search, "search_failed": search_failed}
 
 def improve_image_prompt(prompt: str) -> str:
     """Improve clarity and visual direction without changing the user's idea."""
@@ -6436,6 +6524,13 @@ HTML = r"""<!doctype html>
  .toolleft button{min-height:38px}
  .attachrow{padding:4px 4px 8px}
  .bubble.assistant{width:100%;line-height:1.58}
+.td-source-footer{margin-top:14px;padding-top:9px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+.td-source-footer summary{cursor:pointer;font-weight:750;color:var(--accent);list-style:none}
+.td-source-footer summary::-webkit-details-marker{display:none}
+.td-source-footer ol{margin:8px 0 0;padding-left:20px}
+.td-source-footer li{margin:4px 0;overflow-wrap:anywhere}
+.td-source-footer a{color:var(--accent);text-decoration:none}
+
  .sidebar.mobile-open{z-index:150}
 }
 
@@ -6526,7 +6621,7 @@ function cleanAnswer(content){
  t=t.replace(/\n{3,}/g,'\n\n').trim();
  return t;
 }
-function bubble(role,content,sources=[]){$('welcome')?.remove();const d=document.createElement('div');d.className='bubble '+role;const body=document.createElement('div');body.className='bubble-content';body.textContent=role==='assistant'?cleanAnswer(content):content;d.appendChild(body);if(role==='user'){const edit=document.createElement('button');edit.type='button';edit.className='secondary message-edit-btn';edit.textContent='✎ Düzenle';edit.style.cssText='display:block;margin:8px 0 0 auto;padding:4px 9px;font-size:12px';edit.title='Mesajı düzenleyip yeniden göndermek için';edit.onclick=()=>{const current=body.textContent||'';const promptEl=$('prompt');promptEl.value=current.replace(/\n📎 .+$/,'');promptEl.focus();promptEl.setSelectionRange(promptEl.value.length,promptEl.value.length);setStatus('Mesaj metni düzenleme alanına alındı. Düzenleyip Gönder’e basabilirsin; eski mesaj geçmişte kalır.');};d.appendChild(edit)}if(sources.length){const s=document.createElement('div');s.className='sources';s.innerHTML='<b>Kaynaklar</b><br>'+sources.map(x=>`<a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.title||x.url)}</a>`).join('<br>');d.appendChild(s)}$('messages').appendChild(d);$('messages').scrollTop=$('messages').scrollHeight;return d}
+function bubble(role,content,sources=[]){$('welcome')?.remove();const d=document.createElement('div');d.className='bubble '+role;const body=document.createElement('div');body.className='bubble-content';body.textContent=role==='assistant'?cleanAnswer(content):content;d.appendChild(body);if(role==='user'){const edit=document.createElement('button');edit.type='button';edit.className='secondary message-edit-btn';edit.textContent='✎ Düzenle';edit.style.cssText='display:block;margin:8px 0 0 auto;padding:4px 9px;font-size:12px';edit.title='Mesajı düzenleyip yeniden göndermek için';edit.onclick=()=>{const current=body.textContent||'';const promptEl=$('prompt');promptEl.value=current.replace(/\n📎 .+$/,'');promptEl.focus();promptEl.setSelectionRange(promptEl.value.length,promptEl.value.length);setStatus('Mesaj metni düzenleme alanına alındı. Düzenleyip Gönder’e basabilirsin; eski mesaj geçmişte kalır.');};d.appendChild(edit)}if(sources.length){const s=document.createElement('details');s.className='sources td-source-footer';const summary=document.createElement('summary');summary.textContent='Kaynakça · '+sources.length+' kaynak';s.appendChild(summary);const list=document.createElement('ol');(sources.slice(0,8)).forEach(x=>{const li=document.createElement('li');const a=document.createElement('a');a.href=x.url;a.target='_blank';a.rel='noopener noreferrer';a.textContent=x.title||x.url;li.appendChild(a);list.appendChild(li)});s.appendChild(list);d.appendChild(s)}$('messages').appendChild(d);$('messages').scrollTop=$('messages').scrollHeight;return d}
 function gameBubble(html){$('welcome')?.remove();const wrap=document.createElement('div');wrap.className='bubble assistant';wrap.style.cssText='width:min(100%,1100px);padding:14px';const bar=document.createElement('div');bar.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px';const heading=document.createElement('div');heading.textContent='🎮 Tekden AI Pro oyun stüdyosu · Oyun hazır';heading.style.cssText='font-weight:800';bar.appendChild(heading);const actions=document.createElement('div');actions.style.cssText='display:flex;gap:7px;flex-wrap:wrap';const full=document.createElement('button');full.className='secondary';full.textContent='⛶ Tam ekran';const download=document.createElement('button');download.className='secondary';download.textContent='↓ HTML indir';actions.append(full,download);bar.appendChild(actions);wrap.appendChild(bar);const frame=document.createElement('iframe');frame.title='Tekden AI Pro tarafından oluşturulan oynanabilir oyun';frame.sandbox='allow-scripts allow-pointer-lock';frame.srcdoc=html;frame.style.cssText='display:block;width:100%;height:clamp(560px,75vh,820px);border:1px solid #bcd8f5;border-radius:14px;background:#07111f';wrap.appendChild(frame);full.onclick=()=>{if(frame.requestFullscreen)frame.requestFullscreen().catch(()=>{});else alert('Bu tarayıcı tam ekranı desteklemiyor.')};download.onclick=()=>{const blob=new Blob([html],{type:'text/html;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='tekden-ai-oyunu.html';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)};const note=document.createElement('div');note.textContent='Kontroller oyunun içinde görünür. Tam ekran oynayabilir veya HTML dosyası olarak indirip bilgisayarında açabilirsin.';note.style.cssText='font-size:12px;color:#526784;margin-top:9px';wrap.appendChild(note);$('messages').appendChild(wrap);$('messages').scrollTop=$('messages').scrollHeight}
 function looksLikeGameRequest(text){const t=String(text||'').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');const hasGame=/(^|\s)(oyun|oyunu|oyuncu|game|mini oyun|platformer)(\s|$)/.test(t);const action=/(olustur|yap|tasarla|gelistir|kodla|uret|hazirla|baslat|oynanabilir|yapalim)/.test(t);return (hasGame&&action)||/araba yarisi|araba oyunu|platform oyunu|oyun yap/.test(t)}
 function imageBubble(data){$('welcome')?.remove();const d=document.createElement('div');d.className='bubble assistant';const title=document.createElement('div');title.textContent='Oluşturulan görsel';d.appendChild(title);const img=document.createElement('img');img.src=data;img.alt='Yapay zekâ tarafından oluşturulan görsel';img.loading='lazy';d.appendChild(img);const link=document.createElement('a');link.href=data;link.download='tekden-ai-gorsel.png';link.textContent='Görseli indir ↓';link.style.cssText='display:inline-block;margin-top:10px;color:#7651e8;font-weight:600';d.appendChild(link);$('messages').appendChild(d);$('messages').scrollTop=$('messages').scrollHeight}
@@ -6675,7 +6770,7 @@ async function send(){
   if(file){const answer=await analyzeAttachment(text,file);bubble('assistant',answer);if(user){try{const saved=await api('/api/save-analysis',{method:'POST',body:JSON.stringify({question:text||'Ekli dosyayı analiz et.',answer,filename:file.name,chat_id:chatId})});if(saved.chat_id)chatId=saved.chat_id;loadChats()}catch(saveError){console.warn('Dosya analizi geçmişe kaydedilemedi',saveError)}}else {guestHistory.push({role:'user',content:(text||'Ekli dosyayı analiz et.')+' [Dosya: '+file.name+']'},{role:'assistant',content:answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}selectedFile=null;$('fileInput').value='';$('fileName').textContent='Dosya seçilmedi';setStatus('Dosya analizi tamamlandı');}
   else if(looksLikeGameRequest(text)){const game=await api('/api/game',{method:'POST',body:JSON.stringify({prompt:text})});gameBubble(game.html);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İsteğine göre oynanabilir bir oyun oluşturuldu.'});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Oyun hazır');}
   else if(looksLikeImageRequest(text)){await createAndShowImage(text);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İstenen görsel oluşturuldu. İstek: '+text});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Görsel hazır');}
-  else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(docIntent?.format==='docx'){await tdDownloadWord(d.answer,d.sources||[],docIntent.title)}else if(docIntent?.format==='pdf'){tdPrintPdf(d.answer,d.sources||[],docIntent.title,pdfWindow)}if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus('UYARI: Bu mesaj Supabase’e kaydedilmedi. Hesabından çıkış yapıp yeniden giriş yap.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else setStatus(forceSearch?'Kaynak bulunamadı; yanıt doğrulanamadı':'Tamamlandı');}
+  else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(docIntent?.format==='docx'){await tdDownloadWord(d.answer,d.sources||[],docIntent.title)}else if(docIntent?.format==='pdf'){tdPrintPdf(d.answer,d.sources||[],docIntent.title,pdfWindow)}if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus('UYARI: Bu mesaj Supabase’e kaydedilmedi. Hesabından çıkış yapıp yeniden giriş yap.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else if(d.search_failed)setStatus('Web araması denendi ancak sağlayıcı sonuç döndürmedi. TAVILY_API_KEY ayarını ve arama sağlayıcısı erişimini kontrol et.');else setStatus('Tamamlandı');}
  }catch(e){bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeGameRequest(text)?'Oyun oluşturulamadı: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}
  finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)';$('searchBtn').textContent='⌕ Web ara'}
 }
@@ -7668,6 +7763,10 @@ def home(request: Request):
     mobile_overlap_logo_fix_css = r"""
 <style id="tekden-mobile-overlap-logo-fix">
 @media (max-width: 720px) {
+  /* Keep voice and dictation available as compact icon controls near the composer. */
+  #dictationBtn, #voiceBtn { min-width:40px !important; width:40px !important; padding:0 !important; font-size:18px !important; }
+  #searchBtn { min-height:40px !important; }
+  .td-source-footer { font-size:11px !important; }
   /* Use the supplied official Tekden AI mark in the mobile header only. */
   .top > div:first-of-type { display:flex !important; align-items:center !important; gap:9px !important; }
   .top > div:first-of-type::before {
@@ -10013,3 +10112,333 @@ def monetization_page():
 <p class='muted'>Şeffaflık: Dış bağlantılar ilgili hizmet sağlayıcılarına aittir. Bir bağlantıdan gelir elde edilmesi hâlinde bu sayfada açıkça belirtilir. Herhangi bir hizmetin fiyatı, erişilebilirliği veya sonuçları Tekden AI tarafından garanti edilmez.</p>
 <p class='nav'><a href='/'>Ana sayfa</a> · <a href='/hakkimizda'>Hakkımızda</a> · <a href='/gizlilik'>Gizlilik</a></p></main></body></html>"""
     return HTMLResponse(body)
+
+# ============================================================================
+# TEKDEN AI — MOBILE / TABLET CHAT SEND RELIABILITY PATCH (APPEND-ONLY)
+# This section is intentionally appended. No existing routes, features, or
+# original lines are removed or shortened.
+# ============================================================================
+
+_TD_TOUCH_CHAT_SEND_CSS = r"""
+<style id="td-mobile-tablet-chat-send-fix-v1">
+/* Phones: keep the composer above floating helper layers and tappable. */
+@media (max-width: 720px) {
+  #tkFloatingLinks, #tkMindOpen, #tkMindLockedOpen { display: none !important; }
+  .composerwrap {
+    position: relative !important;
+    z-index: 9000 !important;
+    flex: 0 0 auto !important;
+    margin-top: auto !important;
+    pointer-events: auto !important;
+  }
+  .composer, .composer *, .tools, #sendBtn {
+    pointer-events: auto !important;
+  }
+  #sendBtn {
+    position: relative !important;
+    z-index: 9100 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    min-width: 96px !important;
+    min-height: 46px !important;
+    touch-action: manipulation !important;
+    -webkit-tap-highlight-color: transparent !important;
+    user-select: none !important;
+  }
+}
+
+/* Touch tablets: use a full-width chat instead of squeezing the composer
+   beside the desktop history column. Fine-pointer desktop layouts are intact. */
+@media (min-width: 721px) and (max-width: 1024px) and (any-pointer: coarse) {
+  html, body {
+    width: 100% !important;
+    height: 100% !important;
+    min-height: 100% !important;
+    overflow: hidden !important;
+  }
+  .layout {
+    display: block !important;
+    width: 100% !important;
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+    overflow: hidden !important;
+  }
+  .sidebar { display: none !important; }
+  .sidebar.mobile-open {
+    display: flex !important;
+    position: fixed !important;
+    inset: 0 auto 0 0 !important;
+    z-index: 9800 !important;
+    width: min(340px, 88vw) !important;
+    height: 100dvh !important;
+    max-height: 100dvh !important;
+    overflow: auto !important;
+    box-shadow: 14px 0 42px #0b1e3a35 !important;
+  }
+  #mobileSidebarClose { display: block !important; }
+  .main {
+    display: flex !important;
+    flex-direction: column !important;
+    width: 100% !important;
+    height: 100dvh !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+  }
+  .top {
+    display: flex !important;
+    flex: 0 0 auto !important;
+    position: relative !important;
+    z-index: 200 !important;
+    min-height: 62px !important;
+    padding: 8px 12px !important;
+  }
+  .topnav { display: none !important; }
+  .mobile { display: inline-flex !important; }
+  #mobileToolsBtn {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    width: 44px !important;
+    height: 44px !important;
+    min-height: 44px !important;
+    padding: 0 !important;
+    flex: 0 0 44px !important;
+    border-radius: 13px !important;
+    font-size: 25px !important;
+  }
+  #mobileToolsMenu {
+    display: none !important;
+    position: fixed !important;
+    top: 72px !important;
+    right: 12px !important;
+    z-index: 9700 !important;
+    width: min(380px, calc(100vw - 24px)) !important;
+    max-height: calc(100dvh - 88px) !important;
+    overflow: auto !important;
+    padding: 12px !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 8px !important;
+    border: 1px solid #dce8f6 !important;
+    border-radius: 16px !important;
+    background: #fff !important;
+    box-shadow: 0 18px 48px rgba(12,38,72,.20) !important;
+  }
+  #mobileToolsMenu.open { display: grid !important; }
+  .messages {
+    display: flex !important;
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    width: 100% !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+    padding: 18px clamp(14px, 4vw, 34px) 24px !important;
+    overscroll-behavior: contain !important;
+  }
+  .composerwrap {
+    display: block !important;
+    flex: 0 0 auto !important;
+    position: relative !important;
+    z-index: 9000 !important;
+    width: 100% !important;
+    margin-top: auto !important;
+    padding: 10px 14px calc(12px + env(safe-area-inset-bottom)) !important;
+    background: rgba(255,255,255,.99) !important;
+    border-top: 1px solid #dce8f6 !important;
+    pointer-events: auto !important;
+  }
+  .composer {
+    position: relative !important;
+    z-index: 9001 !important;
+    width: 100% !important;
+    max-width: 980px !important;
+    margin: 0 auto !important;
+    padding: 10px !important;
+    border-radius: 16px !important;
+    overflow: visible !important;
+  }
+  .composer textarea {
+    width: 100% !important;
+    min-height: 60px !important;
+    max-height: 24dvh !important;
+    font-size: 16px !important;
+    touch-action: manipulation !important;
+  }
+  .tools, .toolleft {
+    display: flex !important;
+    flex-wrap: wrap !important;
+    align-items: center !important;
+    gap: 7px !important;
+    min-width: 0 !important;
+    pointer-events: auto !important;
+  }
+  .tools button, .toolleft button { min-height: 44px !important; }
+  #sendBtn {
+    position: relative !important;
+    z-index: 9100 !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    min-width: 104px !important;
+    min-height: 48px !important;
+    padding: 9px 18px !important;
+    touch-action: manipulation !important;
+    -webkit-tap-highlight-color: transparent !important;
+    pointer-events: auto !important;
+    user-select: none !important;
+  }
+  .attachrow { position: relative !important; z-index: 2 !important; }
+  .attachlabel { min-height: 38px !important; touch-action: manipulation !important; }
+  #tkFloatingLinks, #tkMindOpen, #tkMindLockedOpen {
+    display: none !important;
+    pointer-events: none !important;
+  }
+  .bubble, .bubble.assistant { max-width: 100% !important; overflow-wrap: anywhere !important; }
+}
+</style>
+"""
+
+_TD_TOUCH_CHAT_SEND_JS = r"""
+<script id="td-mobile-tablet-chat-send-fix-v1-js">
+(function () {
+  'use strict';
+  const button = document.getElementById('sendBtn');
+  const input = document.getElementById('prompt');
+  const fileInput = document.getElementById('fileInput');
+  const status = document.getElementById('status');
+  if (!button || !input) return;
+
+  // Keep the original full-featured send implementation; this layer only
+  // normalizes touch, click and keyboard activation and blocks double sends.
+  const originalSend = typeof window.send === 'function' ? window.send.bind(window) : null;
+  let sending = false;
+  let lastActivation = 0;
+
+  function setSendStatus(message) {
+    if (status) status.textContent = message;
+  }
+
+  async function runSend(source, event) {
+    if (source === 'touch' && event && event.cancelable) event.preventDefault();
+    const now = Date.now();
+    if (sending || button.disabled || now - lastActivation < 650) return;
+
+    const hasText = Boolean(input.value.trim());
+    const hasFile = Boolean(fileInput && fileInput.files && fileInput.files.length);
+    if (!hasText && !hasFile) {
+      input.focus({ preventScroll: true });
+      return;
+    }
+    if (!navigator.onLine) {
+      setSendStatus('İnternet bağlantısı yok. Bağlantı gelince yeniden Gönder’e bas.');
+      return;
+    }
+    if (!originalSend) {
+      setSendStatus('Gönderme bileşeni yüklenemedi. Sayfayı yenileyip tekrar dene.');
+      return;
+    }
+
+    sending = true;
+    lastActivation = now;
+    const originalText = input.value;
+    const previousAssistantCount = document.querySelectorAll('.bubble.assistant .bubble-content').length;
+    button.disabled = true;
+    button.setAttribute('aria-busy', 'true');
+    try {
+      await originalSend();
+      // The original handler displays its own error bubble. Restore the text
+      // only after a failed attempt so a temporary mobile network drop is
+      // recoverable without retyping the message.
+      const assistantBubbles = document.querySelectorAll('.bubble.assistant .bubble-content');
+      if (assistantBubbles.length > previousAssistantCount && !input.value.trim()) {
+        const latest = assistantBubbles[assistantBubbles.length - 1];
+        const latestText = (latest && latest.textContent || '').trim();
+        if (/^(Hata:|Dosya analiz edilemedi:|Oyun oluşturulamadı:|Görsel oluşturulamadı:)/i.test(latestText)) {
+          input.value = originalText;
+          input.focus({ preventScroll: true });
+          setSendStatus('Gönderim başarısız oldu. Mesajın korundu; bağlantını kontrol edip tekrar deneyebilirsin.');
+        }
+      }
+    } catch (error) {
+      if (!input.value.trim()) input.value = originalText;
+      setSendStatus('Mesaj gönderilemedi: ' + String(error && error.message || error));
+    } finally {
+      sending = false;
+      button.disabled = false;
+      button.removeAttribute('aria-busy');
+    }
+  }
+
+  // The page's existing click handler is replaced, not duplicated.
+  button.type = 'button';
+  button.onclick = function (event) {
+    if (event) event.preventDefault();
+    runSend('click', event);
+  };
+  // Older iOS/Android webviews can be more reliable with touchend than a
+  // synthesized click. Debouncing prevents touchend + click double submits.
+  button.addEventListener('touchend', function (event) {
+    runSend('touch', event);
+  }, { passive: false });
+
+  // Capture phase stops the two legacy Enter listeners from dispatching twice.
+  input.addEventListener('keydown', function (event) {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      runSend('keyboard', event);
+    }
+  }, true);
+
+  window.addEventListener('online', function () {
+    setSendStatus('Bağlantı yeniden sağlandı. Mesajını gönderebilirsin.');
+  });
+  window.addEventListener('offline', function () {
+    setSendStatus('İnternet bağlantısı kesildi. Yazdığın mesaj korunuyor.');
+  });
+})();
+</script>
+"""
+
+@app.middleware("http")
+async def tekden_mobile_tablet_chat_send_reliability(request: Request, call_next):
+    """Append touch/tablet chat fixes to the existing homepage response only."""
+    response = await call_next(request)
+    if request.url.path != "/" or request.method not in ("GET", "HEAD"):
+        return response
+    if response.status_code != 200 or "text/html" not in response.headers.get("content-type", ""):
+        return response
+
+    body_parts = []
+    async for chunk in response.body_iterator:
+        body_parts.append(chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8"))
+    raw_body = b"".join(body_parts)
+    charset = response.charset or "utf-8"
+    html = raw_body.decode(charset, errors="replace")
+
+    if 'id="sendBtn"' not in html or 'id="prompt"' not in html:
+        return HTMLResponse(
+            content=html,
+            status_code=response.status_code,
+            headers={k: v for k, v in response.headers.items() if k.lower() != "content-length"},
+            background=response.background,
+        )
+
+    if 'id="td-mobile-tablet-chat-send-fix-v1"' not in html:
+        if "</head>" in html:
+            html = html.replace("</head>", _TD_TOUCH_CHAT_SEND_CSS + "</head>", 1)
+        else:
+            html = _TD_TOUCH_CHAT_SEND_CSS + html
+    if 'id="td-mobile-tablet-chat-send-fix-v1-js"' not in html:
+        if "</body>" in html:
+            html = html.replace("</body>", _TD_TOUCH_CHAT_SEND_JS + "</body>", 1)
+        else:
+            html += _TD_TOUCH_CHAT_SEND_JS
+
+    response_headers = {k: v for k, v in response.headers.items() if k.lower() not in ("content-length", "content-encoding", "transfer-encoding")}
+    return HTMLResponse(
+        content=html,
+        status_code=response.status_code,
+        headers=response_headers,
+        background=response.background,
+    )
