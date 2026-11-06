@@ -10442,3 +10442,1583 @@ async def tekden_mobile_tablet_chat_send_reliability(request: Request, call_next
         headers=response_headers,
         background=response.background,
     )
+
+# --- Tekden AI Plus feature suite appended without altering prior code ---
+# =============================================================================
+# TEKDEN AI PLUS WORKSPACE ADD-ONS
+# Additive module: existing application code above this marker is preserved.
+# =============================================================================
+
+import csv as _td_csv
+import statistics as _td_statistics
+import ast as _td_ast
+import xml.etree.ElementTree as _td_et
+from pathlib import PurePosixPath as _td_PurePosixPath
+
+# New Plus capabilities are appended to the existing product catalogue.
+PLAN_FEATURES["plus"]["features"].extend([
+    "Tekden Mega Stüdyo: ortak projeler ve türler arası medya varlıkları",
+    "Gerçek Zamanlı Sesli Asistan: tarayıcı destekli dikte, sesli sohbet ve sesli yanıt",
+    "Derin Araştırma: çoklu sorgu, kaynak karşılaştırması ve rapor",
+    "Canlı Kod Laboratuvarı: kod üretimi, güvenli tarayıcı önizlemesi ve statik kontroller",
+    "Kişisel Bilgi Kasası: PDF, Word, PowerPoint, Excel, CSV ve metin belgelerinde arama",
+    "Akıllı Öğretmen: kişiye uyarlanmış ders, alıştırma ve ilerleme takibi",
+    "Veri Analiz Merkezi: CSV tabloları için istatistikler ve açıklayıcı rapor",
+    "Senaryo Simülatörü: alternatif gelecekler, riskler ve belirsizlik analizi",
+    "Proje Yöneticisi: hedefleri görev ve aşamalara dönüştürme",
+    "Kullanıcı Kontrol Merkezi: özel çalışma alanı verilerini görüntüleme, dışa aktarma ve silme",
+])
+
+# Database schema is additive and owned by the individual account.
+@app.on_event("startup")
+def tekden_plus_additive_schema():
+    if not DATABASE_URL:
+        return
+    try:
+        with db() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS plus_projects (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_plus_projects_user_updated ON plus_projects(user_id, updated_at DESC)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS plus_assets (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    project_id BIGINT REFERENCES plus_projects(id) ON DELETE CASCADE,
+                    kind TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    mime_type TEXT NOT NULL DEFAULT 'text/plain',
+                    content TEXT NOT NULL DEFAULT '',
+                    source_url TEXT NOT NULL DEFAULT '',
+                    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_plus_assets_user_project ON plus_assets(user_id, project_id, created_at DESC)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS plus_vault_documents (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    mime_type TEXT NOT NULL DEFAULT 'text/plain',
+                    extracted_text TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    size_bytes BIGINT NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE(user_id, content_sha256)
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_plus_vault_user_created ON plus_vault_documents(user_id, created_at DESC)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS plus_tasks (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    project_id BIGINT REFERENCES plus_projects(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'planned',
+                    priority TEXT NOT NULL DEFAULT 'normal',
+                    due_date DATE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_plus_tasks_user_status ON plus_tasks(user_id, status, due_date)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS plus_voice_sessions (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    chat_id UUID REFERENCES chats(id) ON DELETE SET NULL,
+                    title TEXT NOT NULL DEFAULT 'Sesli oturum',
+                    transcript TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_plus_voice_user_updated ON plus_voice_sessions(user_id, updated_at DESC)")
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS plus_learning_sessions (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    topic TEXT NOT NULL,
+                    level TEXT NOT NULL DEFAULT 'Başlangıç',
+                    lesson TEXT NOT NULL,
+                    quiz JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    progress JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    score INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_plus_learning_user_updated ON plus_learning_sessions(user_id, updated_at DESC)")
+    except Exception as exc:
+        print("[Tekden AI Plus] Ek şema oluşturulamadı:", type(exc).__name__, str(exc)[:220])
+
+
+def _td_plus_user(request: Request):
+    return require_plus_user(request)
+
+
+def _td_plus_project_or_404(conn, project_id: int | None, user_id: int):
+    if project_id is None:
+        return None
+    row = conn.execute(
+        "SELECT id,name FROM plus_projects WHERE id=%s AND user_id=%s",
+        (project_id, user_id),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Bu çalışma alanına ait proje bulunamadı.")
+    return row
+
+
+def _td_plus_asset_payload(row):
+    if not row:
+        return None
+    item = dict(row)
+    if isinstance(item.get("metadata"), str):
+        try:
+            item["metadata"] = json.loads(item["metadata"])
+        except Exception:
+            item["metadata"] = {}
+    return item
+
+
+def _td_plus_save_asset(user_id: int, project_id: int | None, kind: str, title: str,
+                        content: str = "", mime_type: str = "text/plain",
+                        source_url: str = "", metadata: dict | None = None):
+    if len(content or "") > 2_400_000:
+        raise HTTPException(413, "Bu varlık 2,4 MB sınırını aşıyor.")
+    with db() as conn:
+        _td_plus_project_or_404(conn, project_id, user_id)
+        row = conn.execute("""
+            INSERT INTO plus_assets(user_id,project_id,kind,title,mime_type,content,source_url,metadata)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+            RETURNING id,project_id,kind,title,mime_type,source_url,metadata,created_at
+        """, (
+            user_id, project_id, kind[:24], clean_short_text(title, 140) or "Adsız varlık",
+            mime_type[:120], content or "", source_url[:2000],
+            json.dumps(metadata or {}, ensure_ascii=False),
+        )).fetchone()
+    return _td_plus_asset_payload(row)
+
+
+class TDPlusProjectBody(BaseModel):
+    name: str = Field(min_length=2, max_length=100)
+    description: str = Field(default="", max_length=2000)
+
+
+class TDPlusProjectPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+    status: str | None = Field(default=None, max_length=24)
+
+
+class TDPlusAssetBody(BaseModel):
+    project_id: int | None = None
+    kind: str = Field(min_length=2, max_length=24)
+    title: str = Field(min_length=2, max_length=140)
+    content: str = Field(default="", max_length=2_400_000)
+    mime_type: str = Field(default="text/plain", max_length=120)
+    source_url: str = Field(default="", max_length=2000)
+    metadata: dict = Field(default_factory=dict)
+
+
+class TDPlusStudioGenerateBody(BaseModel):
+    project_id: int | None = None
+    kind: str = Field(min_length=3, max_length=20)
+    title: str = Field(default="", max_length=140)
+    prompt: str = Field(min_length=3, max_length=5000)
+    code_language: str = Field(default="html", max_length=20)
+
+
+class TDPlusResearchBody(BaseModel):
+    query: str = Field(min_length=5, max_length=1200)
+    project_id: int | None = None
+
+
+class TDPlusVoiceStartBody(BaseModel):
+    title: str = Field(default="Sesli oturum", max_length=120)
+
+
+class TDPlusVoiceRespondBody(BaseModel):
+    session_id: int
+    transcript: str = Field(min_length=1, max_length=12000)
+    force_search: bool = False
+
+
+class TDPlusCodeBody(BaseModel):
+    project_id: int | None = None
+    title: str = Field(default="Kod laboratuvarı çıktısı", max_length=140)
+    language: str = Field(default="html", max_length=24)
+    prompt: str = Field(min_length=3, max_length=5000)
+
+
+class TDPlusCodeCheckBody(BaseModel):
+    language: str = Field(default="html", max_length=24)
+    code: str = Field(min_length=1, max_length=250000)
+
+
+class TDPlusVaultUploadBody(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    title: str = Field(default="", max_length=140)
+    mime_type: str = Field(default="application/octet-stream", max_length=120)
+    content_base64: str = Field(min_length=4, max_length=12_000_000)
+
+
+class TDPlusVaultSearchBody(BaseModel):
+    query: str = Field(min_length=2, max_length=500)
+
+
+class TDPlusTeacherBody(BaseModel):
+    topic: str = Field(min_length=2, max_length=300)
+    level: str = Field(default="Başlangıç", max_length=80)
+    goal: str = Field(default="", max_length=1000)
+
+
+class TDPlusTeacherAnswerBody(BaseModel):
+    session_id: int
+    answer: str = Field(min_length=1, max_length=4000)
+
+
+class TDPlusDataAnalysisBody(BaseModel):
+    title: str = Field(default="Veri analizi", max_length=140)
+    csv_text: str = Field(min_length=5, max_length=2_000_000)
+    project_id: int | None = None
+
+
+class TDPlusScenarioBody(BaseModel):
+    scenario: str = Field(min_length=5, max_length=4000)
+    horizon: str = Field(default="Kısa, orta ve uzun vade", max_length=120)
+    project_id: int | None = None
+
+
+class TDPlusTaskBody(BaseModel):
+    project_id: int | None = None
+    title: str = Field(min_length=2, max_length=180)
+    description: str = Field(default="", max_length=2000)
+    status: str = Field(default="planned", max_length=24)
+    priority: str = Field(default="normal", max_length=24)
+    due_date: str | None = Field(default=None, max_length=10)
+
+
+class TDPlusTaskPlanBody(BaseModel):
+    project_id: int | None = None
+    goal: str = Field(min_length=5, max_length=3000)
+    deadline: str = Field(default="", max_length=80)
+
+
+class TDPlusControlDeleteBody(BaseModel):
+    scope: str = Field(min_length=3, max_length=24)
+    confirmation: str = Field(min_length=3, max_length=12)
+
+
+@app.get("/api/plus/projects")
+def td_plus_list_projects(request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT p.id,p.name,p.description,p.status,p.created_at,p.updated_at,
+                   (SELECT COUNT(*) FROM plus_assets a WHERE a.project_id=p.id) AS asset_count,
+                   (SELECT COUNT(*) FROM plus_tasks t WHERE t.project_id=p.id) AS task_count
+            FROM plus_projects p WHERE p.user_id=%s ORDER BY p.updated_at DESC LIMIT 100
+        """, (user["id"],)).fetchall()
+    return {"items": [dict(x) for x in rows]}
+
+
+@app.post("/api/plus/projects")
+def td_plus_create_project(body: TDPlusProjectBody, request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        row = conn.execute("""
+            INSERT INTO plus_projects(user_id,name,description)
+            VALUES(%s,%s,%s) RETURNING id,name,description,status,created_at,updated_at
+        """, (user["id"], clean_short_text(body.name, 100), body.description.strip())).fetchone()
+    return {"ok": True, "project": dict(row)}
+
+
+@app.patch("/api/plus/projects/{project_id}")
+def td_plus_update_project(project_id: int, body: TDPlusProjectPatch, request: Request):
+    user = _td_plus_user(request)
+    allowed_status = {"active", "paused", "completed", "archived"}
+    fields, values = [], []
+    if body.name is not None:
+        fields.append("name=%s")
+        values.append(clean_short_text(body.name, 100))
+    if body.description is not None:
+        fields.append("description=%s")
+        values.append(body.description.strip())
+    if body.status is not None:
+        if body.status not in allowed_status:
+            raise HTTPException(400, "Geçersiz proje durumu.")
+        fields.append("status=%s")
+        values.append(body.status)
+    if not fields:
+        raise HTTPException(400, "Güncellenecek alan gönderilmedi.")
+    values.extend([project_id, user["id"]])
+    with db() as conn:
+        row = conn.execute(
+            "UPDATE plus_projects SET " + ", ".join(fields) + ", updated_at=NOW() WHERE id=%s AND user_id=%s RETURNING id,name,description,status,updated_at",
+            values,
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Proje bulunamadı.")
+    return {"ok": True, "project": dict(row)}
+
+
+@app.delete("/api/plus/projects/{project_id}")
+def td_plus_delete_project(project_id: int, request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        result = conn.execute("DELETE FROM plus_projects WHERE id=%s AND user_id=%s", (project_id, user["id"]))
+        if result.rowcount == 0:
+            raise HTTPException(404, "Proje bulunamadı.")
+    return {"ok": True}
+
+
+@app.get("/api/plus/assets")
+def td_plus_list_assets(request: Request, project_id: int | None = None):
+    user = _td_plus_user(request)
+    with db() as conn:
+        if project_id is not None:
+            _td_plus_project_or_404(conn, project_id, user["id"])
+            rows = conn.execute("""
+                SELECT id,project_id,kind,title,mime_type,source_url,metadata,created_at,
+                       LEFT(content,1200) AS preview
+                FROM plus_assets WHERE user_id=%s AND project_id=%s
+                ORDER BY created_at DESC LIMIT 100
+            """, (user["id"], project_id)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT id,project_id,kind,title,mime_type,source_url,metadata,created_at,
+                       LEFT(content,1200) AS preview
+                FROM plus_assets WHERE user_id=%s ORDER BY created_at DESC LIMIT 100
+            """, (user["id"],)).fetchall()
+    return {"items": [dict(x) for x in rows]}
+
+
+@app.post("/api/plus/assets")
+def td_plus_create_asset(body: TDPlusAssetBody, request: Request):
+    user = _td_plus_user(request)
+    asset = _td_plus_save_asset(
+        user["id"], body.project_id, body.kind, body.title, body.content,
+        body.mime_type, body.source_url, body.metadata,
+    )
+    return {"ok": True, "asset": asset}
+
+
+@app.get("/api/plus/assets/{asset_id}")
+def td_plus_get_asset(asset_id: int, request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        row = conn.execute("""
+            SELECT id,project_id,kind,title,mime_type,content,source_url,metadata,created_at
+            FROM plus_assets WHERE id=%s AND user_id=%s
+        """, (asset_id, user["id"])).fetchone()
+    if not row:
+        raise HTTPException(404, "Varlık bulunamadı.")
+    return {"asset": _td_plus_asset_payload(row)}
+
+
+@app.post("/api/plus/assets/{asset_id}/share")
+def td_plus_share_asset(asset_id: int, request: Request, body: dict):
+    user = _td_plus_user(request)
+    target_project_id = body.get("target_project_id")
+    if not isinstance(target_project_id, int):
+        raise HTTPException(400, "Hedef proje seçilmedi.")
+    with db() as conn:
+        asset = conn.execute(
+            "SELECT * FROM plus_assets WHERE id=%s AND user_id=%s",
+            (asset_id, user["id"]),
+        ).fetchone()
+        if not asset:
+            raise HTTPException(404, "Kaynak varlık bulunamadı.")
+        _td_plus_project_or_404(conn, target_project_id, user["id"])
+        row = conn.execute("""
+            INSERT INTO plus_assets(user_id,project_id,kind,title,mime_type,content,source_url,metadata)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+            RETURNING id,project_id,kind,title,mime_type,source_url,metadata,created_at
+        """, (
+            user["id"], target_project_id, asset["kind"], asset["title"], asset["mime_type"],
+            asset["content"], asset["source_url"], json.dumps(asset["metadata"] or {}, ensure_ascii=False),
+        )).fetchone()
+    return {"ok": True, "asset": _td_plus_asset_payload(row)}
+
+
+@app.delete("/api/plus/assets/{asset_id}")
+def td_plus_delete_asset(asset_id: int, request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        result = conn.execute("DELETE FROM plus_assets WHERE id=%s AND user_id=%s", (asset_id, user["id"]))
+        if result.rowcount == 0:
+            raise HTTPException(404, "Varlık bulunamadı.")
+    return {"ok": True}
+
+
+@app.post("/api/plus/studio/generate")
+def td_plus_studio_generate(body: TDPlusStudioGenerateBody, request: Request):
+    user = _td_plus_user(request)
+    kind = body.kind.strip().lower()
+    if kind not in {"image", "song", "game", "code"}:
+        raise HTTPException(400, "Üretim türü image, song, game veya code olmalı.")
+    _title = clean_short_text(body.title, 140) or {
+        "image": "Yeni görsel", "song": "Yeni şarkı", "game": "Yeni oyun", "code": "Yeni kod"
+    }[kind]
+    try:
+        if kind == "image":
+            result = image(ImageBody(prompt=body.prompt))
+            content = result["image_data"]
+            mime = content.split(";", 1)[0].replace("data:", "") or "image/png"
+            metadata = {"model": result.get("model", ""), "generated_by": "Tekden Mega Stüdyo"}
+        elif kind == "song":
+            result = create_song(SongBody(prompt=body.prompt), request)
+            content = result.get("song", "")
+            mime = "text/markdown"
+            metadata = {"audio_generated": bool(result.get("audio_generated")), "note": result.get("note", "")}
+        elif kind == "game":
+            result = create_game(GameBody(prompt=body.prompt), request)
+            content = result.get("html", "")
+            mime = "text/html"
+            metadata = {"tier": result.get("tier", "plus"), "preview_sandbox": True}
+        else:
+            language = body.code_language.strip().lower()
+            if language not in {"html", "css", "javascript", "python", "typescript", "json"}:
+                language = "html"
+            instruction = (
+                "Sen Tekden AI Plus Mega Stüdyo'nun kıdemli yazılım ekibisin. Kullanıcı isteğine göre "
+                f"{language} dilinde eksiksiz ve açıklamalı bir çıktı üret. "
+                "Güvenlik açısından sırları veya API anahtarlarını koda gömme. "
+                "HTML ise tek dosyalı, duyarlı, erişilebilir bir sayfa üret. "
+                "Yalnızca kod döndür; Markdown kod çiti kullanma."
+            )
+            content = call_ollama(
+                [{"role": "system", "content": instruction}, {"role": "user", "content": body.prompt}],
+                OLLAMA_PRO_MODEL,
+            ).strip()
+            content = re.sub(r"^```[a-zA-Z0-9_-]*\s*|\s*```$", "", content, flags=re.I)
+            mime = "text/html" if language == "html" else ("text/css" if language == "css" else "text/plain")
+            metadata = {"language": language, "generated_by": "Tekden Mega Stüdyo"}
+            result = {"code": content, "language": language}
+        asset = _td_plus_save_asset(
+            user["id"], body.project_id, kind, _title, content, mime,
+            "", metadata,
+        )
+        return {"ok": True, "kind": kind, "asset": asset, "result": result}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502, "Mega Stüdyo üretimi tamamlanamadı: " + str(exc)[:240])
+
+
+@app.post("/api/plus/voice/sessions")
+def td_plus_voice_start(body: TDPlusVoiceStartBody, request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        row = conn.execute("""
+            INSERT INTO plus_voice_sessions(user_id,title)
+            VALUES(%s,%s) RETURNING id,title,created_at
+        """, (user["id"], clean_short_text(body.title, 120) or "Sesli oturum")).fetchone()
+    return {"ok": True, "session": dict(row), "mode": "browser_speech_turn_based"}
+
+
+@app.get("/api/plus/voice/sessions")
+def td_plus_voice_list(request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT id,chat_id,title,LEFT(transcript,900) AS transcript,created_at,updated_at
+            FROM plus_voice_sessions WHERE user_id=%s ORDER BY updated_at DESC LIMIT 30
+        """, (user["id"],)).fetchall()
+    return {"items": [dict(x) for x in rows]}
+
+
+@app.post("/api/plus/voice/respond")
+def td_plus_voice_respond(body: TDPlusVoiceRespondBody, request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        session = conn.execute(
+            "SELECT id,chat_id,transcript FROM plus_voice_sessions WHERE id=%s AND user_id=%s",
+            (body.session_id, user["id"]),
+        ).fetchone()
+    if not session:
+        raise HTTPException(404, "Sesli oturum bulunamadı.")
+    transcript = body.transcript.strip()
+    # Delegate to the existing chat engine so the same account history and search rules apply.
+    response = chat(
+        ChatBody(message=transcript, chat_id=str(session["chat_id"]) if session["chat_id"] else None,
+                 guest_history=[], force_search=body.force_search),
+        request,
+    )
+    combined = (session["transcript"] or "") + "\nKullanıcı: " + transcript + "\nTekden AI: " + response["answer"]
+    combined = combined[-30000:]
+    with db() as conn:
+        conn.execute("""
+            UPDATE plus_voice_sessions SET chat_id=%s,transcript=%s,updated_at=NOW()
+            WHERE id=%s AND user_id=%s
+        """, (response.get("chat_id"), combined, body.session_id, user["id"]))
+    return {
+        "ok": True, "answer": response["answer"], "chat_id": response.get("chat_id"),
+        "sources": response.get("sources", []), "search_attempted": response.get("search_attempted", False),
+    }
+
+
+@app.delete("/api/plus/voice/sessions/{session_id}")
+def td_plus_voice_delete(session_id: int, request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        result = conn.execute(
+            "DELETE FROM plus_voice_sessions WHERE id=%s AND user_id=%s", (session_id, user["id"])
+        )
+        if result.rowcount == 0:
+            raise HTTPException(404, "Sesli oturum bulunamadı.")
+    return {"ok": True}
+
+
+@app.post("/api/plus/research")
+def td_plus_deep_research(body: TDPlusResearchBody, request: Request):
+    user = _td_plus_user(request)
+    _td_plus_project_or_404_context = body.project_id
+    if body.project_id is not None:
+        with db() as conn:
+            _td_plus_project_or_404(conn, body.project_id, user["id"])
+    sources = pro_web_search(body.query.strip())
+    if not sources:
+        raise HTTPException(503, "Araştırma için şu anda erişilebilir web sonucu alınamadı. Arama sağlayıcısını ve Render dış ağ erişimini kontrol et.")
+    sources = sources[:18]
+    source_text = "\n\n".join(
+        f"[{i+1}] {x.get('title','Kaynak')}\nURL: {x.get('url','')}\nÖzet: {x.get('snippet','')[:1600]}"
+        for i, x in enumerate(sources)
+    )
+    system = (
+        "Sen Tekden AI Plus Derin Araştırma uzmanısın. Yalnızca verilen kaynaklardan desteklenen "
+        "iddiaları kesin bilgi olarak yaz. Kaynaklar arasında uyuşmazlık varsa açıkla. Her önemli "
+        "iddianın yanına [1], [2] gibi numaralar koy. Güncel olaylarda yayın tarihi ile olay tarihini "
+        "birbirine karıştırma. Bilinmeyen veya kaynakların cevaplamadığı noktaları belirt. Sonunda "
+        "yalnızca en önemli kaynakları içeren kısa ve tıklanabilir bir kaynakça başlığı oluştur."
+    )
+    answer = call_ollama(
+        [{"role": "system", "content": system + "\n\nARAŞTIRMA KAYNAKLARI:\n" + source_text},
+         {"role": "user", "content": body.query}],
+        OLLAMA_PRO_MODEL,
+    )
+    asset = None
+    if body.project_id is not None:
+        asset = _td_plus_save_asset(
+            user["id"], body.project_id, "research", "Araştırma: " + body.query[:90],
+            answer, "text/markdown", "", {"sources": sources[:12]},
+        )
+    return {"ok": True, "answer": answer, "sources": sources, "asset": asset}
+
+
+@app.post("/api/plus/code/generate")
+def td_plus_code_generate(body: TDPlusCodeBody, request: Request):
+    user = _td_plus_user(request)
+    if body.project_id is not None:
+        with db() as conn:
+            _td_plus_project_or_404(conn, body.project_id, user["id"])
+    language = body.language.strip().lower()
+    if language not in {"html", "css", "javascript", "python", "typescript", "json"}:
+        raise HTTPException(400, "Desteklenmeyen kod dili.")
+    system = (
+        "Sen güvenli bir yazılım geliştirme asistanısın. Kullanıcının tarifine göre eksiksiz kod üret. "
+        "Gizli anahtarları, parolaları veya gerçek kişisel verileri koda ekleme. Kullanıcı istemedikçe "
+        "mevcut projede gereksiz mimari değişiklik yapma. Kod çıktısında yalnızca kod ver; kod çiti "
+        "kullanma. HTML ise tek dosya ve tarayıcıda önizlenebilir olsun."
+    )
+    code = call_ollama(
+        [{"role": "system", "content": system + f"\nHedef dil: {language}."},
+         {"role": "user", "content": body.prompt}],
+        OLLAMA_PRO_MODEL,
+    ).strip()
+    code = re.sub(r"^```[a-zA-Z0-9_-]*\s*|\s*```$", "", code, flags=re.I)
+    mime = "text/html" if language == "html" else ("text/css" if language == "css" else "text/plain")
+    asset = _td_plus_save_asset(
+        user["id"], body.project_id, "code", body.title, code, mime, "",
+        {"language": language, "server_execution": False},
+    )
+    return {"ok": True, "code": code, "language": language, "asset": asset}
+
+
+@app.post("/api/plus/code/check")
+def td_plus_code_check(body: TDPlusCodeCheckBody, request: Request):
+    _td_plus_user(request)
+    language = body.language.strip().lower()
+    code = body.code
+    issues = []
+    if language == "python":
+        try:
+            _td_ast.parse(code)
+        except SyntaxError as exc:
+            issues.append({"line": exc.lineno, "column": exc.offset, "message": exc.msg})
+    elif language in {"json"}:
+        try:
+            json.loads(code)
+        except json.JSONDecodeError as exc:
+            issues.append({"line": exc.lineno, "column": exc.colno, "message": exc.msg})
+    elif language in {"javascript", "typescript"}:
+        # Lightweight lexical sanity check only; this does not execute code or replace a JS compiler.
+        pairs = {"(": ")", "[": "]", "{": "}"}
+        stack = []
+        quote_char = None
+        escaped = False
+        for index, ch in enumerate(code):
+            if quote_char:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == quote_char:
+                    quote_char = None
+                continue
+            if ch in ("'", '"', "`"):
+                quote_char = ch
+            elif ch in pairs:
+                stack.append((pairs[ch], index))
+            elif ch in (")", "]", "}"):
+                if not stack or stack[-1][0] != ch:
+                    issues.append({"line": code.count("\n", 0, index)+1, "message": "Eşleşmeyen kapatma parantezi: " + ch})
+                    break
+                stack.pop()
+        if stack:
+            index = stack[-1][1]
+            issues.append({"line": code.count("\n", 0, index)+1, "message": "Kapatılmamış parantez."})
+    elif language == "html":
+        if "<html" not in code.lower() and "<!doctype html" not in code.lower():
+            issues.append({"line": 1, "message": "HTML belgesinde <html> veya doctype bulunamadı."})
+        if code.lower().count("<script") != code.lower().count("</script>"):
+            issues.append({"line": 1, "message": "Script etiketleri eşleşmiyor."})
+    return {
+        "ok": not issues,
+        "mode": "static_check_only",
+        "message": "Temel statik kontrol tamamlandı; kod sunucuda çalıştırılmadı.",
+        "issues": issues,
+    }
+
+
+def _td_extract_document(filename: str, mime_type: str, raw: bytes) -> str:
+    suffix = _td_PurePosixPath(filename).suffix.lower()
+    if suffix in {".txt", ".md", ".csv", ".json", ".xml", ".html", ".py", ".js", ".css"}:
+        try:
+            return raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return raw.decode("latin-1", errors="replace")
+    if suffix in {".docx", ".pptx", ".xlsx"}:
+        try:
+            with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                names = zf.namelist()
+                texts = []
+                if suffix == ".docx":
+                    xml = zf.read("word/document.xml")
+                    root = _td_et.fromstring(xml)
+                    for node in root.iter():
+                        if node.tag.endswith("}t") and node.text:
+                            texts.append(node.text)
+                elif suffix == ".pptx":
+                    for name in sorted(n for n in names if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)):
+                        root = _td_et.fromstring(zf.read(name))
+                        slide_text = [n.text for n in root.iter() if n.tag.endswith("}t") and n.text]
+                        if slide_text:
+                            texts.append(" ".join(slide_text))
+                else:
+                    shared = []
+                    if "xl/sharedStrings.xml" in names:
+                        root = _td_et.fromstring(zf.read("xl/sharedStrings.xml"))
+                        for si in root:
+                            shared.append("".join(n.text or "" for n in si.iter() if n.tag.endswith("}t")))
+                    for name in sorted(n for n in names if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)):
+                        root = _td_et.fromstring(zf.read(name))
+                        for row in root.iter():
+                            if row.tag.endswith("}row"):
+                                vals = []
+                                for cell in row:
+                                    if not cell.tag.endswith("}c"):
+                                        continue
+                                    v = next((x.text for x in cell if x.tag.endswith("}v")), "") or ""
+                                    if cell.attrib.get("t") == "s":
+                                        try:
+                                            v = shared[int(v)]
+                                        except Exception:
+                                            pass
+                                    vals.append(v)
+                                texts.append(" | ".join(vals))
+                return "\n".join(texts)
+        except Exception as exc:
+            raise HTTPException(400, "Office dosyası okunamadı: " + str(exc)[:180])
+    if suffix == ".pdf" or mime_type == "application/pdf":
+        for module_name in ("pypdf", "PyPDF2"):
+            try:
+                module = __import__(module_name)
+                reader = module.PdfReader(io.BytesIO(raw))
+                return "\n".join(page.extract_text() or "" for page in reader.pages)
+            except ImportError:
+                continue
+            except Exception as exc:
+                raise HTTPException(400, "PDF metni çıkarılamadı: " + str(exc)[:180])
+        raise HTTPException(415, "PDF metin çıkarımı için pypdf veya PyPDF2 sunucu ortamında bulunmalı. requirements.txt değiştirilmedi.")
+    raise HTTPException(415, "Desteklenen dosyalar: PDF, DOCX, PPTX, XLSX, CSV, TXT, MD, JSON, HTML, PY, JS ve CSS.")
+
+
+@app.post("/api/plus/vault/upload")
+def td_plus_vault_upload(body: TDPlusVaultUploadBody, request: Request):
+    user = _td_plus_user(request)
+    try:
+        raw = base64.b64decode(body.content_base64, validate=True)
+    except Exception:
+        raise HTTPException(400, "Dosya verisi geçerli Base64 değil.")
+    if len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(413, "Bilgi Kasası için dosya sınırı 8 MB.")
+    extracted = _td_extract_document(body.filename, body.mime_type, raw).strip()
+    if not extracted:
+        raise HTTPException(422, "Dosyadan aranabilir metin çıkarılamadı.")
+    if len(extracted) > 300_000:
+        extracted = extracted[:300_000]
+    digest = hashlib.sha256(raw).hexdigest()
+    title = clean_short_text(body.title, 140) or clean_short_text(body.filename, 140)
+    with db() as conn:
+        try:
+            row = conn.execute("""
+                INSERT INTO plus_vault_documents(user_id,title,filename,mime_type,extracted_text,content_sha256,size_bytes)
+                VALUES(%s,%s,%s,%s,%s,%s,%s)
+                RETURNING id,title,filename,mime_type,size_bytes,created_at
+            """, (user["id"], title, body.filename, body.mime_type, extracted, digest, len(raw))).fetchone()
+        except psycopg.errors.UniqueViolation:
+            raise HTTPException(409, "Bu dosya daha önce Bilgi Kasası'na eklenmiş.")
+    return {"ok": True, "document": dict(row), "extracted_characters": len(extracted), "original_file_stored": False}
+
+
+@app.get("/api/plus/vault")
+def td_plus_vault_list(request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT id,title,filename,mime_type,size_bytes,created_at
+            FROM plus_vault_documents WHERE user_id=%s ORDER BY created_at DESC LIMIT 100
+        """, (user["id"],)).fetchall()
+    return {"items": [dict(x) for x in rows]}
+
+
+@app.post("/api/plus/vault/search")
+def td_plus_vault_search(body: TDPlusVaultSearchBody, request: Request):
+    user = _td_plus_user(request)
+    terms = [x for x in re.findall(r"[\wğüşöçıİĞÜŞÖÇ]+", body.query.casefold()) if len(x) > 2][:12]
+    if not terms:
+        raise HTTPException(400, "Arama için daha açıklayıcı bir kelime yaz.")
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT id,title,filename,extracted_text,created_at
+            FROM plus_vault_documents WHERE user_id=%s
+            ORDER BY created_at DESC LIMIT 100
+        """, (user["id"],)).fetchall()
+    results = []
+    for row in rows:
+        text_value = row["extracted_text"] or ""
+        lower = text_value.casefold()
+        score = sum(lower.count(term) for term in terms)
+        if score:
+            first = min((lower.find(term) for term in terms if lower.find(term) >= 0), default=0)
+            excerpt = text_value[max(0, first-260):min(len(text_value), first+700)]
+            results.append({"id": row["id"], "title": row["title"], "filename": row["filename"],
+                            "score": score, "excerpt": excerpt, "created_at": row["created_at"]})
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return {"items": results[:20], "method": "keyword_search", "query_terms": terms}
+
+
+@app.get("/api/plus/vault/{document_id}")
+def td_plus_vault_get(document_id: int, request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        row = conn.execute("""
+            SELECT id,title,filename,mime_type,extracted_text,size_bytes,created_at
+            FROM plus_vault_documents WHERE id=%s AND user_id=%s
+        """, (document_id, user["id"])).fetchone()
+    if not row:
+        raise HTTPException(404, "Belge bulunamadı.")
+    return {"document": dict(row)}
+
+
+@app.delete("/api/plus/vault/{document_id}")
+def td_plus_vault_delete(document_id: int, request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        result = conn.execute(
+            "DELETE FROM plus_vault_documents WHERE id=%s AND user_id=%s",
+            (document_id, user["id"]),
+        )
+        if result.rowcount == 0:
+            raise HTTPException(404, "Belge bulunamadı.")
+    return {"ok": True}
+
+
+@app.post("/api/plus/teacher/lesson")
+def td_plus_teacher_lesson(body: TDPlusTeacherBody, request: Request):
+    user = _td_plus_user(request)
+    system = (
+        "Sen Tekden AI Plus Akıllı Öğretmenisin. Konuyu kullanıcının seviyesine göre öğret. "
+        "Önce kısa ve anlaşılır ders anlatımı, sonra örnek, ardından 5 soruluk özgün mini test hazırla. "
+        "Soruları ve cevap anahtarını JSON biçiminde ver: {lesson, examples, quiz:[{question,options:[...],answer,explanation}]}. "
+        "Yanıtın JSON dışında metin içermesin. Kullanıcıyı küçümseme; sadece cevabı vermek yerine öğret."
+    )
+    raw = call_ollama(
+        [{"role": "system", "content": system},
+         {"role": "user", "content": f"Konu: {body.topic}\nSeviye: {body.level}\nHedef: {body.goal}"}],
+        OLLAMA_PRO_MODEL,
+    )
+    match = re.search(r"\{.*\}", raw, re.S)
+    try:
+        payload = json.loads(match.group(0) if match else raw)
+        lesson = str(payload.get("lesson", "")).strip()
+        examples = payload.get("examples", [])
+        quiz = payload.get("quiz", [])
+        if not lesson or not isinstance(quiz, list) or not quiz:
+            raise ValueError("Eksik öğretim alanları")
+    except Exception:
+        raise HTTPException(502, "Öğretmen motoru beklenen ders/test biçimini oluşturamadı. Tekrar deneyebilirsin.")
+    with db() as conn:
+        row = conn.execute("""
+            INSERT INTO plus_learning_sessions(user_id,topic,level,lesson,quiz)
+            VALUES(%s,%s,%s,%s,%s::jsonb)
+            RETURNING id,topic,level,created_at
+        """, (user["id"], body.topic, body.level, lesson, json.dumps(quiz, ensure_ascii=False))).fetchone()
+    return {"ok": True, "session": dict(row), "lesson": lesson, "examples": examples, "quiz": quiz}
+
+
+@app.post("/api/plus/teacher/answer")
+def td_plus_teacher_answer(body: TDPlusTeacherAnswerBody, request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        row = conn.execute("""
+            SELECT id,topic,lesson,quiz,progress,score FROM plus_learning_sessions
+            WHERE id=%s AND user_id=%s
+        """, (body.session_id, user["id"])).fetchone()
+    if not row:
+        raise HTTPException(404, "Ders oturumu bulunamadı.")
+    quiz = row["quiz"] if isinstance(row["quiz"], list) else json.loads(row["quiz"] or "[]")
+    progress = row["progress"] if isinstance(row["progress"], list) else json.loads(row["progress"] or "[]")
+    check_prompt = (
+        "Aşağıdaki öğrencinin yanıtını sorunun doğru cevabı ve açıklamasıyla karşılaştır. "
+        "Kısmi doğruya hakkını ver. JSON döndür: {correct:boolean, score:0-100, feedback:string, correction:string}. "
+        f"\nSoru ve cevap anahtarı: {json.dumps(quiz, ensure_ascii=False)}"
+        f"\nÖğrencinin yanıtı: {body.answer}"
+    )
+    raw = call_ollama(
+        [{"role": "system", "content": "Sen adil, destekleyici ve açıklayıcı bir öğretmensin. Yanıtı JSON ver."},
+         {"role": "user", "content": check_prompt}],
+        OLLAMA_PRO_MODEL,
+    )
+    match = re.search(r"\{.*\}", raw, re.S)
+    try:
+        feedback = json.loads(match.group(0) if match else raw)
+    except Exception:
+        feedback = {"correct": False, "score": 0, "feedback": raw[:1500], "correction": ""}
+    progress.append({"answer": body.answer, "feedback": feedback, "created_at": datetime.now(timezone.utc).isoformat()})
+    score_values = [max(0, min(100, int(x.get("feedback", {}).get("score", 0)))) for x in progress]
+    average = round(sum(score_values) / len(score_values)) if score_values else 0
+    with db() as conn:
+        conn.execute("""
+            UPDATE plus_learning_sessions SET progress=%s::jsonb,score=%s,updated_at=NOW()
+            WHERE id=%s AND user_id=%s
+        """, (json.dumps(progress[-100:], ensure_ascii=False), average, body.session_id, user["id"]))
+    return {"ok": True, "feedback": feedback, "average_score": average, "answered": len(progress)}
+
+
+@app.get("/api/plus/teacher/progress")
+def td_plus_teacher_progress(request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT id,topic,level,score,created_at,updated_at,
+                   jsonb_array_length(progress) AS answered
+            FROM plus_learning_sessions WHERE user_id=%s ORDER BY updated_at DESC LIMIT 30
+        """, (user["id"],)).fetchall()
+    return {"items": [dict(x) for x in rows]}
+
+
+@app.post("/api/plus/data/analyze")
+def td_plus_data_analyze(body: TDPlusDataAnalysisBody, request: Request):
+    user = _td_plus_user(request)
+    if body.project_id is not None:
+        with db() as conn:
+            _td_plus_project_or_404(conn, body.project_id, user["id"])
+    try:
+        reader = _td_csv.DictReader(io.StringIO(body.csv_text))
+        headers = reader.fieldnames or []
+        if not headers or len(headers) > 100:
+            raise ValueError("Sütun başlıkları eksik veya çok fazla.")
+        rows = []
+        for row in reader:
+            rows.append(row)
+            if len(rows) > 20000:
+                raise ValueError("En fazla 20.000 satır analiz edilebilir.")
+        if not rows:
+            raise ValueError("CSV dosyasında veri satırı bulunamadı.")
+        summary = {"rows": len(rows), "columns": headers, "missing": {}, "numeric": {}, "categories": {}}
+        for header in headers:
+            values = [(r.get(header) or "").strip() for r in rows]
+            summary["missing"][header] = sum(1 for x in values if not x)
+            numbers = []
+            for value in values:
+                if not value:
+                    continue
+                try:
+                    numbers.append(float(value.replace(",", ".")))
+                except Exception:
+                    pass
+            if len(numbers) >= max(3, int(len(rows) * 0.5)):
+                summary["numeric"][header] = {
+                    "count": len(numbers), "min": min(numbers), "max": max(numbers),
+                    "mean": round(_td_statistics.mean(numbers), 4),
+                    "median": round(_td_statistics.median(numbers), 4),
+                    "stdev": round(_td_statistics.stdev(numbers), 4) if len(numbers) > 1 else 0,
+                }
+            else:
+                counts = {}
+                for value in values:
+                    if value:
+                        counts[value] = counts.get(value, 0) + 1
+                summary["categories"][header] = sorted(
+                    [{"value": k, "count": v} for k, v in counts.items()],
+                    key=lambda x: x["count"], reverse=True,
+                )[:8]
+    except Exception as exc:
+        raise HTTPException(400, "CSV analiz edilemedi: " + str(exc)[:220])
+    insights = call_ollama(
+        [{"role": "system", "content": "Sen veri analistisin. Yalnızca verilen istatistiklerden desteklenen sonuçları çıkar. Korelasyonu nedensellik diye sunma. Veri kalitesi sorunlarını ve belirsizlikleri belirt. Türkçe, uygulanabilir kısa rapor hazırla."},
+         {"role": "user", "content": "Veri özeti:\n" + json.dumps(summary, ensure_ascii=False)}],
+        OLLAMA_PRO_MODEL,
+    )
+    asset = _td_plus_save_asset(
+        user["id"], body.project_id, "data", body.title, insights, "text/markdown", "",
+        {"statistics": summary},
+    )
+    return {"ok": True, "summary": summary, "insights": insights, "asset": asset}
+
+
+class TDPlusDataFileBody(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    title: str = Field(default="Excel veri analizi", max_length=140)
+    content_base64: str = Field(min_length=4, max_length=12_000_000)
+    project_id: int | None = None
+
+
+def _td_xlsx_to_csv(raw: bytes) -> str:
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        names = zf.namelist()
+        sheets = sorted(n for n in names if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n))
+        if not sheets:
+            raise ValueError("Excel dosyasında çalışma sayfası bulunamadı.")
+        shared = []
+        if "xl/sharedStrings.xml" in names:
+            root = _td_et.fromstring(zf.read("xl/sharedStrings.xml"))
+            for si in root:
+                shared.append("".join(n.text or "" for n in si.iter() if n.tag.endswith("}t")))
+        root = _td_et.fromstring(zf.read(sheets[0]))
+        output = io.StringIO()
+        writer = _td_csv.writer(output)
+        for row in root.iter():
+            if not row.tag.endswith("}row"):
+                continue
+            cells = {}
+            max_col = -1
+            for cell in row:
+                if not cell.tag.endswith("}c"):
+                    continue
+                ref = cell.attrib.get("r", "")
+                letters = re.match(r"([A-Z]+)", ref.upper())
+                if not letters:
+                    continue
+                col = 0
+                for char in letters.group(1):
+                    col = col * 26 + ord(char) - 64
+                col -= 1
+                value_node = next((n for n in cell if n.tag.endswith("}v")), None)
+                inline_node = next((n for n in cell if n.tag.endswith("}is")), None)
+                value = value_node.text if value_node is not None and value_node.text else ""
+                if cell.attrib.get("t") == "s" and value:
+                    try:
+                        value = shared[int(value)]
+                    except Exception:
+                        pass
+                elif inline_node is not None:
+                    value = "".join(n.text or "" for n in inline_node.iter() if n.tag.endswith("}t"))
+                cells[col] = value
+                max_col = max(max_col, col)
+            if max_col >= 0:
+                writer.writerow([cells.get(i, "") for i in range(max_col + 1)])
+        return output.getvalue()
+
+
+@app.post("/api/plus/data/analyze-file")
+def td_plus_data_analyze_file(body: TDPlusDataFileBody, request: Request):
+    _td_plus_user(request)
+    try:
+        raw = base64.b64decode(body.content_base64, validate=True)
+    except Exception:
+        raise HTTPException(400, "Dosya verisi geçerli Base64 değil.")
+    if len(raw) > 8 * 1024 * 1024:
+        raise HTTPException(413, "Veri analizi dosyası 8 MB sınırını aşıyor.")
+    suffix = _td_PurePosixPath(body.filename).suffix.lower()
+    if suffix == ".csv":
+        csv_text = raw.decode("utf-8-sig", errors="replace")
+    elif suffix == ".xlsx":
+        try:
+            csv_text = _td_xlsx_to_csv(raw)
+        except Exception as exc:
+            raise HTTPException(400, "Excel dosyası okunamadı: " + str(exc)[:180])
+    else:
+        raise HTTPException(415, "Doğrudan veri analizi için CSV veya XLSX dosyası seç.")
+    if not csv_text.strip():
+        raise HTTPException(422, "Dosyada analiz edilecek veri bulunamadı.")
+    return td_plus_data_analyze(
+        TDPlusDataAnalysisBody(
+            title=body.title or body.filename,
+            csv_text=csv_text,
+            project_id=body.project_id,
+        ),
+        request,
+    )
+
+
+
+@app.post("/api/plus/scenarios")
+def td_plus_scenarios(body: TDPlusScenarioBody, request: Request):
+    user = _td_plus_user(request)
+    if body.project_id is not None:
+        with db() as conn:
+            _td_plus_project_or_404(conn, body.project_id, user["id"])
+    system = (
+        "Senaryo analisti olarak bir durum için üç ayrı gelecek senaryosu üret: olumlu, temel ve olumsuz. "
+        "Her biri için tetikleyiciler, erken uyarı işaretleri, fırsatlar, riskler ve uygulanabilir önlemler ver. "
+        "Olasılık yüzdeleri istenmedikçe uydurma. Tahminleri kesin gerçek gibi sunma; varsayımları açıkla."
+    )
+    result = call_ollama(
+        [{"role": "system", "content": system},
+         {"role": "user", "content": f"Senaryo: {body.scenario}\nZaman ufku: {body.horizon}"}],
+        OLLAMA_PRO_MODEL,
+    )
+    asset = None
+    if body.project_id is not None:
+        asset = _td_plus_save_asset(
+            user["id"], body.project_id, "scenario", "Senaryo analizi", result,
+            "text/markdown", "", {"horizon": body.horizon},
+        )
+    return {"ok": True, "analysis": result, "asset": asset}
+
+
+@app.get("/api/plus/tasks")
+def td_plus_list_tasks(request: Request, project_id: int | None = None, status: str = ""):
+    user = _td_plus_user(request)
+    with db() as conn:
+        if project_id is not None:
+            _td_plus_project_or_404(conn, project_id, user["id"])
+            rows = conn.execute("""
+                SELECT id,project_id,title,description,status,priority,due_date,created_at,updated_at
+                FROM plus_tasks WHERE user_id=%s AND project_id=%s ORDER BY
+                CASE status WHEN 'in_progress' THEN 0 WHEN 'planned' THEN 1 ELSE 2 END,
+                due_date NULLS LAST, created_at DESC LIMIT 300
+            """, (user["id"], project_id)).fetchall()
+        elif status:
+            rows = conn.execute("""
+                SELECT id,project_id,title,description,status,priority,due_date,created_at,updated_at
+                FROM plus_tasks WHERE user_id=%s AND status=%s ORDER BY due_date NULLS LAST,created_at DESC LIMIT 300
+            """, (user["id"], status)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT id,project_id,title,description,status,priority,due_date,created_at,updated_at
+                FROM plus_tasks WHERE user_id=%s ORDER BY due_date NULLS LAST,created_at DESC LIMIT 300
+            """, (user["id"],)).fetchall()
+    return {"items": [dict(x) for x in rows]}
+
+
+@app.post("/api/plus/tasks")
+def td_plus_create_task(body: TDPlusTaskBody, request: Request):
+    user = _td_plus_user(request)
+    if body.status not in {"planned", "in_progress", "done", "blocked"}:
+        raise HTTPException(400, "Görev durumu geçersiz.")
+    if body.priority not in {"low", "normal", "high", "urgent"}:
+        raise HTTPException(400, "Görev önceliği geçersiz.")
+    with db() as conn:
+        _td_plus_project_or_404(conn, body.project_id, user["id"])
+        row = conn.execute("""
+            INSERT INTO plus_tasks(user_id,project_id,title,description,status,priority,due_date)
+            VALUES(%s,%s,%s,%s,%s,%s,%s)
+            RETURNING id,project_id,title,description,status,priority,due_date,created_at
+        """, (user["id"], body.project_id, body.title.strip(), body.description.strip(),
+              body.status, body.priority, body.due_date or None)).fetchone()
+    return {"ok": True, "task": dict(row)}
+
+
+@app.patch("/api/plus/tasks/{task_id}")
+def td_plus_update_task(task_id: int, request: Request, body: dict):
+    user = _td_plus_user(request)
+    allowed = {"status", "priority", "title", "description", "due_date"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        raise HTTPException(400, "Güncellenecek alan gönderilmedi.")
+    if "status" in updates and updates["status"] not in {"planned", "in_progress", "done", "blocked"}:
+        raise HTTPException(400, "Görev durumu geçersiz.")
+    if "priority" in updates and updates["priority"] not in {"low", "normal", "high", "urgent"}:
+        raise HTTPException(400, "Öncelik geçersiz.")
+    columns, values = [], []
+    for key, value in updates.items():
+        columns.append(key + "=%s")
+        values.append(value)
+    values.extend([task_id, user["id"]])
+    with db() as conn:
+        row = conn.execute(
+            "UPDATE plus_tasks SET " + ",".join(columns) + ",updated_at=NOW() WHERE id=%s AND user_id=%s RETURNING id,status,priority,title,description,due_date",
+            values,
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Görev bulunamadı.")
+    return {"ok": True, "task": dict(row)}
+
+
+@app.delete("/api/plus/tasks/{task_id}")
+def td_plus_delete_task(task_id: int, request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        result = conn.execute("DELETE FROM plus_tasks WHERE id=%s AND user_id=%s", (task_id, user["id"]))
+        if result.rowcount == 0:
+            raise HTTPException(404, "Görev bulunamadı.")
+    return {"ok": True}
+
+
+@app.post("/api/plus/tasks/plan")
+def td_plus_plan_tasks(body: TDPlusTaskPlanBody, request: Request):
+    user = _td_plus_user(request)
+    if body.project_id is not None:
+        with db() as conn:
+            _td_plus_project_or_404(conn, body.project_id, user["id"])
+    system = (
+        "Proje yöneticisi olarak hedefi uygulanabilir görevlere ayır. Yalnızca JSON döndür: "
+        '{"tasks":[{"title":"...","description":"...","priority":"low|normal|high|urgent","status":"planned"}]}. '
+        "En fazla 15 görev yaz. Bağımlılıkları açıklamalarda belirt. Bilinmeyen kesin tarih uydurma."
+    )
+    raw = call_ollama(
+        [{"role": "system", "content": system},
+         {"role": "user", "content": f"Hedef: {body.goal}\nSon tarih bilgisi: {body.deadline or 'Belirtilmedi'}"}],
+        OLLAMA_PRO_MODEL,
+    )
+    match = re.search(r"\{.*\}", raw, re.S)
+    try:
+        parsed = json.loads(match.group(0) if match else raw)
+        items = parsed.get("tasks", [])
+        if not isinstance(items, list) or not items:
+            raise ValueError("Görev listesi boş")
+    except Exception:
+        raise HTTPException(502, "Proje planı JSON biçiminde oluşturulamadı.")
+    created = []
+    for item in items[:15]:
+        title = clean_short_text(str(item.get("title", "")), 180)
+        if not title:
+            continue
+        priority = item.get("priority", "normal")
+        if priority not in {"low", "normal", "high", "urgent"}:
+            priority = "normal"
+        with db() as conn:
+            row = conn.execute("""
+                INSERT INTO plus_tasks(user_id,project_id,title,description,status,priority)
+                VALUES(%s,%s,%s,%s,'planned',%s)
+                RETURNING id,project_id,title,description,status,priority,due_date
+            """, (user["id"], body.project_id, title, str(item.get("description", ""))[:2000], priority)).fetchone()
+            created.append(dict(row))
+    return {"ok": True, "created": created, "count": len(created)}
+
+
+@app.get("/api/plus/control/summary")
+def td_plus_control_summary(request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        projects = conn.execute("SELECT COUNT(*) AS n FROM plus_projects WHERE user_id=%s", (user["id"],)).fetchone()["n"]
+        assets = conn.execute("SELECT COUNT(*) AS n FROM plus_assets WHERE user_id=%s", (user["id"],)).fetchone()["n"]
+        docs = conn.execute("SELECT COUNT(*) AS n FROM plus_vault_documents WHERE user_id=%s", (user["id"],)).fetchone()["n"]
+        tasks = conn.execute("SELECT COUNT(*) AS n FROM plus_tasks WHERE user_id=%s", (user["id"],)).fetchone()["n"]
+        sessions = conn.execute("SELECT COUNT(*) AS n FROM plus_voice_sessions WHERE user_id=%s", (user["id"],)).fetchone()["n"]
+        learning = conn.execute("SELECT COUNT(*) AS n FROM plus_learning_sessions WHERE user_id=%s", (user["id"],)).fetchone()["n"]
+    return {
+        "user": {"username": user["username"], "plan": user["plan"]},
+        "counts": {"projects": projects, "assets": assets, "documents": docs, "tasks": tasks,
+                   "voice_sessions": sessions, "learning_sessions": learning},
+        "privacy_export": "/api/privacy/export",
+        "data_storage": "Plus çalışma alanında oluşturulan içerikler hesabına bağlı PostgreSQL tablolarında saklanır.",
+        "file_storage_note": "Bilgi Kasası özgün dosyaları değil, metin çıkarımı ve dosya özet metaverisini saklar.",
+    }
+
+
+@app.get("/api/plus/control/export")
+def td_plus_control_export(request: Request):
+    user = _td_plus_user(request)
+    with db() as conn:
+        projects = conn.execute("SELECT * FROM plus_projects WHERE user_id=%s ORDER BY id", (user["id"],)).fetchall()
+        assets = conn.execute("SELECT id,project_id,kind,title,mime_type,content,source_url,metadata,created_at FROM plus_assets WHERE user_id=%s ORDER BY id", (user["id"],)).fetchall()
+        docs = conn.execute("SELECT id,title,filename,mime_type,extracted_text,content_sha256,size_bytes,created_at FROM plus_vault_documents WHERE user_id=%s ORDER BY id", (user["id"],)).fetchall()
+        tasks = conn.execute("SELECT * FROM plus_tasks WHERE user_id=%s ORDER BY id", (user["id"],)).fetchall()
+        sessions = conn.execute("SELECT id,chat_id,title,transcript,created_at,updated_at FROM plus_voice_sessions WHERE user_id=%s ORDER BY id", (user["id"],)).fetchall()
+        learning = conn.execute("SELECT id,topic,level,lesson,quiz,progress,score,created_at,updated_at FROM plus_learning_sessions WHERE user_id=%s ORDER BY id", (user["id"],)).fetchall()
+    def clean_rows(rows):
+        result = []
+        for row in rows:
+            item = dict(row)
+            for key, value in list(item.items()):
+                if hasattr(value, "isoformat"):
+                    item[key] = value.isoformat()
+            result.append(item)
+        return result
+    return JSONResponse({
+        "app": APP_NAME, "exported_at": datetime.now(timezone.utc).isoformat(),
+        "account": {"id": user["id"], "username": user["username"]},
+        "projects": clean_rows(projects), "assets": clean_rows(assets),
+        "vault_documents": clean_rows(docs), "tasks": clean_rows(tasks),
+        "voice_sessions": clean_rows(sessions), "learning_sessions": clean_rows(learning),
+    }, headers={"Content-Disposition": 'attachment; filename="tekden-ai-plus-workspace.json"'})
+
+
+@app.post("/api/plus/control/delete")
+def td_plus_control_delete(body: TDPlusControlDeleteBody, request: Request):
+    user = _td_plus_user(request)
+    if body.confirmation != "SİL":
+        raise HTTPException(400, "Silme işlemi için onay alanına SİL yazmalısın.")
+    table_map = {
+        "projects": "plus_projects",
+        "assets": "plus_assets",
+        "vault": "plus_vault_documents",
+        "tasks": "plus_tasks",
+        "voice": "plus_voice_sessions",
+        "learning": "plus_learning_sessions",
+    }
+    if body.scope == "all":
+        tables = list(table_map.values())
+    elif body.scope in table_map:
+        tables = [table_map[body.scope]]
+    else:
+        raise HTTPException(400, "Silme kapsamı geçersiz.")
+    with db() as conn:
+        for table in tables:
+            conn.execute(f"DELETE FROM {table} WHERE user_id=%s", (user["id"],))
+    return {"ok": True, "deleted_scopes": body.scope}
+
+
+TD_PLUS_WORKSPACE_HTML = r"""<!doctype html>
+<html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow"><title>Tekden AI Plus · Çalışma Alanı</title>
+<style>
+:root{color-scheme:light;--bg:#f3f7fd;--panel:#fff;--ink:#132b49;--muted:#64758b;--line:#dce6f2;--blue:#1767d5;--cyan:#28c4e7;--soft:#edf5ff;--shadow:0 14px 40px rgba(20,55,95,.08)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,Segoe UI,sans-serif}
+header{position:sticky;top:0;z-index:10;background:rgba(255,255,255,.94);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.head{max-width:1240px;margin:auto;padding:13px 20px;display:flex;align-items:center;gap:13px}.logo{width:42px;height:42px;border-radius:13px;background:linear-gradient(135deg,#0c3c82,#2bc3e4);display:grid;place-items:center;color:white;font-weight:900;font-size:19px}.brand{font-weight:850;letter-spacing:-.3px}.brand small{display:block;color:var(--muted);font-size:11px;font-weight:600;letter-spacing:.4px}.head a{margin-left:auto;color:var(--blue);text-decoration:none;font-weight:750}
+.shell{max-width:1240px;margin:24px auto;padding:0 20px;display:grid;grid-template-columns:235px minmax(0,1fr);gap:20px}
+aside,.panel,.hero,.stat{background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow)}
+aside{padding:12px;height:max-content;position:sticky;top:82px}
+nav{display:grid;gap:5px}nav button{border:0;background:transparent;text-align:left;padding:10px 12px;border-radius:11px;color:var(--ink);font:650 13px system-ui;cursor:pointer}nav button.active,nav button:hover{background:var(--soft);color:var(--blue)}
+main{min-width:0}.hero{padding:22px 24px;background:linear-gradient(125deg,#102f62,#1767bf 65%,#23a9cb);color:white;margin-bottom:16px}.hero h1{font-size:26px;margin:0 0 5px}.hero p{margin:0;color:#dcedff}.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:16px}.stat{padding:13px 15px}.stat b{font-size:23px;display:block}.stat small{color:var(--muted)}
+.panel{display:none;padding:19px;margin-bottom:15px}.panel.active{display:block}.panel h2{margin:0 0 5px;font-size:20px}.sub{color:var(--muted);margin:0 0 15px;font-size:13px}
+.grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+label{display:block;font-size:12px;font-weight:750;color:#4d617a;margin:10px 0 5px}
+input,textarea,select{width:100%;padding:11px 12px;border:1px solid var(--line);border-radius:11px;background:white;color:var(--ink);font:14px system-ui;outline:none}
+textarea{min-height:108px;resize:vertical}input:focus,textarea:focus,select:focus{border-color:#70a9ef;box-shadow:0 0 0 3px #1767d51a}
+button.primary,.btn{border:0;border-radius:11px;background:var(--blue);color:white;padding:10px 14px;font:750 13px system-ui;cursor:pointer;margin-top:10px}
+button.secondary{border:1px solid var(--line);border-radius:11px;background:#f7faff;color:var(--ink);padding:9px 12px;font:700 13px system-ui;cursor:pointer}
+button:disabled{opacity:.55;cursor:wait}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.result{white-space:pre-wrap;overflow-wrap:anywhere;background:#f7faff;border:1px solid var(--line);padding:13px;border-radius:12px;margin-top:12px;min-height:42px;max-height:430px;overflow:auto;font-size:13px}
+.cards{display:grid;gap:9px;margin-top:12px}.item{border:1px solid var(--line);border-radius:12px;padding:12px;background:#fff}.item strong{display:block}.item small{color:var(--muted)}
+.badge{display:inline-block;background:#eaf4ff;color:#1a5eab;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:800}
+.notice{color:var(--muted);font-size:12px;margin-top:9px}.danger{color:#a02b2b}
+iframe.preview{display:block;width:100%;height:430px;background:white;border:1px solid var(--line);border-radius:12px;margin-top:12px}
+audio{width:100%;margin-top:10px}details{margin-top:8px}a{color:var(--blue)}
+@media(max-width:850px){.shell{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}aside{position:static;overflow:auto}nav{display:flex;overflow-x:auto}nav button{white-space:nowrap}.grid3{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){.head{padding:10px 12px}.shell{padding:0 11px;margin:12px auto}.hero{padding:17px}.hero h1{font-size:22px}.panel{padding:14px}.grid2,.grid3{grid-template-columns:1fr}.stats{gap:7px}.stat{padding:10px}.stat b{font-size:20px}textarea{min-height:92px}}
+</style></head><body>
+<header><div class="head"><div class="logo">T</div><div class="brand">Tekden AI Plus<small>GELİŞMİŞ ÇALIŞMA ALANI</small></div><a href="/">Sohbete dön ↗</a></div></header>
+<div class="shell">
+<aside><nav id="tdNav">
+<button class="active" data-tab="home">⌂ Genel bakış</button>
+<button data-tab="studio">✦ Mega Stüdyo</button>
+<button data-tab="voice">🎙 Sesli Asistan</button>
+<button data-tab="research">⌕ Derin Araştırma</button>
+<button data-tab="code">⌘ Kod Laboratuvarı</button>
+<button data-tab="vault">▣ Bilgi Kasası</button>
+<button data-tab="teacher">▤ Akıllı Öğretmen</button>
+<button data-tab="data">▥ Veri Analizi</button>
+<button data-tab="scenario">◇ Senaryo Simülatörü</button>
+<button data-tab="tasks">☷ Proje Yöneticisi</button>
+<button data-tab="control">⚙ Kontrol Merkezi</button>
+</nav></aside>
+<main>
+<section class="hero"><h1>Fikirlerini projelere dönüştür.</h1><p>Üret, araştır, öğren, analiz et ve bütün proje çıktılarını tek çalışma alanında sakla.</p></section>
+<div class="stats">
+<div class="stat"><b id="statProjects">—</b><small>Projeler</small></div><div class="stat"><b id="statAssets">—</b><small>Üretilen varlıklar</small></div>
+<div class="stat"><b id="statDocs">—</b><small>Bilgi Kasası belgeleri</small></div><div class="stat"><b id="statTasks">—</b><small>Görevler</small></div>
+</div>
+
+<section class="panel active" id="tab-home"><h2>Çalışma alanın</h2><p class="sub">Projeler, ortak medya varlıkları ve Plus araçlarının durumu.</p>
+<div class="grid2"><div><label>Yeni proje adı</label><input id="newProjectName" placeholder="Örn. Tekden mobil uygulaması"></div><div><label>Açıklama</label><input id="newProjectDesc" placeholder="Projenin amacı"></div></div>
+<button class="primary" id="createProject">＋ Proje oluştur</button><div class="cards" id="projectList"></div>
+<div class="notice">Bir projede kaydettiğin görsel, şarkı, oyun veya kodu başka bir projeye aktarabilirsin.</div>
+</section>
+
+<section class="panel" id="tab-studio"><h2>Tekden Mega Stüdyo</h2><p class="sub">Şarkı, görsel, oyun ve kodu aynı projede üret. Varlıklarını diğer projelerde yeniden kullan.</p>
+<label>Çalışılacak proje</label><select id="studioProject"></select>
+<div class="grid2"><div><label>Üretim türü</label><select id="studioKind"><option value="image">Görsel</option><option value="song">Şarkı taslağı</option><option value="game">Oynanabilir oyun</option><option value="code">Kod</option></select></div><div><label>Başlık</label><input id="studioTitle" placeholder="Ürüne bir ad ver"></div></div>
+<label>Ne üretelim?</label><textarea id="studioPrompt" placeholder="İsteğini ayrıntılı anlat..."></textarea>
+<label>Kod dili (kod üretiminde)</label><select id="studioLanguage"><option>html</option><option>javascript</option><option>css</option><option>python</option><option>json</option></select>
+<button class="primary" id="studioGenerate">✦ Üret ve projeye kaydet</button><div class="result" id="studioResult">Üretim sonucu burada görünecek.</div>
+<div class="row"><label style="flex:1">Proje varlıkları</label><button class="secondary" id="refreshAssets">Yenile</button></div><div class="cards" id="assetList"></div>
+<div class="grid2"><div><label>Paylaşılacak varlık numarası</label><input id="shareAssetId" type="number" placeholder="Varlık ID"></div><div><label>Hedef proje</label><select id="shareProject"></select></div></div>
+<button class="secondary" id="shareAsset">Varlığı diğer projeye kopyala</button>
+</section>
+
+<section class="panel" id="tab-voice"><h2>Gerçek Zamanlı Sesli Asistan</h2><p class="sub">Tarayıcı destekliyorsa konuşmanı yazıya çevirir; Tekden AI yanıtını seslendirir ve oturum bağlamını saklar.</p>
+<div class="row"><button class="primary" id="voiceStart">🎙 Yeni sesli oturum</button><button class="secondary" id="voiceMic">Mikrofonla dikte et</button><button class="secondary" id="voiceStop">Dikteyi durdur</button></div>
+<label>Konuşman / mesajın</label><textarea id="voiceText" placeholder="Mikrofondan konuş veya buraya yaz..."></textarea>
+<div class="row"><label style="flex:1"><input id="voiceSearch" type="checkbox" style="width:auto"> Yanıt öncesi web araması yap</label><button class="primary" id="voiceSend">Gönder ve sesli yanıt al</button></div>
+<label>Tekden AI yanıtı</label><div class="result" id="voiceAnswer">Sesli oturum başlatınca burada yanıt alırsın.</div>
+<div class="row"><button class="secondary" id="voiceSpeak">🔊 Yanıtı yeniden oku</button><button class="secondary" id="voiceMute">Sesi durdur</button></div>
+<div class="notice" id="voiceStatus">Ses tanıma desteği tarayıcıya ve mikrofon iznine bağlıdır. Bu sürüm konuşma turlarını işler; kesintisiz tam çift yönlü ses akışı değildir.</div>
+</section>
+
+<section class="panel" id="tab-research"><h2>Derin Araştırma</h2><p class="sub">Birden fazla arama açısı, kaynak kıyaslaması, çelişki ve kısa kaynakça.</p>
+<label>Araştırma konusu</label><textarea id="researchQuery" placeholder="Güncel ve kaynaklı olarak araştırılacak konuyu yaz..."></textarea>
+<label>Sonucu kaydetmek istediğin proje</label><select id="researchProject"></select>
+<button class="primary" id="researchRun">⌕ Araştırmayı başlat</button><div class="result" id="researchResult"></div><div class="cards" id="researchSources"></div>
+</section>
+
+<section class="panel" id="tab-code"><h2>Canlı Kod Laboratuvarı</h2><p class="sub">Kod üret, statik kontrol yap ve HTML çıktısını izole tarayıcı önizlemesinde görüntüle.</p>
+<div class="grid2"><div><label>Hedef dil</label><select id="codeLanguage"><option>html</option><option>javascript</option><option>css</option><option>python</option><option>json</option></select></div><div><label>Proje</label><select id="codeProject"></select></div></div>
+<label>İstek</label><textarea id="codePrompt" placeholder="Nasıl bir uygulama veya kod istiyorsun?"></textarea>
+<button class="primary" id="codeGenerate">Kod oluştur</button>
+<label>Üretilen kod</label><textarea id="codeOutput" style="min-height:260px;font-family:ui-monospace,monospace" placeholder="Kod burada..."></textarea>
+<div class="row"><button class="secondary" id="codeCheck">Statik kontrol</button><button class="secondary" id="codePreview">HTML önizlemesi</button><button class="secondary" id="codeSave">Projeye kaydet</button></div>
+<div class="result" id="codeStatus"></div><iframe class="preview" id="codeFrame" sandbox="allow-scripts" title="İzole HTML önizlemesi"></iframe>
+<div class="notice">Önizleme izole iframe içinde çalışır. Kod sunucuda yürütülmez. Statik kontrol bir tam derleyici veya güvenlik denetimi değildir.</div>
+</section>
+
+<section class="panel" id="tab-vault"><h2>Kişisel Bilgi Kasası</h2><p class="sub">Belgelerinden metin çıkarılır; özgün dosyanın kendisi saklanmaz. Belge içeriği yalnızca kendi hesabında aranır.</p>
+<label>PDF, DOCX, PPTX, XLSX, CSV veya metin dosyası</label><input type="file" id="vaultFile" accept=".pdf,.docx,.pptx,.xlsx,.csv,.txt,.md,.json,.html,.py,.js,.css">
+<button class="primary" id="vaultUpload">Dosyayı Bilgi Kasası'na ekle</button>
+<label>Belgelerde ara</label><div class="row"><input id="vaultQuery" placeholder="Bir kavram veya anahtar kelime..." style="flex:1"><button class="secondary" id="vaultSearch">Ara</button></div>
+<div class="cards" id="vaultResults"></div><div class="cards" id="vaultList"></div>
+<div class="notice">PDF metin çıkarımı sunucuda pypdf veya PyPDF2 kurulu olmasını gerektirir. Şu an requirements.txt değiştirilmez.</div>
+</section>
+
+<section class="panel" id="tab-teacher"><h2>Akıllı Öğretmen</h2><p class="sub">Seviyene uygun anlatım ve sorular hazırlar; yanıtlarından öğrenme ilerlemesi çıkarır.</p>
+<div class="grid2"><div><label>Konu</label><input id="teacherTopic" placeholder="Örn. Python döngüleri"></div><div><label>Seviye</label><select id="teacherLevel"><option>Başlangıç</option><option>Orta</option><option>İleri</option></select></div></div>
+<label>Öğrenme hedefi</label><input id="teacherGoal" placeholder="Örn. Konuyu anlayıp küçük bir proje yazmak">
+<button class="primary" id="teacherStart">Ders ve mini test oluştur</button><div class="result" id="teacherLesson"></div><div class="cards" id="teacherQuiz"></div>
+<div class="grid2"><div><label>Test sorusuna yanıtın</label><textarea id="teacherAnswer" placeholder="Yanıtını yaz..."></textarea></div><div><label>Ders oturum numarası</label><input id="teacherSession" type="number" placeholder="Oluşturulan ders numarası"></div></div>
+<button class="secondary" id="teacherSubmit">Yanıtımı değerlendir</button><div class="result" id="teacherFeedback"></div><div class="cards" id="teacherProgress"></div>
+</section>
+
+<section class="panel" id="tab-data"><h2>Veri Analiz Merkezi</h2><p class="sub">CSV sütunlarını, eksik verileri, sayısal dağılımları ve kategorileri analiz eder.</p>
+<label>Analiz başlığı</label><input id="dataTitle" value="Veri analizi">
+<label>CSV içeriği</label><textarea id="dataCsv" style="min-height:210px;font-family:ui-monospace,monospace" placeholder="urun,satis,bolge&#10;A,120,İstanbul&#10;B,90,Ankara"></textarea>
+<label>CSV veya XLSX dosyasından doğrudan analiz</label><input type="file" id="dataFile" accept=".csv,.xlsx">
+<button class="secondary" id="dataFileRun">Seçilen dosyayı analiz et</button>
+<label>Proje</label><select id="dataProject"></select>
+<button class="primary" id="dataRun">Veriyi analiz et</button><div class="result" id="dataResult"></div>
+</section>
+
+<section class="panel" id="tab-scenario"><h2>Senaryo Simülatörü</h2><p class="sub">Olumlu, temel ve olumsuz senaryoları; varsayımları, tetikleyicileri ve riskleri karşılaştır.</p>
+<label>İncelenecek durum</label><textarea id="scenarioText" placeholder="Bir proje, fikir, iş planı veya varsayımı anlat..."></textarea>
+<div class="grid2"><div><label>Zaman ufku</label><select id="scenarioHorizon"><option>Kısa, orta ve uzun vade</option><option>1-3 ay</option><option>6-12 ay</option><option>1-3 yıl</option></select></div><div><label>Proje</label><select id="scenarioProject"></select></div></div>
+<button class="primary" id="scenarioRun">Senaryoları karşılaştır</button><div class="result" id="scenarioResult"></div>
+</section>
+
+<section class="panel" id="tab-tasks"><h2>Proje Yöneticisi</h2><p class="sub">Bir hedefi görev listesine dönüştür veya görevlerini kendin yönet.</p>
+<label>Hedef ve kapsam</label><textarea id="taskGoal" placeholder="Örn. Bir web uygulamasını yayınlamak için gereken işleri sırala..."></textarea>
+<div class="grid2"><div><label>Proje</label><select id="taskProject"></select></div><div><label>Son tarih (metin)</label><input id="taskDeadline" placeholder="Örn. Aralık sonu"></div></div>
+<button class="primary" id="taskPlan">Yapay zekâ ile görev planı oluştur</button>
+<div class="grid2"><div><label>Yeni görev</label><input id="taskTitle" placeholder="Görev adı"></div><div><label>Öncelik</label><select id="taskPriority"><option>normal</option><option>low</option><option>high</option><option>urgent</option></select></div></div>
+<button class="secondary" id="taskCreate">＋ Görev ekle</button><div class="cards" id="taskList"></div>
+</section>
+
+<section class="panel" id="tab-control"><h2>Kullanıcı Kontrol Merkezi</h2><p class="sub">Plus çalışma alanındaki bilgilerini görüntüle, dışa aktar veya seçtiğin kapsamda sil.</p>
+<div class="result" id="controlSummary">Hesap bilgileri yükleniyor...</div>
+<div class="row"><a class="btn" href="/api/plus/control/export">Plus çalışma alanını dışa aktar</a><a href="/api/privacy/export">Hesap verilerimi dışa aktar</a></div>
+<label>Silinecek veri grubu</label><select id="controlScope"><option value="vault">Bilgi Kasası belgeleri</option><option value="assets">Üretilen varlıklar</option><option value="projects">Projeler ve bağlı varlıklar/görevler</option><option value="tasks">Görevler</option><option value="voice">Sesli oturumlar</option><option value="learning">Öğrenme oturumları</option><option value="all">Tüm Plus çalışma alanı verileri</option></select>
+<label>Onay için SİL yaz</label><input id="controlConfirm" placeholder="SİL">
+<button class="primary danger" id="controlDelete" style="background:#a52e38">Seçilen verileri sil</button><div class="result" id="controlStatus"></div>
+</section>
+<div class="notice">Tekden AI Plus çalışma alanı. Özellikler sağlayıcı yapılandırmasına ve kullanım limitlerine bağlıdır.</div>
+</main></div>
+
+<script>
+const $=id=>document.getElementById(id);
+let projects=[],activeVoiceSession=null,lastVoiceAnswer='',lastCodeAsset=null,teacherQuizCache=[];
+async function api(url,options={}){
+ const response=await fetch(url,{credentials:'same-origin',...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});
+ const data=await response.json().catch(()=>({}));
+ if(!response.ok)throw new Error(data.detail||('HTTP '+response.status));
+ return data;
+}
+function show(id){document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));$('tab-'+id).classList.add('active');document.querySelectorAll('#tdNav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===id));}
+document.querySelectorAll('#tdNav button').forEach(b=>b.addEventListener('click',()=>show(b.dataset.tab)));
+function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function optionList(select,items,placeholder='Proje seç'){
+ const old=select.value;select.innerHTML='<option value="">'+esc(placeholder)+'</option>'+items.map(p=>'<option value="'+p.id+'">'+esc(p.name)+'</option>').join('');
+ if(items.some(p=>String(p.id)===old))select.value=old;
+}
+async function loadProjects(){
+ const d=await api('/api/plus/projects');projects=d.items||[];
+ $('projectList').innerHTML=projects.map(p=>`<div class="item"><strong>${esc(p.name)} <span class="badge">${esc(p.status)}</span></strong><small>${esc(p.description||'Açıklama yok')} · ${p.asset_count} varlık · ${p.task_count} görev</small></div>`).join('')||'<div class="item">Henüz proje yok.</div>';
+ ['studioProject','shareProject','researchProject','codeProject','dataProject','scenarioProject','taskProject'].forEach(id=>optionList($(id),projects));
+}
+async function loadSummary(){
+ const d=await api('/api/plus/control/summary');const c=d.counts;
+ $('statProjects').textContent=c.projects;$('statAssets').textContent=c.assets;$('statDocs').textContent=c.documents;$('statTasks').textContent=c.tasks;
+ $('controlSummary').textContent=JSON.stringify(d,null,2);
+}
+async function loadAssets(){
+ const id=$('studioProject').value;const d=await api('/api/plus/assets'+(id?'?project_id='+encodeURIComponent(id):''));
+ $('assetList').innerHTML=(d.items||[]).map(a=>`<div class="item"><strong>#${a.id} · ${esc(a.title)} <span class="badge">${esc(a.kind)}</span></strong><small>${esc(a.mime_type)} · ${a.source_url?'<a href="'+esc(a.source_url)+'" target="_blank" rel="noopener">Kaynağı aç</a>':'Kayıtlı içerik'}</small><div class="row"><button class="secondary" onclick="openAsset(${a.id})">Aç / gör</button><button class="secondary" onclick="copyAssetId(${a.id})">ID kopyala</button></div></div>`).join('')||'<div class="item">Bu proje için varlık yok.</div>';
+}
+window.openAsset=async id=>{try{const d=await api('/api/plus/assets/'+id);const a=d.asset;if(a.kind==='image'&&a.content.startsWith('data:image/'))$('studioResult').innerHTML='<img alt="Kaydedilen görsel" style="max-width:100%;border-radius:12px" src="'+a.content+'">';else $('studioResult').textContent=a.content||a.source_url||'İçerik boş.';}catch(e){alert(e.message)}};
+window.copyAssetId=id=>{navigator.clipboard?.writeText(String(id));$('shareAssetId').value=id;};
+$('createProject').onclick=async()=>{try{const d=await api('/api/plus/projects',{method:'POST',body:JSON.stringify({name:$('newProjectName').value,description:$('newProjectDesc').value})});$('newProjectName').value='';$('newProjectDesc').value='';await loadProjects();await loadSummary();alert('Proje oluşturuldu: #'+d.project.id);}catch(e){alert(e.message)}};
+$('studioProject').onchange=loadAssets;$('refreshAssets').onclick=loadAssets;
+$('studioGenerate').onclick=async()=>{
+ const btn=$('studioGenerate');btn.disabled=true;$('studioResult').textContent='Üretim başlatıldı...';
+ try{
+  const d=await api('/api/plus/studio/generate',{method:'POST',body:JSON.stringify({project_id:$('studioProject').value?Number($('studioProject').value):null,kind:$('studioKind').value,title:$('studioTitle').value,prompt:$('studioPrompt').value,code_language:$('studioLanguage').value})});
+  const r=d.result||{};$('studioResult').textContent=d.kind==='image'?'Görsel üretildi ve projeye kaydedildi.':(r.song||r.title||r.code||r.html||JSON.stringify(r));
+  if(d.kind==='image'&&r.image_data)$('studioResult').innerHTML='<div>Görsel kaydedildi.</div><img style="max-width:100%;border-radius:12px;margin-top:10px" alt="Üretilen görsel" src="'+r.image_data+'">';
+  await loadAssets();await loadSummary();
+ }catch(e){$('studioResult').textContent='Hata: '+e.message;}finally{btn.disabled=false;}
+};
+$('shareAsset').onclick=async()=>{try{const id=Number($('shareAssetId').value),target=Number($('shareProject').value);if(!id||!target)throw Error('Varlık ve hedef proje seç.');await api('/api/plus/assets/'+id+'/share',{method:'POST',body:JSON.stringify({target_project_id:target})});$('studioResult').textContent='Varlık hedef projeye kopyalandı.';await loadAssets();await loadSummary();}catch(e){alert(e.message)}};
+
+async function startVoiceSession(){try{const d=await api('/api/plus/voice/sessions',{method:'POST',body:JSON.stringify({title:'Tekden AI sesli oturumu'})});activeVoiceSession=d.session.id;$('voiceStatus').textContent='Sesli oturum hazır. Oturum #'+activeVoiceSession;return true;}catch(e){$('voiceStatus').textContent=e.message;return false;}}
+$('voiceStart').onclick=startVoiceSession;
+let recognition=null;
+$('voiceMic').onclick=()=>{
+ const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+ if(!SR){$('voiceStatus').textContent='Bu tarayıcı konuşma tanımayı desteklemiyor. Mesaj kutusuna yazarak devam edebilirsin.';return;}
+ try{
+  recognition=new SR();recognition.lang='tr-TR';recognition.interimResults=true;recognition.continuous=false;
+  recognition.onresult=e=>{let finalText='';for(let i=e.resultIndex;i<e.results.length;i++)finalText+=e.results[i][0].transcript;$('voiceText').value=finalText;};
+  recognition.onerror=e=>$('voiceStatus').textContent='Mikrofon durumu: '+e.error;
+  recognition.onend=()=>$('voiceStatus').textContent='Dikte tamamlandı.';
+  recognition.start();$('voiceStatus').textContent='Dinliyorum...';
+ }catch(e){$('voiceStatus').textContent=e.message;}
+};
+$('voiceStop').onclick=()=>{recognition?.stop();};
+$('voiceSend').onclick=async()=>{
+ const transcript=$('voiceText').value.trim();if(!transcript){$('voiceStatus').textContent='Önce konuş veya mesaj yaz.';return;}
+ if(!activeVoiceSession){const started=await startVoiceSession();if(!started||!activeVoiceSession)return;}
+ $('voiceSend').disabled=true;$('voiceAnswer').textContent='Yanıt hazırlanıyor...';
+ try{
+  const d=await api('/api/plus/voice/respond',{method:'POST',body:JSON.stringify({session_id:activeVoiceSession,transcript,force_search:$('voiceSearch').checked})});
+  lastVoiceAnswer=d.answer;$('voiceAnswer').textContent=d.answer;$('voiceText').value='';
+  if(d.sources?.length)$('voiceAnswer').textContent+='\n\nKaynakça:\n'+d.sources.slice(0,5).map((s,i)=>(i+1)+'. '+s.title+' — '+s.url).join('\n');
+  speakAnswer();
+ }catch(e){$('voiceAnswer').textContent='Hata: '+e.message;}finally{$('voiceSend').disabled=false;}
+};
+function speakAnswer(){if(!('speechSynthesis'in window)||!lastVoiceAnswer)return;window.speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(lastVoiceAnswer);u.lang='tr-TR';window.speechSynthesis.speak(u);}
+$('voiceSpeak').onclick=speakAnswer;$('voiceMute').onclick=()=>window.speechSynthesis?.cancel();
+
+$('researchRun').onclick=async()=>{const b=$('researchRun');b.disabled=true;$('researchResult').textContent='Kaynaklar taranıyor ve karşılaştırılıyor...';try{
+ const d=await api('/api/plus/research',{method:'POST',body:JSON.stringify({query:$('researchQuery').value,project_id:$('researchProject').value?Number($('researchProject').value):null})});
+ $('researchResult').textContent=d.answer;$('researchSources').innerHTML=(d.sources||[]).map((s,i)=>`<div class="item"><strong>[${i+1}] <a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title)}</a></strong><small>${esc(s.snippet||'')}</small></div>`).join('');
+ await loadAssets();await loadSummary();
+ }catch(e){$('researchResult').textContent='Araştırma hatası: '+e.message;}finally{b.disabled=false;}};
+
+$('codeGenerate').onclick=async()=>{const b=$('codeGenerate');b.disabled=true;$('codeStatus').textContent='Kod oluşturuluyor...';try{
+ const d=await api('/api/plus/code/generate',{method:'POST',body:JSON.stringify({project_id:$('codeProject').value?Number($('codeProject').value):null,title:'Kod Laboratuvarı çıktısı',language:$('codeLanguage').value,prompt:$('codePrompt').value})});
+ $('codeOutput').value=d.code;lastCodeAsset=d.asset?.id;$('codeStatus').textContent='Kod üretildi. Varlık #'+lastCodeAsset+' olarak kaydedildi.';await loadAssets();await loadSummary();
+ }catch(e){$('codeStatus').textContent=e.message;}finally{b.disabled=false;}};
+$('codeCheck').onclick=async()=>{try{const d=await api('/api/plus/code/check',{method:'POST',body:JSON.stringify({language:$('codeLanguage').value,code:$('codeOutput').value})});$('codeStatus').textContent=d.message+'\n'+(d.issues||[]).map(x=>'Satır '+(x.line||'?')+': '+x.message).join('\n')+(d.ok?'\nTemel kontroller geçti.':'');}catch(e){$('codeStatus').textContent=e.message;}};
+$('codePreview').onclick=()=>{
+ const code=$('codeOutput').value;if($('codeLanguage').value!=='html'){$('codeStatus').textContent='Canlı önizleme yalnızca HTML çıktısı için etkin.';return;}
+ const csp='<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: blob:; style-src \'unsafe-inline\'; script-src \'unsafe-inline\'; font-src data:">';
+ const full=code.includes('<head')?code.replace('<head>','<head>'+csp):'<!doctype html><html><head>'+csp+'</head><body>'+code+'</body></html>';
+ $('codeFrame').srcdoc=full;$('codeStatus').textContent='HTML izole iframe önizlemesine yüklendi. Sunucuda çalıştırılmadı.';
+};
+$('codeSave').onclick=async()=>{try{const d=await api('/api/plus/assets',{method:'POST',body:JSON.stringify({project_id:$('codeProject').value?Number($('codeProject').value):null,kind:'code',title:'Kod Laboratuvarı çıktısı',content:$('codeOutput').value,mime_type:$('codeLanguage').value==='html'?'text/html':'text/plain',metadata:{language:$('codeLanguage').value}})});$('codeStatus').textContent='Projeye kaydedildi. Varlık #'+d.asset.id;await loadAssets();await loadSummary();}catch(e){$('codeStatus').textContent=e.message;}};
+
+$('vaultUpload').onclick=async()=>{const f=$('vaultFile').files[0];if(!f){alert('Önce dosya seç.');return;}if(f.size>8*1024*1024){alert('Dosya 8 MB sınırını aşıyor.');return;}const b=$('vaultUpload');b.disabled=true;$('vaultResults').textContent='Dosya metni çıkarılıyor...';try{
+ const bytes=new Uint8Array(await f.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));
+ const d=await api('/api/plus/vault/upload',{method:'POST',body:JSON.stringify({filename:f.name,title:f.name,mime_type:f.type||'application/octet-stream',content_base64:btoa(binary)})});
+ $('vaultResults').textContent='Belge eklendi: '+d.document.title+' · '+d.extracted_characters+' karakter';await loadVault();await loadSummary();
+ }catch(e){$('vaultResults').textContent='Yükleme hatası: '+e.message;}finally{b.disabled=false;}};
+async function loadVault(){try{const d=await api('/api/plus/vault');$('vaultList').innerHTML=(d.items||[]).map(x=>`<div class="item"><strong>#${x.id} · ${esc(x.title)}</strong><small>${esc(x.filename)} · ${x.size_bytes} bayt</small><button class="secondary" onclick="deleteVault(${x.id})">Sil</button></div>`).join('')||'<div class="item">Henüz belge yok.</div>';}catch(e){$('vaultList').textContent=e.message;}}
+window.deleteVault=async id=>{if(!confirm('Bu belgeyi Bilgi Kasası’ndan silmek istiyor musun?'))return;try{await api('/api/plus/vault/'+id,{method:'DELETE'});await loadVault();await loadSummary();}catch(e){alert(e.message)}};
+$('vaultSearch').onclick=async()=>{try{const d=await api('/api/plus/vault/search',{method:'POST',body:JSON.stringify({query:$('vaultQuery').value})});$('vaultResults').innerHTML=(d.items||[]).map(x=>`<div class="item"><strong>${esc(x.title)} <span class="badge">eşleşme ${x.score}</span></strong><small>${esc(x.filename)}</small><p>${esc(x.excerpt)}</p></div>`).join('')||'Eşleşme bulunamadı.';}catch(e){$('vaultResults').textContent=e.message;}};
+
+$('teacherStart').onclick=async()=>{const b=$('teacherStart');b.disabled=true;$('teacherLesson').textContent='Ders hazırlanıyor...';try{
+ const d=await api('/api/plus/teacher/lesson',{method:'POST',body:JSON.stringify({topic:$('teacherTopic').value,level:$('teacherLevel').value,goal:$('teacherGoal').value})});
+ $('teacherSession').value=d.session.id;$('teacherLesson').textContent=d.lesson+'\n\nÖrnekler:\n'+JSON.stringify(d.examples,null,2);
+ teacherQuizCache=d.quiz||[];$('teacherQuiz').innerHTML=teacherQuizCache.map((q,i)=>`<div class="item"><strong>${i+1}. ${esc(q.question)}</strong><small>${(q.options||[]).map(esc).join(' · ')}</small><div class="notice">Yanıtını yukarıdaki kutuya yazıp değerlendir.</div></div>`).join('');
+ await loadTeacherProgress();
+ }catch(e){$('teacherLesson').textContent=e.message;}finally{b.disabled=false;}};
+$('teacherSubmit').onclick=async()=>{try{const d=await api('/api/plus/teacher/answer',{method:'POST',body:JSON.stringify({session_id:Number($('teacherSession').value),answer:$('teacherAnswer').value})});$('teacherFeedback').textContent=JSON.stringify(d.feedback,null,2)+'\nOrtalama puan: '+d.average_score+' · Yanıtlanan: '+d.answered;$('teacherAnswer').value='';await loadTeacherProgress();}catch(e){$('teacherFeedback').textContent=e.message;}};
+async function loadTeacherProgress(){try{const d=await api('/api/plus/teacher/progress');$('teacherProgress').innerHTML=(d.items||[]).map(x=>`<div class="item"><strong>${esc(x.topic)}</strong><small>${esc(x.level)} · ortalama ${x.score}/100 · ${x.answered} yanıt</small></div>`).join('')||'Henüz öğrenme kaydı yok.';}catch(e){}}
+
+$('dataFileRun').onclick=async()=>{const f=$('dataFile').files[0];if(!f){alert('CSV veya XLSX dosyası seç.');return;}if(f.size>8*1024*1024){alert('Dosya 8 MB sınırını aşıyor.');return;}const btn=$('dataFileRun');btn.disabled=true;$('dataResult').textContent='Dosya okunuyor ve analiz ediliyor...';try{const bytes=new Uint8Array(await f.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));const d=await api('/api/plus/data/analyze-file',{method:'POST',body:JSON.stringify({filename:f.name,title:$('dataTitle').value||f.name,content_base64:btoa(binary),project_id:$('dataProject').value?Number($('dataProject').value):null})});$('dataResult').textContent='İstatistik özeti:\n'+JSON.stringify(d.summary,null,2)+'\n\nAnalist yorumu:\n'+d.insights;await loadAssets();await loadSummary();}catch(e){$('dataResult').textContent=e.message;}finally{btn.disabled=false;}};
+$('dataRun').onclick=async()=>{const b=$('dataRun');b.disabled=true;$('dataResult').textContent='Tablo istatistikleri hesaplanıyor...';try{
+ const d=await api('/api/plus/data/analyze',{method:'POST',body:JSON.stringify({title:$('dataTitle').value,csv_text:$('dataCsv').value,project_id:$('dataProject').value?Number($('dataProject').value):null})});
+ $('dataResult').textContent='İstatistik özeti:\n'+JSON.stringify(d.summary,null,2)+'\n\nAnalist yorumu:\n'+d.insights;await loadAssets();await loadSummary();
+ }catch(e){$('dataResult').textContent=e.message;}finally{b.disabled=false;}};
+
+$('scenarioRun').onclick=async()=>{const b=$('scenarioRun');b.disabled=true;$('scenarioResult').textContent='Senaryolar oluşturuluyor...';try{
+ const d=await api('/api/plus/scenarios',{method:'POST',body:JSON.stringify({scenario:$('scenarioText').value,horizon:$('scenarioHorizon').value,project_id:$('scenarioProject').value?Number($('scenarioProject').value):null})});
+ $('scenarioResult').textContent=d.analysis;await loadAssets();await loadSummary();
+ }catch(e){$('scenarioResult').textContent=e.message;}finally{b.disabled=false;}};
+
+$('taskPlan').onclick=async()=>{const b=$('taskPlan');b.disabled=true;$('taskList').textContent='Görev planı oluşturuluyor...';try{
+ const d=await api('/api/plus/tasks/plan',{method:'POST',body:JSON.stringify({goal:$('taskGoal').value,deadline:$('taskDeadline').value,project_id:$('taskProject').value?Number($('taskProject').value):null})});
+ $('taskList').textContent=d.count+' görev oluşturuldu.';await loadTasks();await loadSummary();
+ }catch(e){$('taskList').textContent=e.message;}finally{b.disabled=false;}};
+$('taskCreate').onclick=async()=>{try{await api('/api/plus/tasks',{method:'POST',body:JSON.stringify({title:$('taskTitle').value,priority:$('taskPriority').value,project_id:$('taskProject').value?Number($('taskProject').value):null})});$('taskTitle').value='';await loadTasks();await loadSummary();}catch(e){alert(e.message)}};
+async function loadTasks(){try{const d=await api('/api/plus/tasks');$('taskList').innerHTML=(d.items||[]).map(t=>`<div class="item"><strong>${esc(t.title)} <span class="badge">${esc(t.status)}</span></strong><small>${esc(t.priority)} · ${t.due_date||'Tarih yok'} · Proje #${t.project_id||'—'}</small><div class="row"><button class="secondary" onclick="taskState(${t.id},'in_progress')">Başlat</button><button class="secondary" onclick="taskState(${t.id},'done')">Tamamlandı</button><button class="secondary" onclick="taskDelete(${t.id})">Sil</button></div></div>`).join('')||'<div class="item">Henüz görev yok.</div>';}catch(e){$('taskList').textContent=e.message;}}
+window.taskState=async(id,status)=>{try{await api('/api/plus/tasks/'+id,{method:'PATCH',body:JSON.stringify({status})});await loadTasks();await loadSummary();}catch(e){alert(e.message)}};
+window.taskDelete=async id=>{if(!confirm('Görevi silmek istiyor musun?'))return;try{await api('/api/plus/tasks/'+id,{method:'DELETE'});await loadTasks();await loadSummary();}catch(e){alert(e.message)}};
+
+$('controlDelete').onclick=async()=>{const scope=$('controlScope').value,confirmation=$('controlConfirm').value;if(confirmation!=='SİL'){alert('Onay için SİL yaz.');return;}if(!confirm('Seçilen Plus verileri kalıcı olarak silinecek. Devam edilsin mi?'))return;try{const d=await api('/api/plus/control/delete',{method:'POST',body:JSON.stringify({scope,confirmation})});$('controlStatus').textContent='Silme tamamlandı: '+d.deleted_scopes;$('controlConfirm').value='';await loadProjects();await loadSummary();await loadAssets();await loadTasks();await loadVault();}catch(e){$('controlStatus').textContent=e.message;}};
+
+(async()=>{try{await loadProjects();await loadSummary();await loadAssets();await loadTasks();await loadVault();await loadTeacherProgress();}catch(e){document.body.insertAdjacentHTML('afterbegin','<div style="padding:15px;background:#fee;color:#900">Çalışma alanı yüklenemedi: '+esc(e.message)+'</div>');}})();
+</script></body></html>"""
+
+
+@app.get("/plus-workspace", response_class=HTMLResponse)
+@app.get("/plus", response_class=HTMLResponse, include_in_schema=False)
+def td_plus_workspace_page(request: Request):
+    _td_plus_user(request)
+    return HTMLResponse(
+        TD_PLUS_WORKSPACE_HTML,
+        headers={"Cache-Control": "no-store", "X-Tekden-Plus-Workspace": "additive-v1"},
+    )
+
+
+
+
+@app.middleware("http")
+async def td_plus_workspace_discovery_link(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path != "/" or response.status_code != 200:
+        return response
+    content_type = response.headers.get("content-type", "")
+    body = getattr(response, "body", None)
+    if body is None or "text/html" not in content_type:
+        return response
+    script = r"""<script id="td-plus-workspace-discovery">
+(async()=>{try{const r=await fetch('/api/me',{credentials:'same-origin'});if(!r.ok)return;const d=await r.json();if(!d.user||String(d.user.plan||'').toLowerCase()!=='plus')return;
+const style='display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 11px;border:1px solid #b9d8fa;border-radius:11px;background:#eff7ff;color:#155db1;text-decoration:none;font:700 12px system-ui;';
+const menu=document.getElementById('mobileToolsMenu');if(menu&&!document.getElementById('tdPlusWorkspaceMenuLink')){const a=document.createElement('a');a.id='tdPlusWorkspaceMenuLink';a.href='/plus-workspace';a.textContent='✦ Plus Çalışma Alanı';a.style.cssText=style+'width:100%;margin-top:7px;';menu.appendChild(a);}
+const top=document.querySelector('.top');if(top&&!document.getElementById('tdPlusWorkspaceTopLink')){const a=document.createElement('a');a.id='tdPlusWorkspaceTopLink';a.href='/plus-workspace';a.textContent='✦ Plus Alanı';a.style.cssText=style+'margin-left:8px;white-space:nowrap;';top.appendChild(a);}
+}catch(e){}})();
+</script>"""
+    body = body.replace(b"</body>", script.encode("utf-8") + b"</body>", 1)
+    headers = dict(response.headers)
+    headers.pop("content-length", None)
+    headers.pop("content-encoding", None)
+    headers.pop("etag", None)
+    return Response(content=body, status_code=response.status_code, headers=headers)
+
+
