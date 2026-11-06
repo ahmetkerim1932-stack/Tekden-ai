@@ -6537,7 +6537,9 @@ HTML = r"""<!doctype html>
 @media(max-width:720px){#tkFloatingLinks{display:none!important}}
 </style></head><body>
 <div class="layout"><aside class="sidebar"><div class="brand">Tekden <span>AI</span></div>
-<div class="sideactions"><button id="mobileSidebarClose" class="secondary" type="button" style="display:none">✕ Menüyü kapat</button><button id="newChat">＋ Yeni sohbet</button><button id="proStudioBtn" class="secondary" style="display:none;border-color:#c5a4ff;color:#6132b8;background:linear-gradient(110deg,#f4edff,#edf5ff)" onclick="location.href='/pro-studio'">✦ Pro Stüdyo</button><button class="secondary" onclick="openSongStudio()" style="border-color:#d8c9ff;color:#6941b6;background:#faf7ff">🎤 Şarkı Stüdyosu</button></div>
+<div class="sideactions"><button id="mobileSidebarClose" class="secondary" type="button" style="display:none">✕ Menüyü kapat</button><button id="newChat">＋ Yeni sohbet</button><button id="proStudioBtn" class="secondary" style="display:none;border-color:#c5a4ff;color:#6132b8;background:linear-gradient(110deg,#f4edff,#edf5ff)" onclick="location.href='/pro-studio'">✦ Pro Stüdyo</button>
+<button id="plusWorkspaceBtn" class="secondary" type="button" style="display:none;border-color:#9dc8f5;color:#155db1;background:linear-gradient(110deg,#eff7ff,#e8f5ff)" onclick="location.href='/plus-workspace'">✦ Plus Workspace</button>
+<button class="secondary" onclick="openSongStudio()" style="border-color:#d8c9ff;color:#6941b6;background:#faf7ff">🎤 Şarkı Stüdyosu</button></div>
 <div><small style="color:var(--muted)">SOHBETLER</small></div><div class="sideutility"><button class="secondary" id="activeChatsBtn">Son sohbetler</button><button class="secondary" id="archivedChatsBtn">Arşiv</button></div><div class="history" id="history"><div class="notice">Geçmişi görmek için giriş yap.</div></div>
 <div class="userbar" id="userbar"><div class="notice">Misafir modu · Sohbetler kaydedilmez.</div></div></aside>
 <main class="main"><header class="top"><button class="secondary mobile" id="mobileNew">＋</button><div><strong>Tekden AI</strong><br><small>Yardımcı yapay zekân</small></div><nav class="topnav"><button class="active" onclick="newChat()">◉ Sohbet</button><button onclick="$('prompt').value='Görsel oluştur: ';$('prompt').focus()">▧ Görsel</button><button onclick="$('fileInput').click()">▤ Dosya Analizi</button><button onclick="forceSearch=true;$('searchBtn').style.borderColor='var(--accent)';$('prompt').focus()">⌕ Web Arama</button><button onclick="$('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';$('prompt').focus()">▣ Uygulama</button><button onclick="$('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: '; $('prompt').focus()">🎮 Oyun</button><button onclick="openSongStudio()">🎤 Şarkı</button><button onclick="location.href='/kesfet'">✦ Keşfet</button><button id="adminNavBtn" style="display:none" onclick="location.href='/yonetim'">⚙ Yönetim</button></nav><div style="display:flex;gap:8px;align-items:center"><button class="secondary" id="mobileToolsBtn" type="button" aria-label="Diğer araçlar" aria-expanded="false">⋮</button><button class="secondary profilebtn" id="profileBtn" aria-label="Profil"><span class="avatar" id="topAvatar">?</span><span id="profileButtonText">Profil</span></button></div></header>
@@ -6545,6 +6547,7 @@ HTML = r"""<!doctype html>
   <div class="mobile-menu-label">HIZLI ERİŞİM</div>
   <div class="mobile-menu-shortcuts">
     <button class="secondary" type="button" data-mobile-action="studio"><span class="menuIcon">▣</span><span>Pro Stüdyo</span></button>
+    <button class="secondary" id="plusWorkspaceMobileBtn" type="button" data-mobile-action="plus-workspace" style="display:none"><span class="menuIcon">✦</span><span>Plus Workspace</span></button>
     <button class="secondary" type="button" data-mobile-action="song"><span class="menuIcon">🎤</span><span>Şarkı Stüdyosu</span></button>
     <button class="secondary" type="button" data-mobile-action="image"><span class="menuIcon">▧</span><span>Görsel</span></button>
   </div>
@@ -6633,6 +6636,8 @@ function renderUser(){
  const adminNav=$('adminNavBtn');if(adminNav)adminNav.style.display=user&&user.is_owner?'inline-flex':'none';
  const mobileAdmin=$('mobileAdminBtn');if(mobileAdmin)mobileAdmin.style.display=user&&user.is_owner?'flex':'none';
  const studioButton=$('proStudioBtn');if(studioButton)studioButton.style.display=user&&['pro','plus'].includes(user.plan)?'block':'none';
+ const plusWorkspaceButton=$('plusWorkspaceBtn');if(plusWorkspaceButton)plusWorkspaceButton.style.display=user&&String(user.plan||'').trim().toLowerCase()==='plus'?'block':'none';
+ const plusWorkspaceMobileButton=$('plusWorkspaceMobileBtn');if(plusWorkspaceMobileButton)plusWorkspaceMobileButton.style.display=user&&String(user.plan||'').trim().toLowerCase()==='plus'?'flex':'none';
  $('profileUsername').textContent=user?user.username:'Misafir';
  $('profilePlan').textContent=user?(user.plan==='plus'?'Tekden AI Plus':(user.plan==='pro'?'Tekden AI Pro':'Free')):'Giriş yapılmadı';
  $('profileFeatures').textContent=user&&user.plan==='plus'?'PLUS: Pro özelliklerinin tamamı ve 150 Plus iş akışı. Model ve harici sağlayıcı özellikleri yapılandırmaya bağlıdır.':(user&&user.plan==='pro'?'PRO: yapılandırılmışsa daha güçlü model, kapsamlı web araştırması, uzun proje bağlamı, özel oyun üretimi, HTML oyun indirme ve yaratıcı proje iş akışları.':'Standart sohbet ve temel araçlar.');
@@ -6858,6 +6863,7 @@ restoreGuestHistory();refreshMe();
    else if(action==='toolbox'){const x=document.getElementById('tdToolsOpen');if(x)x.click();else alert('Araç kutusu şu anda açılamıyor.');}
    else if(action==='mind'){const x=document.getElementById('tkMindOpen')||document.getElementById('tkMindLockedOpen');if(x)x.click();else alert('Zihin Atölyesi bu hesapta görüntülenemiyor.');}
    else if(action==='studio'){location.href='/pro-studio';}
+   else if(action==='plus-workspace'){location.href='/plus-workspace';}
    else if(action==='discover'){location.href='/kesfet';}
    else if(action==='plans'){document.getElementById('plansBack').style.display='flex';}
    else if(action==='docx'){if(!window.tdLastAssistant){alert('Önce bir yanıt oluştur.');return;}tdDownloadWord(window.tdLastAssistant,window.tdLastAssistantSources||[]);}
@@ -12008,10 +12014,10 @@ async def td_plus_workspace_discovery_link(request: Request, call_next):
     if body is None or "text/html" not in content_type:
         return response
     script = r"""<script id="td-plus-workspace-discovery">
-(async()=>{try{const r=await fetch('/api/me',{credentials:'same-origin'});if(!r.ok)return;const d=await r.json();if(!d.user||String(d.user.plan||'').toLowerCase()!=='plus')return;
+(async()=>{try{const r=await fetch('/api/me',{credentials:'same-origin'});if(!r.ok)return;const d=await r.json();if(!d.user||String(d.user.plan||'').trim().toLowerCase()!=='plus')return;
 const style='display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 11px;border:1px solid #b9d8fa;border-radius:11px;background:#eff7ff;color:#155db1;text-decoration:none;font:700 12px system-ui;';
-const menu=document.getElementById('mobileToolsMenu');if(menu&&!document.getElementById('tdPlusWorkspaceMenuLink')){const a=document.createElement('a');a.id='tdPlusWorkspaceMenuLink';a.href='/plus-workspace';a.textContent='✦ Plus Çalışma Alanı';a.style.cssText=style+'width:100%;margin-top:7px;';menu.appendChild(a);}
-const top=document.querySelector('.top');if(top&&!document.getElementById('tdPlusWorkspaceTopLink')){const a=document.createElement('a');a.id='tdPlusWorkspaceTopLink';a.href='/plus-workspace';a.textContent='✦ Plus Alanı';a.style.cssText=style+'margin-left:8px;white-space:nowrap;';top.appendChild(a);}
+const menu=document.getElementById('mobileToolsMenu');if(menu&&!document.getElementById('tdPlusWorkspaceMenuLink')&&!document.getElementById('plusWorkspaceMobileBtn')){const a=document.createElement('a');a.id='tdPlusWorkspaceMenuLink';a.href='/plus-workspace';a.textContent='✦ Plus Çalışma Alanı';a.style.cssText=style+'width:100%;margin-top:7px;';menu.appendChild(a);}
+const top=document.querySelector('.top');if(top&&!document.getElementById('tdPlusWorkspaceTopLink')){const a=document.createElement('a');a.id='tdPlusWorkspaceTopLink';a.href='/plus-workspace';a.textContent='✦ Plus Workspace';a.style.cssText=style+'margin-left:8px;white-space:nowrap;';top.appendChild(a);}
 }catch(e){}})();
 </script>"""
     body = body.replace(b"</body>", script.encode("utf-8") + b"</body>", 1)
@@ -12020,5 +12026,6 @@ const top=document.querySelector('.top');if(top&&!document.getElementById('tdPlu
     headers.pop("content-encoding", None)
     headers.pop("etag", None)
     return Response(content=body, status_code=response.status_code, headers=headers)
+
 
 
