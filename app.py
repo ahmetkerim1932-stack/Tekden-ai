@@ -6780,7 +6780,20 @@ function gameBubble(html){$('welcome')?.remove();const wrap=document.createEleme
 function looksLikeGameRequest(text){const t=String(text||'').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');const hasGame=/(^|\s)(oyun|oyunu|oyuncu|game|mini oyun|platformer)(\s|$)/.test(t);const action=/(olustur|yap|tasarla|gelistir|kodla|uret|hazirla|baslat|oynanabilir|yapalim)/.test(t);return (hasGame&&action)||/araba yarisi|araba oyunu|platform oyunu|oyun yap/.test(t)}
 function imageBubble(data){$('welcome')?.remove();const d=document.createElement('div');d.className='bubble assistant';const title=document.createElement('div');title.textContent='Oluşturulan görsel';d.appendChild(title);const img=document.createElement('img');img.src=data;img.alt='Yapay zekâ tarafından oluşturulan görsel';img.loading='lazy';d.appendChild(img);const link=document.createElement('a');link.href=data;link.download='tekden-ai-gorsel.png';link.textContent='Görseli indir ↓';link.style.cssText='display:inline-block;margin-top:10px;color:#7651e8;font-weight:600';d.appendChild(link);$('messages').appendChild(d);$('messages').scrollTop=$('messages').scrollHeight}
 async function api(url,opts={}){const r=await fetch(url,{credentials:'same-origin',...opts,headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok){let detail=d.detail??d.message??'İstek başarısız oldu.';if(Array.isArray(detail))detail=detail.map(x=>x.msg||JSON.stringify(x)).join(' · ');else if(typeof detail==='object')detail=JSON.stringify(detail);throw new Error(String(detail))}return d}
-async function refreshMe(){try{const d=await api('/api/me');user=d.user;renderUser();if(user)await window.loadChats();else restoreGuestHistory()}catch(e){console.warn('Oturum kontrolü başarısız:',e);user=null;renderUser();restoreGuestHistory()} }
+async function refreshMe(){
+ try{
+  const d=await api('/api/me');
+  user=d.user;
+  renderUser(); // Show account state as soon as the small profile response arrives.
+  if(user){
+   // Load chat history after the interface is already interactive.
+   window.loadChats().catch(e=>console.warn('Sohbet geçmişi yüklenemedi:',e));
+  }else restoreGuestHistory();
+ }catch(e){
+  console.warn('Oturum kontrolü başarısız:',e);
+  user=null;renderUser();restoreGuestHistory();
+ }
+}
 function renderUser(){
  $('topAvatar').textContent=user?(user.username[0]||'U').toUpperCase():'?';
  $('profileButtonText').textContent=user?user.username:'Profil';
@@ -7054,7 +7067,16 @@ async function waitForVocalSong(generationId,statusEl,player,download){const dea
 async function generateVocalSong(){const title=$('songTitle').value.trim()||'Tekden AI şarkısı';const style=$('songStyle').value.trim();const lyrics=$('songLyrics').value.trim();const btn=$('generateVocalSongBtn');const status=$('songStudioStatus');const player=$('songAudioPlayer');const download=$('songAudioDownload');if(!style||lyrics.length<5){status.textContent='Lütfen müzik tarzını ve şarkı sözlerini gir.';return}btn.disabled=true;btn.textContent='⏳ Şarkı üretiliyor…';status.textContent='eroq müzik motoruna istek gönderiliyor. 90 saniyelik tek üretim yaklaşık 9 kredi kullanır.';player.style.display='none';download.style.display='none';try{const d=await api('/api/studio/song/generate',{method:'POST',body:JSON.stringify({title,style,lyrics,language:'tr',duration:90})});if(!d.generation_id)throw new Error('Müzik servisi görev kimliği döndürmedi.');if(d.credits_remaining!==null&&d.credits_remaining!==undefined)status.textContent='Üretim başladı. Kalan eroq kredisi: '+d.credits_remaining+'.';await waitForVocalSong(d.generation_id,status,player,download)}catch(e){status.textContent=e.message}finally{btn.disabled=false;btn.textContent='🎵 Vokalli şarkı üret'}}
 $('songStudioBack')?.addEventListener('click',e=>{if(e.target===$('songStudioBack'))closeSongStudio()});
 document.querySelectorAll('.suggestion').forEach(b=>b.onclick=()=>{const kind=b.dataset.kind; if(kind==='image')$('prompt').value='Görsel oluştur: ';else if(kind==='file')$('fileInput').click();else if(kind==='web'){$('prompt').value='Güncel bilgileri araştır ve kaynak göster: ';forceSearch=true;$('searchBtn').style.borderColor='var(--accent)'}else if(kind==='app')$('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';else if(kind==='game')$('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: '; else if(b.textContent.includes('Kedinin'))$('prompt').value='Kedinin gerçekçi bir görselini oluştur';else if(b.textContent.includes('2.5D'))$('prompt').value='2.5D platform oyunu tasarla';else if(b.textContent.includes('VEX'))$('prompt').value='VEX Push Back kurallarını açıkla';else $('prompt').value='Bana bu konuyu anlaşılır örneklerle açıkla';$('prompt').focus()});
-$('activeChatsBtn').onclick=()=>{showArchived=false;$('activeChatsBtn').style.background='#e4f1ff';$('archivedChatsBtn').style.background='';loadChats()};$('archivedChatsBtn').onclick=()=>{if(!user){showModal();$('authError').textContent='Arşiv için giriş yapmalısın.';return}showArchived=true;$('archivedChatsBtn').style.background='#e4f1ff';$('activeChatsBtn').style.background='';loadChats()};$('profileBtn').onclick=()=>{if(user)$('profileBack').style.display='flex';else showModal()};$('profilePlansBtn').onclick=()=>{$('profileBack').style.display='none';renderUser();$('plansBack').style.display='flex'};$('closeProfile').onclick=()=>$('profileBack').style.display='none';$('profileBack').onclick=e=>{if(e.target===$('profileBack'))$('profileBack').style.display='none'};$('profileArchiveBtn').onclick=()=>{$('profileBack').style.display='none';if(!user){showModal();return}showArchived=true;$('archivedChatsBtn').style.background='#e4f1ff';$('activeChatsBtn').style.background='';loadChats()};$('profileLoginBtn').onclick=()=>{$('profileBack').style.display='none';if(!user)showModal();else alert('Hesabın açık: '+user.username)};$('profileLogoutBtn').onclick=async()=>{try{await api('/api/logout',{method:'POST'})}catch{}user=null;chatId=null;guestHistory=[];$('messages').innerHTML='';$('profileBack').style.display='none';newChat();renderUser();$('history').innerHTML=''};
+$('activeChatsBtn').onclick=()=>{showArchived=false;$('activeChatsBtn').style.background='#e4f1ff';$('archivedChatsBtn').style.background='';loadChats()};$('archivedChatsBtn').onclick=()=>{if(!user){showModal();$('authError').textContent='Arşiv için giriş yapmalısın.';return}showArchived=true;$('archivedChatsBtn').style.background='#e4f1ff';$('activeChatsBtn').style.background='';loadChats()};$('profileBtn').onclick=()=>{if(user)$('profileBack').style.display='flex';else showModal()};$('profilePlansBtn').onclick=()=>{$('profileBack').style.display='none';renderUser();$('plansBack').style.display='flex'};$('closeProfile').onclick=()=>$('profileBack').style.display='none';$('profileBack').onclick=e=>{if(e.target===$('profileBack'))$('profileBack').style.display='none'};$('profileArchiveBtn').onclick=()=>{$('profileBack').style.display='none';if(!user){showModal();return}showArchived=true;$('archivedChatsBtn').style.background='#e4f1ff';$('activeChatsBtn').style.background='';loadChats()};$('profileLoginBtn').onclick=()=>{$('profileBack').style.display='none';if(!user)showModal();else alert('Hesabın açık: '+user.username)};$('profileLogoutBtn').onclick=()=>{
+ // Optimistic logout: update the interface immediately; cookie cleanup continues
+ // in the background so a slow database/network round-trip cannot freeze the UI.
+ user=null;chatId=null;guestHistory=[];showArchived=false;
+ $('messages').innerHTML='';$('history').innerHTML='<div class="notice">Misafir oturumu</div>';
+ $('profileBack').style.display='none';newChat();renderUser();
+ setStatus('Oturum kapatıldı.');
+ fetch('/api/logout',{method:'POST',credentials:'same-origin',keepalive:true})
+   .catch(error=>console.warn('Sunucu oturum çerezi temizlenemedi:',error));
+};
 $('closePlans').onclick=()=>$('plansBack').style.display='none';$('plansBack').onclick=e=>{if(e.target===$('plansBack'))$('plansBack').style.display='none'};
 $('buyPro').onclick=async()=>{if(!user){$('plansBack').style.display='none';showModal();$('authError').textContent='Pro üyeliği için giriş yap veya kayıt ol.';return}try{const d=await api('/api/billing/checkout',{method:'POST'});if(d.url)location.href=d.url}catch(e){alert(e.message)}};
 $('buyPlus').onclick=async()=>{if(!user){$('plansBack').style.display='none';showModal();$('authError').textContent='Plus üyeliği için giriş yap veya kayıt ol.';return}try{const d=await api('/api/billing/checkout',{method:'POST',body:JSON.stringify({plan:'plus'})});if(d.url)location.href=d.url}catch(e){alert(e.message)}};
@@ -12295,3 +12317,23 @@ def call_ollama(messages, model=None):
     else:
         prepared_messages.insert(0, {"role": "system", "content": infrastructure_rule})
     return _TD_BASE_CALL_OLLAMA(prepared_messages, model=model)
+
+
+# =============================================================================
+# TEKDEN AI V7 — SESSION UX AND EXTRA PLAN ACCOUNT SETUP NOTES (APPEND-ONLY)
+# Existing V6 routes, capabilities, tables, and account provisioning are kept.
+# =============================================================================
+# Fast sign-out is handled optimistically in the homepage JavaScript above:
+# the UI signs out immediately while /api/logout clears the HttpOnly cookie
+# asynchronously. Initial profile rendering no longer waits for chat-history
+# retrieval; history is loaded in the background after the account is rendered.
+#
+# Extra plan accounts are already securely provisioned by init_db() using
+# PBKDF2 password hashes and these Render Environment variables:
+#   EXTRA_PLUS_USERNAME
+#   EXTRA_PLUS_PASSWORD
+#   EXTRA_PRO_USERNAME
+#   EXTRA_PRO_PASSWORD
+# Do not hard-code account passwords in source control. Set the values in
+# Render -> Service -> Environment, then deploy/restart once. Existing accounts
+# with the same usernames are updated to the configured plan and password.
