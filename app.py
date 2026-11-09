@@ -2103,6 +2103,157 @@ def export_document_docx(body: DocumentExportBody):
         headers={"Content-Disposition": f'attachment; filename="{filename}.docx"', "Cache-Control": "no-store"})
 
 
+# --- Additive PDF export endpoint: Unicode ReportLab when available, stdlib fallback otherwise. ---
+def _td_pdf_ascii(value: str) -> str:
+    replacements = {
+        "ı":"i", "İ":"I", "ğ":"g", "Ğ":"G", "ş":"s", "Ş":"S",
+        "ç":"c", "Ç":"C", "ö":"o", "Ö":"O", "ü":"u", "Ü":"U",
+        "’":"'", "‘":"'", "“":"\"", "”":"\"", "–":"-", "—":"-",
+        "•":"*", "→":"->", "←":"<-", "✓":"[x]", "✦":"*",
+    }
+    value = "".join(replacements.get(ch, ch) for ch in str(value or ""))
+    return value.encode("ascii", "ignore").decode("ascii")
+
+
+def _td_pdf_fallback(title: str, content: str, sources: list[DocumentSource] | None = None) -> bytes:
+    """Create a valid, paginated PDF with built-in Helvetica if ReportLab is unavailable."""
+    import textwrap as _td_textwrap
+    lines = [title or "Tekden AI Belgesi", ""]
+    for raw in str(content or "").replace("\r", "").split("\n"):
+        line = _td_pdf_ascii(raw).strip()
+        if not line:
+            lines.append("")
+        else:
+            lines.extend(_td_textwrap.wrap(line, width=88, break_long_words=True, break_on_hyphens=False) or [""])
+    if sources:
+        lines.extend(["", "KAYNAKLAR"])
+        for index, item in enumerate(sources[:30], 1):
+            label = _td_pdf_ascii(item.title or item.url or "Kaynak")
+            url = _td_pdf_ascii(item.url or "")
+            lines.extend(_td_textwrap.wrap(f"[{index}] {label} {url}".strip(), width=88) or [""])
+    pages = [lines[i:i + 48] for i in range(0, max(1, len(lines)), 48)]
+    objects: list[bytes] = []
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    page_ids = [4 + i * 2 for i in range(len(pages))]
+    kids = " ".join(f"{pid} 0 R" for pid in page_ids)
+    objects.append(f"<< /Type /Pages /Kids [{kids}] /Count {len(pages)} >>".encode("ascii"))
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+    for page_index, page_lines in enumerate(pages):
+        page_id = 4 + page_index * 2
+        content_id = page_id + 1
+        stream = ["BT", "/F1 10 Tf", "50 790 Td", "14 TL"]
+        for n, line in enumerate(page_lines):
+            if n == 0 and page_index == 0:
+                stream.extend(["/F1 15 Tf", "(" + _td_pdf_ascii(line).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)") + ") Tj", "/F1 10 Tf", "0 -24 Td"])
+            else:
+                safe = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+                stream.extend(["(" + safe + ") Tj", "T*"])
+        stream.append("ET")
+        stream_bytes = "\n".join(stream).encode("latin-1", "replace")
+        page_obj = (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+            f"/Resources << /Font << /F1 3 0 R >> >> /Contents {content_id} 0 R >>"
+        ).encode("ascii")
+        content_obj = f"<< /Length {len(stream_bytes)} >>\nstream\n".encode("ascii") + stream_bytes + b"\nendstream"
+        objects.extend([page_obj, content_obj])
+    output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for index, obj in enumerate(objects, 1):
+        offsets.append(len(output))
+        output.extend(f"{index} 0 obj\n".encode("ascii"))
+        output.extend(obj)
+        output.extend(b"\nendobj\n")
+    xref_offset = len(output)
+    output.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    output.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    output.extend(
+        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+    )
+    return bytes(output)
+
+
+def build_pdf_bytes(title: str, content: str, sources: list[DocumentSource] | None = None) -> bytes:
+    """Build a real PDF; prefer ReportLab with a Unicode font, retain stdlib fallback."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.enums import TA_LEFT
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Preformatted, ListFlowable, ListItem
+        buffer = io.BytesIO()
+        styles = getSampleStyleSheet()
+        normal_font, bold_font = "Helvetica", "Helvetica-Bold"
+        font_candidates = [
+            ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+            ("/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"),
+            ("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"),
+        ]
+        for regular_path, bold_path in font_candidates:
+            if os.path.exists(regular_path):
+                pdfmetrics.registerFont(TTFont("TekdenUnicode", regular_path))
+                normal_font = "TekdenUnicode"
+                if os.path.exists(bold_path):
+                    pdfmetrics.registerFont(TTFont("TekdenUnicodeBold", bold_path))
+                    bold_font = "TekdenUnicodeBold"
+                else:
+                    bold_font = normal_font
+                break
+        title_style = ParagraphStyle("TekdenTitle", parent=styles["Title"], fontName=bold_font, fontSize=18, leading=23, textColor=colors.HexColor("#12345a"), alignment=TA_LEFT, spaceAfter=14)
+        heading_style = ParagraphStyle("TekdenHeading", parent=styles["Heading2"], fontName=bold_font, fontSize=12, leading=16, textColor=colors.HexColor("#145da0"), spaceBefore=10, spaceAfter=5)
+        body_style = ParagraphStyle("TekdenBody", parent=styles["BodyText"], fontName=normal_font, fontSize=9.5, leading=14, spaceAfter=5, wordWrap="CJK")
+        code_style = ParagraphStyle("TekdenCode", parent=body_style, fontName="Courier", fontSize=8, leading=10, backColor=colors.HexColor("#f1f4f8"), borderPadding=5)
+        story = [Paragraph(html_escape(str(title or "Tekden AI Belgesi")), title_style)]
+        in_code = False
+        for raw in str(content or "").replace("\r", "").split("\n"):
+            line = raw.rstrip()
+            if line.strip().startswith("```"):
+                in_code = not in_code
+                story.append(Spacer(1, 4))
+                continue
+            if not line.strip():
+                story.append(Spacer(1, 5))
+            elif in_code:
+                story.append(Preformatted(line, code_style))
+            elif line.startswith("### ") or line.startswith("## ") or line.startswith("# "):
+                story.append(Paragraph(html_escape(re.sub(r"^#{1,3}\s*", "", line)), heading_style))
+            elif re.match(r"^\s*[-*•]\s+", line):
+                story.append(Paragraph("• " + html_escape(re.sub(r"^\s*[-*•]\s+", "", line)), body_style))
+            elif re.match(r"^\s*\d+[.)]\s+", line):
+                story.append(Paragraph(html_escape(line.strip()), body_style))
+            else:
+                story.append(Paragraph(html_escape(line).replace("  ", " &nbsp;"), body_style))
+        if sources:
+            story.append(Paragraph("Kaynaklar", heading_style))
+            for index, item in enumerate(sources[:30], 1):
+                label = html_escape(item.title or item.url or "Kaynak")
+                url = html_escape(item.url or "")
+                story.append(Paragraph(f"[{index}] {label} {url}", body_style))
+        SimpleDocTemplate(buffer, pagesize=A4, rightMargin=42, leftMargin=42, topMargin=45, bottomMargin=45, title=str(title or "Tekden AI Belgesi"), author="Tekden AI").build(story)
+        data = buffer.getvalue()
+        if data.startswith(b"%PDF-"):
+            return data
+    except Exception as exc:
+        print("[Tekden AI] Unicode PDF oluşturucu kullanılamadı; standart PDF yedeği devrede:", type(exc).__name__)
+    return _td_pdf_fallback(title, content, sources)
+
+
+@app.post("/api/documents/pdf")
+def export_document_pdf(body: DocumentExportBody):
+    """Download an actual PDF without relying on browser pop-up or print dialogs."""
+    title_ascii = _td_pdf_ascii(body.title or "tekden-ai-belge")
+    filename = re.sub(r"[^A-Za-z0-9_-]+", "_", title_ascii).strip("_")[:70] or "tekden-ai-belge"
+    data = build_pdf_bytes(body.title, body.content, body.sources)
+    return Response(content=data, media_type="application/pdf", headers={
+        "Content-Disposition": f'attachment; filename="{filename}.pdf"',
+        "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+    })
+
+
 @app.post("/api/mind/advanced-synapse")
 def mind_advanced_synapse(body: AdvancedSynapseBody, request: Request):
     """Plus-only applied workflow hub for the extended Zihin Atölyesi engines."""
@@ -6765,30 +6916,75 @@ async function analyzeAttachment(question,file){
  const prompt=(question||'Bu belgeyi analiz et ve önemli noktalarını açıkla.')+'\n\nBelge adı: '+file.name+'\nBelge içeriği (kaynağa sadık kal, eksik bilgiyi uydurma):\n'+text.slice(0,90000);
  const result=await puter.ai.chat(prompt,{model:'openai/gpt-5.4-nano'});return getPuterText(result);
 }
+// File export helpers belong in the HOME CHAT script. The older helper copies
+// inside the separate Arcade page are not loaded on the main Tekden AI page.
+function tdHomeDownloadBlob(blob, filename){
+ const url=URL.createObjectURL(blob),a=document.createElement('a');
+ a.href=url;a.download=filename;a.style.display='none';document.body.appendChild(a);
+ a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),15000);
+}
+function tdDocTitle(text){const first=String(text||'Tekden AI belgesi').split(/\r?\n/).find(x=>x.trim())||'Tekden AI belgesi';return first.replace(/^#+\s*/,'').replace(/[*_`]/g,'').trim().slice(0,110)||'Tekden AI belgesi';}
+function tdHomeSafeFilename(title,extension){
+ const safe=String(title||'tekden-ai-belge').toLocaleLowerCase('tr-TR')
+  .replace(/ğ/g,'g').replace(/ü/g,'u').replace(/ş/g,'s').replace(/ı/g,'i').replace(/ö/g,'o').replace(/ç/g,'c')
+  .replace(/[^a-z0-9_-]+/g,'-').replace(/^-+|-+$/g,'').slice(0,65)||'tekden-ai-belge';
+ return safe+'.'+extension;
+}
+async function tdHomeExportRequest(path,content,sources,title,extension){
+ const response=await fetch(path,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({title:String(title||'Tekden AI Belgesi').slice(0,150),content:String(content||'').slice(0,60000),
+   sources:(Array.isArray(sources)?sources:[]).slice(0,30).map(x=>({title:String(x.title||'Kaynak').slice(0,300),url:String(x.url||'').slice(0,2000)}))})});
+ if(!response.ok){let message='Dosya oluşturulamadı ('+response.status+').';try{const data=await response.json();message=data.detail||data.message||message}catch{}throw new Error(String(message));}
+ const blob=await response.blob();if(!blob.size)throw new Error('Sunucu boş dosya döndürdü. Tekrar deneyebilirsin.');
+ tdHomeDownloadBlob(blob,tdHomeSafeFilename(title,extension));
+ setStatus((extension.toUpperCase())+' dosyası indirilmeye hazır.');return true;
+}
+async function tdDownloadWord(content,sources=[],title=''){
+ return tdHomeExportRequest('/api/documents/docx',content,sources,title||tdDocTitle(content),'docx');
+}
+async function tdDownloadPdf(content,sources=[],title=''){
+ return tdHomeExportRequest('/api/documents/pdf',content,sources,title||tdDocTitle(content),'pdf');
+}
+function tdPrintPdf(content,sources=[],title=''){
+ // Backward-compatible name used by the existing mobile tools menu.
+ return tdDownloadPdf(content,sources,title);
+}
+function tdDownloadText(content,title='Tekden AI Belgesi',extension='txt'){
+ const allowed=['txt','md','json','html','csv'];if(!allowed.includes(extension))extension='txt';
+ const blob=new Blob([String(content||'')],{type:extension==='html'?'text/html;charset=utf-8':(extension==='json'?'application/json;charset=utf-8':'text/plain;charset=utf-8')});
+ tdHomeDownloadBlob(blob,tdHomeSafeFilename(title,extension));setStatus(extension.toUpperCase()+' dosyası indirildi.');return true;
+}
+
 // Document-intent helper is deliberately declared in this chat script's
 // own scope. The similarly named helper in another feature script is inside
 // an IIFE and is therefore not visible here.
 function tdDetectDocumentRequest(text){
  const t=String(text||'').toLocaleLowerCase('tr-TR');
- const action=/(oluştur|olustur|hazırla|hazirla|indir|dönüştür|donustur|çevir|cevir|dosyaya aktar|çıktı al|cikti al|export|kaydet|hazirlayabilir misin|hazırlayabilir misin|olarak ver|\bver\b|\byap\b)/.test(t);
- if(!action)return null;
- if(/\b(pdf)\b/.test(t)||/pdf'ye|pdf ye|pdf olarak/.test(t))return {format:'pdf',title:'Tekden AI PDF Belgesi'};
- if(/\b(word|docx|doc)\b/.test(t)||/word dosyası|word belgesi/.test(t))return {format:'docx',title:'Tekden AI Word Belgesi'};
- if(/dosya olarak|belge dosyası|rapor dosyası/.test(t)||(/(rapor|ödev|odev|sözleşme|sozlesme|dilekçe|dilekce|proje teklifi|iş planı|is plani|tutanak|kılavuz|kilavuz)/.test(t)&&/(oluştur|olustur|hazırla|hazirla|yaz|düzenle|duzenle|çıkar|cikar|hazirlayabilir|hazırlayabilir)/.test(t)))return {format:'docx',title:'Tekden AI Belgesi'};
+ const hasAction=/(oluştur|olustur|hazırla|hazirla|indir|dönüştür|donustur|çevir|cevir|dosyaya aktar|çıktı al|cikti al|export|kaydet|hazırla|hazirlayabilir|hazırlayabilir|yaz|üret|uret|ver|yap)/.test(t);
+ const asksFile=/(dosya|belge|doküman|dokuman|rapor|pdf|word|docx|\.txt|\.md|\.json|\.html|\.csv)/.test(t);
+ if(!hasAction||!asksFile)return null;
+ if(/\bpdf\b|\.pdf\b|pdf'ye|pdf ye|pdf olarak/.test(t))return {format:'pdf',title:'Tekden AI PDF Belgesi'};
+ if(/\b(word|docx|doc)\b|\.docx?\b|word dosyası|word belgesi/.test(t))return {format:'docx',title:'Tekden AI Word Belgesi'};
+ if(/\bjson\b|\.json\b/.test(t))return {format:'json',title:'Tekden AI JSON Belgesi'};
+ if(/\bcsv\b|\.csv\b/.test(t))return {format:'csv',title:'Tekden AI CSV Belgesi'};
+ if(/\bhtml\b|\.html?\b/.test(t))return {format:'html',title:'Tekden AI HTML Belgesi'};
+ if(/\bmarkdown\b|\.md\b/.test(t))return {format:'md',title:'Tekden AI Markdown Belgesi'};
+ if(/\b(txt|metin dosyası)\b|\.txt\b/.test(t))return {format:'txt',title:'Tekden AI Metin Belgesi'};
+ if(/(dosya|belge|doküman|dokuman|rapor|ödev|odev|sözleşme|sozlesme|dilekçe|dilekce|proje teklifi|iş planı|is plani|tutanak|kılavuz|kilavuz)/.test(t))return {format:'docx',title:'Tekden AI Belgesi'};
  return null;
 }
 async function send(){
  const text=$('prompt').value.trim();const file=selectedFile;if(!text&&!file)return;
  const docIntent=(!file&&!looksLikeGameRequest(text)&&!looksLikeImageRequest(text))?tdDetectDocumentRequest(text):null;
- const pdfWindow=docIntent?.format==='pdf'?window.open('about:blank','_blank'):null;
  $('prompt').value='';bubble('user',(text||'Ekli dosyayı analiz et.')+(file?'\n📎 '+file.name:''));
  setStatus(file?'Dosya analiz ediliyor…':looksLikeImageRequest(text)?'İstenen görsel oluşturuluyor…':(forceSearch?'Derin web araması yapılıyor…':'Yanıt hazırlanıyor…'));$('sendBtn').disabled=true;
  try{
   if(file){const answer=await analyzeAttachment(text,file);bubble('assistant',answer);if(user){try{const saved=await api('/api/save-analysis',{method:'POST',body:JSON.stringify({question:text||'Ekli dosyayı analiz et.',answer,filename:file.name,chat_id:chatId})});if(saved.chat_id)chatId=saved.chat_id;loadChats()}catch(saveError){console.warn('Dosya analizi geçmişe kaydedilemedi',saveError)}}else {guestHistory.push({role:'user',content:(text||'Ekli dosyayı analiz et.')+' [Dosya: '+file.name+']'},{role:'assistant',content:answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}selectedFile=null;$('fileInput').value='';$('fileName').textContent='Dosya seçilmedi';setStatus('Dosya analizi tamamlandı');}
   else if(looksLikeGameRequest(text)){const game=await api('/api/game',{method:'POST',body:JSON.stringify({prompt:text})});gameBubble(game.html);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İsteğine göre oynanabilir bir oyun oluşturuldu.'});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Oyun hazır');}
   else if(looksLikeImageRequest(text)){await createAndShowImage(text);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İstenen görsel oluşturuldu. İstek: '+text});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Görsel hazır');}
-  else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(docIntent?.format==='docx'){await tdDownloadWord(d.answer,d.sources||[],docIntent.title)}else if(docIntent?.format==='pdf'){tdPrintPdf(d.answer,d.sources||[],docIntent.title,pdfWindow)}if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus('UYARI: Bu mesaj Supabase’e kaydedilmedi. Hesabından çıkış yapıp yeniden giriş yap.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else if(d.search_failed)setStatus('Web araması denendi ancak sağlayıcı sonuç döndürmedi. TAVILY_API_KEY ayarını ve arama sağlayıcısı erişimini kontrol et.');else setStatus('Tamamlandı');}
- }catch(e){bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeGameRequest(text)?'Oyun oluşturulamadı: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}
+  else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(docIntent?.format==='docx'){await tdDownloadWord(d.answer,d.sources||[],docIntent.title)}else if(docIntent?.format==='pdf'){await tdDownloadPdf(d.answer,d.sources||[],docIntent.title)}else if(['txt','md','json','html','csv'].includes(docIntent?.format)){tdDownloadText(d.answer,docIntent.title,docIntent.format)}if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus('UYARI: Bu mesaj Supabase’e kaydedilmedi. Hesabından çıkış yapıp yeniden giriş yap.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else if(d.search_failed)setStatus('Web araması denendi ancak sağlayıcı sonuç döndürmedi. TAVILY_API_KEY ayarını ve arama sağlayıcısı erişimini kontrol et.');else setStatus('Tamamlandı');}
+  if($('prompt').value.trim()===text.trim())$('prompt').value='';
+ }catch(e){if(text&&!$('prompt').value.trim())$('prompt').value=text;bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeGameRequest(text)?'Oyun oluşturulamadı: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}
  finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)';$('searchBtn').textContent='⌕ Web ara'}
 }
 
@@ -6832,6 +7028,21 @@ $('dictationBtn').onclick=()=>{
  try{recognition.start()}catch(e){recognition=null;$('dictationBtn').textContent='🎙 Dikte et';setStatus('Dikte başlatılamadı: '+e.message)}
 };
 $('voiceBtn').onclick=()=>{const SR=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SR){setStatus('Sesli sohbet bu tarayıcıda desteklenmiyor. Chrome veya Edge deneyebilirsin.');return}if(!('speechSynthesis' in window)){setStatus('Bu tarayıcı sesli yanıtı desteklemiyor.');return}voiceMode=true;recognition=makeRecognition();if(!recognition){voiceMode=false;return}$('voiceBtn').textContent='🎙 Dinleniyor…';setStatus('Seni dinliyorum. Bitirince yanıtını sesli okuyacağım.');try{recognition.start()}catch(e){voiceMode=false;recognition=null;$('voiceBtn').textContent='🔊 Sesli sohbet';setStatus('Sesli sohbet başlatılamadı: '+e.message)}};
+// Main-page answer actions: download an assistant response as DOCX, PDF or TXT.
+const tdMainOriginalBubble=bubble;
+bubble=function(role,content,sources=[]){
+ const node=tdMainOriginalBubble(role,content,sources);
+ if(role==='assistant'&&node&&!node.querySelector('.td-main-export-actions')){
+  window.tdLastAssistant=String(content||'');window.tdLastAssistantSources=Array.isArray(sources)?sources:[];
+  const bar=document.createElement('div');bar.className='td-main-export-actions';
+  bar.style.cssText='display:flex;gap:7px;flex-wrap:wrap;margin-top:10px';
+  const make=(label,handler)=>{const b=document.createElement('button');b.type='button';b.className='secondary';b.textContent=label;b.style.cssText='font-size:12px;padding:6px 10px';b.addEventListener('click',async()=>{b.disabled=true;try{await handler()}catch(e){setStatus('Dosya oluşturulamadı: '+(e.message||e))}finally{b.disabled=false}});return b};
+  bar.append(make('↓ Word',()=>tdDownloadWord(content,sources,tdDocTitle(content))),make('↓ PDF',()=>tdDownloadPdf(content,sources,tdDocTitle(content))),make('↓ TXT',()=>tdDownloadText(content,tdDocTitle(content),'txt')));
+  node.appendChild(bar);
+ }
+ return node;
+};
+
 const oldBubble=bubble; bubble=function(role,content,sources=[]){const el=oldBubble(role,content,sources);if(role==='assistant'&&(voiceMode||speakNext)&&'speechSynthesis'in window){speakNext=false;const u=new SpeechSynthesisUtterance(cleanAnswer(content));u.lang='tr-TR';window.speechSynthesis.cancel();window.speechSynthesis.speak(u)}return el};
 $('sendBtn').onclick=send;
 $('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('fileInput').onchange=e=>{selectedFile=e.target.files?.[0]||null;if(selectedFile&&selectedFile.size>12*1024*1024){alert('Dosya en fazla 12 MB olabilir.');selectedFile=null;$('fileInput').value=''}$('fileName').textContent=selectedFile?selectedFile.name:'Dosya seçilmedi';if(selectedFile)setStatus("Dosya hazır · sorunu yazıp Gönder'e bas")};$('imageBtn').onclick=generateImage;$('searchBtn').onclick=()=>{forceSearch=!forceSearch;$('searchBtn').style.borderColor=forceSearch?'#a78bfa':'var(--line)';$('searchBtn').textContent=forceSearch?'⌕ Web açık':'⌕ Web ara';setStatus(forceSearch?'Bu mesajda web araması zorunlu':'Otomatik arama; gerekirse kendiliğinden çalışır')};$('newChat').onclick=newChat;$('mobileNew').onclick=newChat;$('closeModal').onclick=closeModal;$('modalback').onclick=e=>{if(e.target===$('modalback'))closeModal()};
