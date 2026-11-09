@@ -10316,7 +10316,12 @@ _TD_TOUCH_CHAT_SEND_JS = r"""
 
   // Keep the original full-featured send implementation; this layer only
   // normalizes touch, click and keyboard activation and blocks double sends.
-  const originalSend = typeof window.send === 'function' ? window.send.bind(window) : null;
+  // Resolve the original handler from either the Window property or the
+  // classic-script global binding. Some browsers expose the latter without
+  // publishing it as window.send; the previous check then disabled sending.
+  const originalSend = typeof window.send === 'function'
+    ? window.send.bind(window)
+    : (typeof send === 'function' ? send : null);
   let sending = false;
   let lastActivation = 0;
 
@@ -12029,3 +12034,41 @@ const top=document.querySelector('.top');if(top&&!document.getElementById('tdPlu
 
 
 
+
+# =============================================================================
+# TEKDEN AI — CHAT SEND COMPATIBILITY AND INFRASTRUCTURE DISCLOSURE (ADDITIVE)
+# Existing routes, features, and source lines above are retained.
+# =============================================================================
+
+# Keep the chat handler reachable to the already-installed browser reliability
+# layer even in browsers that do not expose a classic-script function on Window.
+# The browser patch above now falls back to the global `send` binding directly.
+
+_TD_BASE_CALL_OLLAMA = call_ollama
+
+def call_ollama(messages, model=None):
+    """Preserve the configured model call and add a truthful product-identity rule."""
+    prepared_messages = [dict(item) for item in (messages or [])]
+    infrastructure_rule = (
+        "TEKDEN AI ALTYAPI SORULARI İÇİN ÜRÜN YANITI:\\n"
+        "Tekden AI'ın kendi uygulama ve backend sunucu altyapısı vardır; kullanıcı "
+        "mesajları önce bu Tekden AI altyapısına ulaşır. Yanıt üretiminde bulut "
+        "tabanlı model altyapısı kullanılır. Sağlayıcı ve mimari ayrıntılar "
+        "kamuya açıklanmaz. Kullanıcı GPT, Cloud veya hangi sağlayıcıya bağlı "
+        "olduğunu sorarsa Tekden AI'ın kendi uygulama sunucusu olduğunu ve "
+        "yanıt üretiminde bulut tabanlı model altyapısı kullanıldığını açıkça "
+        "belirt; modelin tamamen Tekden AI sunucularında çalıştığını veya "
+        "hiçbir harici servis kullanılmadığını iddia etme. Daha fazla ayrıntı "
+        "isterse şu kısa yanıtı ver: 'Üzgünüz, altyapımızın daha fazla teknik "
+        "ayrıntısı gizlidir.' "
+        "Yanıtı kısa ve doğal tut."
+    )
+    if prepared_messages and prepared_messages[0].get("role") == "system":
+        prepared_messages[0]["content"] = (
+            str(prepared_messages[0].get("content") or "")
+            + "\\n\\n"
+            + infrastructure_rule
+        )
+    else:
+        prepared_messages.insert(0, {"role": "system", "content": infrastructure_rule})
+    return _TD_BASE_CALL_OLLAMA(prepared_messages, model=model)
