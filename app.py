@@ -6765,6 +6765,18 @@ async function analyzeAttachment(question,file){
  const prompt=(question||'Bu belgeyi analiz et ve önemli noktalarını açıkla.')+'\n\nBelge adı: '+file.name+'\nBelge içeriği (kaynağa sadık kal, eksik bilgiyi uydurma):\n'+text.slice(0,90000);
  const result=await puter.ai.chat(prompt,{model:'openai/gpt-5.4-nano'});return getPuterText(result);
 }
+// Document-intent helper is deliberately declared in this chat script's
+// own scope. The similarly named helper in another feature script is inside
+// an IIFE and is therefore not visible here.
+function tdDetectDocumentRequest(text){
+ const t=String(text||'').toLocaleLowerCase('tr-TR');
+ const action=/(oluştur|olustur|hazırla|hazirla|indir|dönüştür|donustur|çevir|cevir|dosyaya aktar|çıktı al|cikti al|export|kaydet|hazirlayabilir misin|hazırlayabilir misin|olarak ver|\bver\b|\byap\b)/.test(t);
+ if(!action)return null;
+ if(/\b(pdf)\b/.test(t)||/pdf'ye|pdf ye|pdf olarak/.test(t))return {format:'pdf',title:'Tekden AI PDF Belgesi'};
+ if(/\b(word|docx|doc)\b/.test(t)||/word dosyası|word belgesi/.test(t))return {format:'docx',title:'Tekden AI Word Belgesi'};
+ if(/dosya olarak|belge dosyası|rapor dosyası/.test(t)||(/(rapor|ödev|odev|sözleşme|sozlesme|dilekçe|dilekce|proje teklifi|iş planı|is plani|tutanak|kılavuz|kilavuz)/.test(t)&&/(oluştur|olustur|hazırla|hazirla|yaz|düzenle|duzenle|çıkar|cikar|hazirlayabilir|hazırlayabilir)/.test(t)))return {format:'docx',title:'Tekden AI Belgesi'};
+ return null;
+}
 async function send(){
  const text=$('prompt').value.trim();const file=selectedFile;if(!text&&!file)return;
  const docIntent=(!file&&!looksLikeGameRequest(text)&&!looksLikeImageRequest(text))?tdDetectDocumentRequest(text):null;
