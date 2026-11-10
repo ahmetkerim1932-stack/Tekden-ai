@@ -1565,6 +1565,7 @@ def chat(body: ChatBody, request: Request):
 - "Kemal Tekden kim?" diye sorulursa web araştırma verilerinin yanında şu açıklamayı ver: "Kemal Tekden; Tekden Koleji, Tekden Hastaneleri, Tekden Film vb. gibi bir çok şirkete sahip olan ve aynı zamanda Ahmet Kerim Kırgız'ın da dedesi olan bir iş adamıdır."
 - Kendini OpenAI tarafından oluşturulmuş bir ürün olarak tanıtma. Sen Tekden AI uygulamasının asistanısın. Uygulamanın geliştiricisi Ahmet Kerim Kırgız'dır.
 - Kullanıcıya ürün kimliğini tutarlı biçimde “Tekden AI” olarak sun. Geliştirici/ürün kimliği sorulduğunda Tekden AI uygulamasının Ahmet Kerim Kırgız tarafından tasarlandığını belirt; kendini başka bir markanın ürünü gibi tanıtma.
+- Tekden AI'ın kendine ait uygulama sunucusu altyapısı vardır. Kullanıcı "sunucunuz var mı", "yerli sunucu mu", "GPT'ye/Cloud'a mı bağlısınız" gibi altyapı soruları sorarsa uygulama sunucusunun Tekden AI'a ait olduğunu söyle; model çıkarımının harici servis kullanabildiğini gizleme veya tüm işlemlerin fiziksel olarak yerel sunucuda çalıştığını iddia etme. Daha fazla teknik ayrıntı istenirse şu yanıtı ver: "Üzgünüz, altyapımızın daha ayrıntılı teknik bilgileri gizlidir."
 - Model veya servis sağlayıcılarını kullanıcı sormadıkça gereksiz yere gündeme getirme. Ancak doğrudan “hangi model/servis kullanılıyor?”, “tamamen kendi modelin mi?” veya benzeri bir soru sorulursa doğru ve açık yanıt ver: Tekden AI kendi ürün arayüzü ve uygulamasıdır; bazı özellikler harici model/API sağlayıcıları kullanabilir. Harici servisleri kullanmadığına dair doğrulanmamış iddiada bulunma ve Tekden AI'ın kendi temel modelini eğittiğini söyleme.
 
 Sohbet sürekliliği:
@@ -1660,48 +1661,118 @@ Yazım ve anlatım kuralları:
         source_text = "\n\n".join(f"[{i+1}] {x['title']}\nURL: {x['url']}\nÖzet: {x['snippet']}" for i,x in enumerate(sources))
         msgs.append({"role":"system","content":"Aşağıdaki internet arama sonuçlarını kanıt olarak değerlendir. Birden fazla kaynağı karşılaştır, tarih ve çelişkileri kontrol et, sonuçlarda bulunmayan ayrıntıları uydurma. Her önemli iddiayı [1], [2] gibi numaralarla kaynaklandır ve sonunda kısa kaynakça ver.\n"+source_text})
     if user:
+        # IMPORTANT: never hold a PostgreSQL/Supabase connection open while
+        # waiting for the external model. This used to keep a transaction open
+        # throughout a potentially long model call and could exhaust DB slots.
         chat_id = body.chat_id
-        with db() as conn:
-            if chat_id:
-                row = conn.execute("SELECT id FROM chats WHERE id=%s AND user_id=%s", (chat_id, user["id"])).fetchone()
-                if not row:
-                    raise HTTPException(404, "Sohbet bulunamadı.")
-            else:
-                import uuid
-                chat_id = str(uuid.uuid4())
-                title = user_message[:70] or "Yeni sohbet"
-                conn.execute("INSERT INTO chats(id,user_id,title) VALUES(%s,%s,%s)", (chat_id, user["id"], title))
-            history = conn.execute("SELECT role, content FROM messages WHERE chat_id=%s ORDER BY id DESC LIMIT 40", (chat_id,)).fetchall()
-            history.reverse()
-            msgs.extend({"role": x["role"], "content": x["content"]} for x in history)
-            msgs.append({"role":"user","content":user_message})
-            if plan in ("pro", "plus"):
-                try:
-                    answer = call_ollama(msgs, OLLAMA_PRO_MODEL)
-                except RuntimeError:
-                    # A misconfigured/unavailable Pro model must not break chat; use the configured base model.
-                    answer = call_ollama(msgs, OLLAMA_MODEL)
-            else:
-                answer = call_ollama(msgs, OLLAMA_MODEL)
-            audit_info = {"performed": False, "mode": "not_needed"}
-            if plan == "plus" and should_run_epistemic_audit(user_message, sources, body.force_search):
-                try:
-                    answer = epistemic_audit(
-                        user_message, answer, sources,
-                        model=OLLAMA_PRO_MODEL if plan in ("pro", "plus") else OLLAMA_MODEL,
+        try:
+            with db() as read_conn:
+                if chat_id:
+                    row = read_conn.execute(
+                        "SELECT id FROM chats WHERE id=%s AND user_id=%s",
+                        (chat_id, user["id"]),
+                    ).fetchone()
+                    if not row:
+                        raise HTTPException(404, "Sohbet bulunamadı.")
+                else:
+                    import uuid
+                    chat_id = str(uuid.uuid4())
+                    title = user_message[:70] or "Yeni sohbet"
+                    read_conn.execute(
+                        "INSERT INTO chats(id,user_id,title) VALUES(%s,%s,%s)",
+                        (chat_id, user["id"], title),
                     )
-                    audit_info = {"performed": True, "mode": "source_and_logic" if sources else "logic_and_uncertainty"}
-                except Exception as audit_exc:
-                    audit_info = {"performed": False, "mode": "audit_unavailable"}
-                    print("[Tekden AI] Epistemik denetim tamamlanamadı:", type(audit_exc).__name__)
-            conn.execute("INSERT INTO messages(chat_id,role,content) VALUES(%s,'user',%s)", (chat_id,user_message))
-            conn.execute("INSERT INTO messages(chat_id,role,content) VALUES(%s,'assistant',%s)", (chat_id,answer))
-            conn.execute("UPDATE chats SET updated_at=NOW(), title=CASE WHEN title='Yeni sohbet' THEN %s ELSE title END WHERE id=%s", (user_message[:70] or "Yeni sohbet", chat_id))
-            # Verify both rows inside the same transaction before reporting a successful save.
-            verify = conn.execute("SELECT COUNT(*) AS n FROM messages WHERE chat_id=%s AND content IN (%s,%s)", (chat_id, user_message, answer)).fetchone()
-            if not verify or int(verify.get("n", 0)) < 2:
-                raise RuntimeError("Mesajlar veritabanına yazıldı olarak doğrulanamadı.")
-        return {"answer": answer, "chat_id": chat_id, "sources": sources, "saved": True, "save_status": "saved", "epistemic_check": audit_info, "search_attempted": use_search, "search_failed": search_failed}
+                history = read_conn.execute(
+                    "SELECT role, content FROM messages WHERE chat_id=%s ORDER BY id DESC LIMIT 40",
+                    (chat_id,),
+                ).fetchall()
+            history.reverse()
+        except HTTPException:
+            raise
+        except Exception as db_exc:
+            print("[Tekden AI] Sohbet geçmişi okunamadı:", type(db_exc).__name__)
+            raise HTTPException(
+                503,
+                "Sohbet veritabanına şu anda bağlanılamıyor. Biraz sonra tekrar dene; mesajın gönderilmedi.",
+            )
+
+        msgs.extend({"role": x["role"], "content": x["content"]} for x in history)
+        msgs.append({"role": "user", "content": user_message})
+
+        # Generate the answer without holding any database connection.
+        if plan in ("pro", "plus"):
+            try:
+                answer = call_ollama(msgs, OLLAMA_PRO_MODEL)
+            except RuntimeError as model_exc:
+                print("[Tekden AI] Pro model başarısız, temel modele geçiliyor:", type(model_exc).__name__)
+                answer = call_ollama(msgs, OLLAMA_MODEL)
+        else:
+            answer = call_ollama(msgs, OLLAMA_MODEL)
+
+        audit_info = {"performed": False, "mode": "not_needed"}
+        if plan == "plus" and should_run_epistemic_audit(user_message, sources, body.force_search):
+            try:
+                answer = epistemic_audit(
+                    user_message, answer, sources,
+                    model=OLLAMA_PRO_MODEL if plan in ("pro", "plus") else OLLAMA_MODEL,
+                )
+                audit_info = {
+                    "performed": True,
+                    "mode": "source_and_logic" if sources else "logic_and_uncertainty",
+                }
+            except Exception as audit_exc:
+                audit_info = {"performed": False, "mode": "audit_unavailable"}
+                print("[Tekden AI] Epistemik denetim tamamlanamadı:", type(audit_exc).__name__)
+
+        # Persist the user/assistant pair atomically in a short transaction.
+        # A failed write is reported explicitly; the generated answer is still
+        # returned so the UI can show it and offer a retry instead of losing it.
+        try:
+            with db() as save_conn:
+                save_conn.execute(
+                    "INSERT INTO messages(chat_id,role,content) VALUES(%s,'user',%s)",
+                    (chat_id, user_message),
+                )
+                save_conn.execute(
+                    "INSERT INTO messages(chat_id,role,content) VALUES(%s,'assistant',%s)",
+                    (chat_id, answer),
+                )
+                save_conn.execute(
+                    "UPDATE chats SET updated_at=NOW(), "
+                    "title=CASE WHEN title='Yeni sohbet' THEN %s ELSE title END WHERE id=%s AND user_id=%s",
+                    (user_message[:70] or "Yeni sohbet", chat_id, user["id"]),
+                )
+                verify = save_conn.execute(
+                    "SELECT COUNT(*) AS n FROM messages "
+                    "WHERE chat_id=%s AND ((role='user' AND content=%s) OR (role='assistant' AND content=%s))",
+                    (chat_id, user_message, answer),
+                ).fetchone()
+                if not verify or int(verify.get("n", 0)) < 2:
+                    raise RuntimeError("Mesaj kayıt doğrulaması başarısız.")
+        except Exception as save_exc:
+            print("[Tekden AI] Sohbet kaydı başarısız:", type(save_exc).__name__)
+            return {
+                "answer": answer,
+                "chat_id": chat_id,
+                "sources": sources,
+                "saved": False,
+                "save_status": "database_write_failed",
+                "save_error": "Yanıt oluşturuldu ancak sohbet veritabanına kaydedilemedi. Tekrar kaydetmeyi deneyebilirsin.",
+                "epistemic_check": audit_info,
+                "search_attempted": use_search,
+                "search_failed": search_failed,
+            }
+
+        return {
+            "answer": answer,
+            "chat_id": chat_id,
+            "sources": sources,
+            "saved": True,
+            "save_status": "saved",
+            "epistemic_check": audit_info,
+            "search_attempted": use_search,
+            "search_failed": search_failed,
+        }
     # Guest chat is intentionally not written to the database.
     for item in body.guest_history[-24:]:
         if isinstance(item, dict) and item.get("role") in ("user","assistant") and isinstance(item.get("content"), str):
@@ -6995,7 +7066,7 @@ async function send(){
   if(file){const answer=await analyzeAttachment(text,file);bubble('assistant',answer);if(user){try{const saved=await api('/api/save-analysis',{method:'POST',body:JSON.stringify({question:text||'Ekli dosyayı analiz et.',answer,filename:file.name,chat_id:chatId})});if(saved.chat_id)chatId=saved.chat_id;loadChats()}catch(saveError){console.warn('Dosya analizi geçmişe kaydedilemedi',saveError)}}else {guestHistory.push({role:'user',content:(text||'Ekli dosyayı analiz et.')+' [Dosya: '+file.name+']'},{role:'assistant',content:answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}selectedFile=null;$('fileInput').value='';$('fileName').textContent='Dosya seçilmedi';setStatus('Dosya analizi tamamlandı');}
   else if(looksLikeGameRequest(text)){const game=await api('/api/game',{method:'POST',body:JSON.stringify({prompt:text})});gameBubble(game.html);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İsteğine göre oynanabilir bir oyun oluşturuldu.'});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Oyun hazır');}
   else if(looksLikeImageRequest(text)){await createAndShowImage(text);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İstenen görsel oluşturuldu. İstek: '+text});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Görsel hazır');}
-  else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(docIntent?.format==='docx'){await tdDownloadWord(d.answer,d.sources||[],docIntent.title)}else if(docIntent?.format==='pdf'){await tdDownloadPdf(d.answer,d.sources||[],docIntent.title)}else if(['txt','md','json','html','csv'].includes(docIntent?.format)){tdDownloadText(d.answer,docIntent.title,docIntent.format)}if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus('UYARI: Bu mesaj Supabase’e kaydedilmedi. Hesabından çıkış yapıp yeniden giriş yap.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else if(d.search_failed)setStatus('Web araması denendi ancak sağlayıcı sonuç döndürmedi. TAVILY_API_KEY ayarını ve arama sağlayıcısı erişimini kontrol et.');else setStatus('Tamamlandı');}
+  else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(docIntent?.format==='docx'){await tdDownloadWord(d.answer,d.sources||[],docIntent.title)}else if(docIntent?.format==='pdf'){await tdDownloadPdf(d.answer,d.sources||[],docIntent.title)}else if(['txt','md','json','html','csv'].includes(docIntent?.format)){tdDownloadText(d.answer,docIntent.title,docIntent.format)}if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus(d.save_error||'UYARI: Bu mesaj Supabase’e kaydedilmedi.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else if(d.search_failed)setStatus('Web araması denendi ancak sağlayıcı sonuç döndürmedi. TAVILY_API_KEY ayarını ve arama sağlayıcısı erişimini kontrol et.');else setStatus('Tamamlandı');}
   if($('prompt').value.trim()===text.trim())$('prompt').value='';
  }catch(e){if(text&&!$('prompt').value.trim())$('prompt').value=text;bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeGameRequest(text)?'Oyun oluşturulamadı: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}
  finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)';$('searchBtn').textContent='⌕ Web ara'}
@@ -12337,3 +12408,44 @@ def call_ollama(messages, model=None):
 # Do not hard-code account passwords in source control. Set the values in
 # Render -> Service -> Environment, then deploy/restart once. Existing accounts
 # with the same usernames are updated to the configured plan and password.
+
+
+# =============================================================================
+# TEKDEN AI V8 — DATABASE/CHAT DIAGNOSTICS (ADDITIVE)
+# =============================================================================
+@app.get("/api/health/chat")
+def chat_health():
+    """Safe operational check; never returns credentials, hostnames or message data."""
+    result = {
+        "ok": False,
+        "database_configured": bool(DATABASE_URL),
+        "model_key_configured": bool(OLLAMA_API_KEY),
+        "database": "not_configured",
+        "required_tables": {},
+    }
+    if not DATABASE_URL:
+        result["reason"] = "DATABASE_URL eksik"
+        return result
+    try:
+        with db() as conn:
+            conn.execute("SELECT 1").fetchone()
+            result["database"] = "connected"
+            for table in ("users", "chats", "messages"):
+                found = conn.execute(
+                    "SELECT to_regclass(%s) AS name",
+                    ("public." + table,),
+                ).fetchone()
+                result["required_tables"][table] = bool(found and found.get("name"))
+        result["ok"] = bool(OLLAMA_API_KEY and all(result["required_tables"].values()))
+        if not OLLAMA_API_KEY:
+            result["reason"] = "OLLAMA_API_KEY eksik"
+        elif not all(result["required_tables"].values()):
+            result["reason"] = "Gerekli sohbet tablolarından biri eksik"
+        else:
+            result["reason"] = "Veritabanı ve temel sohbet yapılandırması hazır"
+    except Exception as exc:
+        result["database"] = "connection_error"
+        result["reason"] = type(exc).__name__
+        print("[Tekden AI] Sohbet sağlık kontrolü başarısız:", type(exc).__name__)
+    return result
+
