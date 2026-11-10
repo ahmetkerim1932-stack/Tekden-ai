@@ -12617,3 +12617,268 @@ def td_error_diagnostics_health():
         "api_error_reporting": True,
         "private_infrastructure_details": "not_disclosed",
     }
+
+
+# =============================================================================
+# TEKDEN AI V11 — CLOUD MODEL NAME NORMALIZATION + API FAILOVER (ADDITIVE)
+# This block intentionally overrides call_ollama at runtime without deleting
+# any earlier route, feature, helper, or source line.
+#
+# IMPORTANT MODEL-NAME RULE:
+# Ollama CLI cloud aliases such as "gpt-oss:120b-cloud" are normalized for the
+# direct hosted API to the model identifier "gpt-oss:120b".
+#
+# Primary transport: https://ollama.com/api/chat
+# Compatibility fallback: https://ollama.com/v1/chat/completions
+# No new Python package or environment variable is required.
+# =============================================================================
+
+_TD_V10_CALL_OLLAMA = call_ollama
+_TD_OLLAMA_PRIMARY_URL_V11 = "https://ollama.com/api/chat"
+_TD_OLLAMA_COMPAT_URL_V11 = "https://ollama.com/v1/chat/completions"
+
+
+class TDModelServiceError(RuntimeError):
+    """Safe model-service error; never stores the API key or private host data."""
+
+    def __init__(self, status_code=502, category="upstream_error"):
+        self.status_code = int(status_code or 502)
+        self.category = str(category or "upstream_error")
+        super().__init__(f"Ollama API hatası ({self.status_code}): {self.category}")
+
+
+def td_normalize_ollama_cloud_model_v11(model_name):
+    """Convert a CLI cloud alias into the hosted API model identifier."""
+    clean_name = str(model_name or OLLAMA_MODEL or "").strip()
+    if clean_name.endswith("-cloud"):
+        clean_name = clean_name[:-6].strip()
+    return clean_name
+
+
+def td_prepare_ollama_messages_v11(messages):
+    """Copy prompts and append the product's existing infrastructure wording."""
+    prepared = []
+    for item in (messages or []):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "user").strip()
+        content = item.get("content")
+        if not isinstance(content, str):
+            content = str(content or "")
+        if role not in ("system", "user", "assistant", "tool"):
+            role = "user"
+        prepared.append({"role": role, "content": content})
+
+    infrastructure_rule = (
+        "TEKDEN AI ALTYAPI SORULARI İÇİN ÜRÜN YANITI:\n"
+        "Tekden AI'ın kendi uygulama ve backend sunucu altyapısı vardır; kullanıcı "
+        "mesajları önce bu Tekden AI altyapısına ulaşır. Yanıt üretiminde bulut "
+        "tabanlı model altyapısı kullanılabilir. Sağlayıcı ve mimari ayrıntılar "
+        "kamuya açıklanmaz. Kullanıcı GPT, Cloud veya hangi sağlayıcıya bağlı "
+        "olduğunu sorarsa Tekden AI'ın kendi uygulama sunucusu olduğunu ve "
+        "yanıt üretiminde bulut tabanlı model altyapısı kullanılabildiğini açıkça "
+        "belirt; modelin tamamen Tekden AI sunucularında çalıştığını veya "
+        "hiçbir harici servis kullanılmadığını iddia etme. Daha fazla ayrıntı "
+        "isterse şu kısa yanıtı ver: 'Üzgünüz, altyapımızın daha fazla teknik "
+        "ayrıntısı gizlidir.' Yanıtı kısa ve doğal tut."
+    )
+    if prepared and prepared[0].get("role") == "system":
+        prepared[0]["content"] = (
+            prepared[0]["content"] + "\n\n" + infrastructure_rule
+        )
+    else:
+        prepared.insert(0, {"role": "system", "content": infrastructure_rule})
+    return prepared
+
+
+def td_extract_ollama_content_v11(data):
+    """Accept the documented Ollama and OpenAI-compatible response shapes."""
+    if not isinstance(data, dict):
+        return ""
+    message = data.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+    response = data.get("response")
+    if isinstance(response, str) and response.strip():
+        return response.strip()
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        choice_message = first.get("message") if isinstance(first, dict) else {}
+        if isinstance(choice_message, dict):
+            content = choice_message.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    return ""
+
+
+def td_ollama_native_call_v11(model_name, prepared_messages):
+    """Call the native hosted chat endpoint with the normalized model name."""
+    response = requests.post(
+        _TD_OLLAMA_PRIMARY_URL_V11,
+        headers={
+            "Authorization": "Bearer " + OLLAMA_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        json={
+            "model": model_name,
+            "messages": prepared_messages,
+            "stream": False,
+        },
+        timeout=(10, 85),
+    )
+    if response.status_code in (401, 403):
+        raise TDModelServiceError(response.status_code, "authentication")
+    if response.status_code == 429:
+        raise TDModelServiceError(429, "rate_limit")
+    if response.status_code in (500, 502, 503, 504):
+        raise TDModelServiceError(response.status_code, "temporary_upstream")
+    if response.status_code >= 400:
+        raise TDModelServiceError(response.status_code, "request_or_model_configuration")
+
+    try:
+        data = response.json()
+    except ValueError:
+        raise TDModelServiceError(502, "invalid_json_response")
+
+    answer = td_extract_ollama_content_v11(data)
+    if not answer:
+        raise TDModelServiceError(502, "empty_model_response")
+    return answer
+
+
+def td_ollama_compat_call_v11(model_name, prepared_messages):
+    """Fallback to Ollama's documented OpenAI-compatible cloud endpoint."""
+    response = requests.post(
+        _TD_OLLAMA_COMPAT_URL_V11,
+        headers={
+            "Authorization": "Bearer " + OLLAMA_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        json={
+            "model": model_name,
+            "messages": prepared_messages,
+            "stream": False,
+        },
+        timeout=(10, 85),
+    )
+    if response.status_code in (401, 403):
+        raise TDModelServiceError(response.status_code, "authentication")
+    if response.status_code == 429:
+        raise TDModelServiceError(429, "rate_limit")
+    if response.status_code in (500, 502, 503, 504):
+        raise TDModelServiceError(response.status_code, "temporary_upstream")
+    if response.status_code >= 400:
+        raise TDModelServiceError(response.status_code, "request_or_model_configuration")
+
+    try:
+        data = response.json()
+    except ValueError:
+        raise TDModelServiceError(502, "invalid_compatibility_json")
+
+    answer = td_extract_ollama_content_v11(data)
+    if not answer:
+        raise TDModelServiceError(502, "empty_compatibility_response")
+    return answer
+
+
+def call_ollama(messages, model=None):
+    """
+    V11 model call:
+    1) normalize cloud model alias for direct API use;
+    2) try the native Ollama API;
+    3) on transient 5xx/invalid response, use the OpenAI-compatible endpoint;
+    4) retry the compatibility endpoint once for a transient 5xx only.
+    """
+    if not OLLAMA_API_KEY:
+        raise RuntimeError("OLLAMA_API_KEY eksik. Sunucu ayarlarını kontrol et.")
+
+    selected_model = td_normalize_ollama_cloud_model_v11(model or OLLAMA_MODEL)
+    if not selected_model:
+        raise TDModelServiceError(503, "model_not_configured")
+
+    prepared_messages = td_prepare_ollama_messages_v11(messages)
+
+    try:
+        return td_ollama_native_call_v11(selected_model, prepared_messages)
+    except TDModelServiceError as native_error:
+        print(
+            "[Tekden AI] Birincil model API yolu sonuç vermedi; yedek API yolu deneniyor:",
+            native_error.status_code,
+            native_error.category,
+        )
+        if native_error.status_code in (401, 403, 429):
+            raise RuntimeError(str(native_error))
+        if native_error.status_code not in (400, 404, 408, 422, 500, 502, 503, 504):
+            raise RuntimeError(str(native_error))
+    except requests.Timeout:
+        # A timed-out generation is not duplicated automatically. This avoids
+        # making the user wait through several full-length generation attempts.
+        raise RuntimeError("Ollama API hatası (504): native_timeout")
+    except requests.RequestException as network_error:
+        print(
+            "[Tekden AI] Birincil model API bağlantı hatası:",
+            type(network_error).__name__,
+        )
+        # A separate documented API route can still work when only one route
+        # is temporarily unavailable.
+
+    try:
+        return td_ollama_compat_call_v11(selected_model, prepared_messages)
+    except TDModelServiceError as compat_error:
+        if compat_error.status_code in (500, 502, 503, 504):
+            time.sleep(0.8)
+            try:
+                return td_ollama_compat_call_v11(selected_model, prepared_messages)
+            except TDModelServiceError as retry_error:
+                print(
+                    "[Tekden AI] Yedek model API denemesi de başarısız:",
+                    retry_error.status_code,
+                    retry_error.category,
+                )
+                raise RuntimeError(str(retry_error))
+        print(
+            "[Tekden AI] Yedek model API yolu başarısız:",
+            compat_error.status_code,
+            compat_error.category,
+        )
+        raise RuntimeError(str(compat_error))
+    except requests.Timeout:
+        raise RuntimeError("Ollama API hatası (504): compatibility_timeout")
+    except requests.RequestException as compat_network_error:
+        print(
+            "[Tekden AI] Model API bağlantısı kurulamadı:",
+            type(compat_network_error).__name__,
+        )
+        raise RuntimeError("Ollama API hatası (502): provider_connection_failed")
+
+
+# V11 non-sensitive diagnostic endpoint: verifies model configuration only.
+# It does not make a paid model call and never returns the key or server details.
+@app.get("/api/health/model", include_in_schema=False)
+def td_model_configuration_health_v11():
+    raw_primary = str(OLLAMA_MODEL or "").strip()
+    raw_pro = str(OLLAMA_PRO_MODEL or "").strip()
+    return {
+        "ok": bool(OLLAMA_API_KEY and raw_primary),
+        "api_key_configured": bool(OLLAMA_API_KEY),
+        "primary_model_configured": bool(raw_primary),
+        "pro_model_configured": bool(raw_pro),
+        "model_names_private": True,
+        "model_alias_normalization": True,
+        "compatibility_fallback": True,
+    }
+
+
+# Keep a unique version string so the live deployment can be checked safely.
+@app.get("/api/version-v11", include_in_schema=False)
+def td_public_app_version_v11():
+    return {
+        "app": "Tekden AI",
+        "build": "v11-ollama-cloud-api-compatibility",
+        "additive_update": True,
+    }
