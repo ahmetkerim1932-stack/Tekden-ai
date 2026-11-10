@@ -6850,7 +6850,40 @@ function bubble(role,content,sources=[]){$('welcome')?.remove();const d=document
 function gameBubble(html){$('welcome')?.remove();const wrap=document.createElement('div');wrap.className='bubble assistant';wrap.style.cssText='width:min(100%,1100px);padding:14px';const bar=document.createElement('div');bar.style.cssText='display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px';const heading=document.createElement('div');heading.textContent='🎮 Tekden AI Pro oyun stüdyosu · Oyun hazır';heading.style.cssText='font-weight:800';bar.appendChild(heading);const actions=document.createElement('div');actions.style.cssText='display:flex;gap:7px;flex-wrap:wrap';const full=document.createElement('button');full.className='secondary';full.textContent='⛶ Tam ekran';const download=document.createElement('button');download.className='secondary';download.textContent='↓ HTML indir';actions.append(full,download);bar.appendChild(actions);wrap.appendChild(bar);const frame=document.createElement('iframe');frame.title='Tekden AI Pro tarafından oluşturulan oynanabilir oyun';frame.sandbox='allow-scripts allow-pointer-lock';frame.srcdoc=html;frame.style.cssText='display:block;width:100%;height:clamp(560px,75vh,820px);border:1px solid #bcd8f5;border-radius:14px;background:#07111f';wrap.appendChild(frame);full.onclick=()=>{if(frame.requestFullscreen)frame.requestFullscreen().catch(()=>{});else alert('Bu tarayıcı tam ekranı desteklemiyor.')};download.onclick=()=>{const blob=new Blob([html],{type:'text/html;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='tekden-ai-oyunu.html';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1000)};const note=document.createElement('div');note.textContent='Kontroller oyunun içinde görünür. Tam ekran oynayabilir veya HTML dosyası olarak indirip bilgisayarında açabilirsin.';note.style.cssText='font-size:12px;color:#526784;margin-top:9px';wrap.appendChild(note);$('messages').appendChild(wrap);$('messages').scrollTop=$('messages').scrollHeight}
 function looksLikeGameRequest(text){const t=String(text||'').toLocaleLowerCase('tr-TR').normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/ı/g,'i');const hasGame=/(^|\s)(oyun|oyunu|oyuncu|game|mini oyun|platformer)(\s|$)/.test(t);const action=/(olustur|yap|tasarla|gelistir|kodla|uret|hazirla|baslat|oynanabilir|yapalim)/.test(t);return (hasGame&&action)||/araba yarisi|araba oyunu|platform oyunu|oyun yap/.test(t)}
 function imageBubble(data){$('welcome')?.remove();const d=document.createElement('div');d.className='bubble assistant';const title=document.createElement('div');title.textContent='Oluşturulan görsel';d.appendChild(title);const img=document.createElement('img');img.src=data;img.alt='Yapay zekâ tarafından oluşturulan görsel';img.loading='lazy';d.appendChild(img);const link=document.createElement('a');link.href=data;link.download='tekden-ai-gorsel.png';link.textContent='Görseli indir ↓';link.style.cssText='display:inline-block;margin-top:10px;color:#7651e8;font-weight:600';d.appendChild(link);$('messages').appendChild(d);$('messages').scrollTop=$('messages').scrollHeight}
-async function api(url,opts={}){const r=await fetch(url,{credentials:'same-origin',...opts,headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok){let detail=d.detail??d.message??'İstek başarısız oldu.';if(Array.isArray(detail))detail=detail.map(x=>x.msg||JSON.stringify(x)).join(' · ');else if(typeof detail==='object')detail=JSON.stringify(detail);throw new Error(String(detail))}return d}
+async function api(url,opts={}){
+ const requestUrl=String(url||'');
+ let response;
+ try{
+  response=await fetch(requestUrl,{credentials:'same-origin',...opts,headers:{'Content-Type':'application/json',...(opts.headers||{})}});
+ }catch(networkError){
+  const reason=(networkError&&networkError.message)||'Ağ bağlantısı kurulamadı';
+  throw new Error('Sunucuya ulaşılamadı ('+requestUrl+'). '+reason);
+ }
+ const raw=await response.text();
+ let data={};
+ if(raw){
+  try{data=JSON.parse(raw)}
+  catch(parseError){
+   const contentType=response.headers.get('content-type')||'';
+   const preview=raw.replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<style[\s\S]*?<\/style>/gi,' ').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,260);
+   if(!response.ok){
+    throw new Error('Sunucu HTTP '+response.status+' döndürdü; JSON hata açıklaması alınamadı.'+(preview?' Yanıt özeti: '+preview:'')+' İstek: '+requestUrl);
+   }
+   if(contentType.includes('text/html')){
+    throw new Error('Sunucu JSON yerine HTML sayfası döndürdü. İstek: '+requestUrl);
+   }
+   throw new Error('Sunucudan geçerli JSON yanıtı alınamadı. HTTP '+response.status+'. İstek: '+requestUrl);
+  }
+ }
+ if(!response.ok){
+  let detail=data.detail??data.message??data.error??('HTTP '+response.status);
+  if(Array.isArray(detail))detail=detail.map(x=>x.msg||JSON.stringify(x)).join(' · ');
+  else if(typeof detail==='object')detail=JSON.stringify(detail);
+  const code=data.error_code?' Destek kodu: '+data.error_code+'.':'';
+  throw new Error(String(detail)+code+' (HTTP '+response.status+', '+requestUrl+')');
+ }
+ return data;
+}
 async function refreshMe(){
  try{
   const d=await api('/api/me');
@@ -12449,3 +12482,138 @@ def chat_health():
         print("[Tekden AI] Sohbet sağlık kontrolü başarısız:", type(exc).__name__)
     return result
 
+# =============================================================================
+# TEKDEN AI V9 — CHAT API ERROR REPORTING (ADDITIVE, NO EXISTING FEATURES REMOVED)
+# Convert unexpected /api/chat failures into safe JSON so the browser can show
+# a useful explanation instead of the generic "İstek başarısız oldu" message.
+# No credentials, infrastructure addresses, SQL, or private message content are
+# returned to the browser.
+# =============================================================================
+@app.middleware("http")
+async def td_chat_safe_json_errors(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as exc:
+        if request.url.path != "/api/chat" or request.method != "POST":
+            raise
+
+        error_code = secrets.token_hex(3).upper()
+        # Check the outer exception first. Starlette/AnyIO may attach an
+        # EndOfStream as __cause__ while preserving the real endpoint error
+        # (for example RuntimeError) as the raised exception itself.
+        candidates = [exc]
+        seen = set()
+        matched_exc = exc
+        while candidates:
+            candidate = candidates.pop(0)
+            if id(candidate) in seen:
+                continue
+            seen.add(id(candidate))
+            if isinstance(candidate, (requests.Timeout, psycopg.Error, requests.RequestException, RuntimeError)):
+                matched_exc = candidate
+                break
+            for linked in (getattr(candidate, "__context__", None), getattr(candidate, "__cause__", None)):
+                if linked is not None and id(linked) not in seen:
+                    candidates.append(linked)
+            for nested in getattr(candidate, "exceptions", ()):
+                if nested is not None and id(nested) not in seen:
+                    candidates.append(nested)
+
+        status_code = 500
+        if isinstance(matched_exc, requests.Timeout):
+            status_code = 504
+            detail = "Yanıt servisi zamanında yanıt vermedi. Biraz sonra yeniden dene."
+        elif isinstance(matched_exc, psycopg.Error):
+            status_code = 503
+            detail = "Sohbet veritabanına erişilemedi. Bağlantı ve tablo durumunu kontrol etmek gerekiyor."
+        elif isinstance(matched_exc, requests.RequestException):
+            status_code = 502
+            detail = "Yanıt servisine ulaşılamadı. Sunucu bağlantısını kontrol edip yeniden dene."
+        elif isinstance(matched_exc, RuntimeError):
+            message = str(matched_exc).lower()
+            if "429" in message:
+                status_code = 503
+                detail = "Yanıt servisi şu anda kullanım sınırına ulaştı. Biraz sonra yeniden dene."
+            elif "401" in message or "403" in message:
+                status_code = 503
+                detail = "Yanıt servisinin erişim ayarlarında sorun var. Sunucu ayarları kontrol edilmeli."
+            elif "ollama_api_key" in message:
+                status_code = 503
+                detail = "Yanıt servisi henüz yapılandırılmamış. Sunucu ayarları kontrol edilmeli."
+            else:
+                status_code = 502
+                detail = "Yanıt servisi geçerli bir yanıt oluşturamadı. Biraz sonra yeniden dene."
+        else:
+            detail = (
+                "Sohbet sırasında beklenmeyen bir sunucu hatası oluştu. "
+                f"Destek kodu: {error_code}."
+            )
+
+        print(
+            "[Tekden AI] /api/chat güvenli hata yanıtı:",
+            error_code,
+            type(matched_exc).__name__,
+        )
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "detail": detail,
+                "error_code": error_code,
+                "endpoint": "chat",
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
+
+# Keep the deployed application version easy to identify without exposing
+# private hosting or model-provider configuration.
+@app.get("/api/version", include_in_schema=False)
+def td_public_app_version():
+    return {"app": "Tekden AI", "build": "v9-chat-error-reporting"}
+
+
+# =============================================================================
+# TEKDEN AI V10 — GLOBAL SAFE JSON ERROR HANDLER (ADDITIVE)
+# The frontend now receives a useful HTTP status/support code instead of a
+# generic browser message when an unexpected API exception occurs.
+# Private credentials, hostnames, IP addresses and SQL details are never sent.
+# =============================================================================
+@app.exception_handler(Exception)
+async def td_global_safe_json_exception_handler(request: Request, exc: Exception):
+    support_code = secrets.token_hex(3).upper()
+    path = request.url.path
+    exc_name = type(exc).__name__
+    print(
+        "[Tekden AI] Güvenli API hata kaydı:",
+        support_code,
+        request.method,
+        path,
+        exc_name,
+    )
+    # Keep the public message concise; detailed infrastructure information stays private.
+    if path == "/api/chat":
+        public_detail = "Sohbet isteği sunucuda tamamlanamadı. Destek kodu: " + support_code
+    elif path.startswith("/api/"):
+        public_detail = "İstek sunucuda tamamlanamadı. Destek kodu: " + support_code
+    else:
+        public_detail = "Beklenmeyen bir sunucu hatası oluştu. Destek kodu: " + support_code
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": public_detail,
+            "error_code": support_code,
+            "endpoint": path,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# A small non-sensitive diagnostics endpoint to verify the deployed build.
+@app.get("/api/health/errors", include_in_schema=False)
+def td_error_diagnostics_health():
+    return {
+        "ok": True,
+        "build": "v10-request-error-diagnostics",
+        "api_error_reporting": True,
+        "private_infrastructure_details": "not_disclosed",
+    }
