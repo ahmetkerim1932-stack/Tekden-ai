@@ -12882,3 +12882,316 @@ def td_public_app_version_v11():
         "build": "v11-ollama-cloud-api-compatibility",
         "additive_update": True,
     }
+
+
+# =============================================================================
+# TEKDEN AI V12 — LIVE MODEL-ID RESOLUTION + UPSTREAM ERROR DIAGNOSTICS
+# Additive patch: no earlier routes, features, helpers, or source lines removed.
+# The model ID is selected from the provider's own /api/tags response instead
+# of guessing whether a CLI cloud alias should keep or lose its suffix.
+# =============================================================================
+
+_TD_OLLAMA_TAGS_URL_V12 = "https://ollama.com/api/tags"
+
+
+def td_model_candidates_v12(configured_name):
+    """Return likely API identifiers without assuming a CLI alias is an API ID."""
+    raw = str(configured_name or "").strip()
+    if not raw:
+        return []
+    candidates = [raw]
+    if raw.endswith("-cloud"):
+        candidates.append(raw[:-6])
+    elif raw.endswith(":cloud"):
+        candidates.append(raw[:-6])
+    elif ":" in raw:
+        # Keep the original first; add a cloud CLI alias only as a last resort.
+        candidates.append(raw + "-cloud")
+    result = []
+    for item in candidates:
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+def td_provider_model_ids_v12():
+    """Read model IDs from the provider's documented tags endpoint."""
+    response = requests.get(
+        _TD_OLLAMA_TAGS_URL_V12,
+        headers={
+            "Authorization": "Bearer " + OLLAMA_API_KEY,
+            "Accept": "application/json",
+        },
+        timeout=(5, 12),
+    )
+    if response.status_code in (401, 403):
+        raise TDModelServiceError(response.status_code, "tags_authentication")
+    if response.status_code == 429:
+        raise TDModelServiceError(429, "tags_rate_limit")
+    if response.status_code >= 500:
+        raise TDModelServiceError(response.status_code, "tags_temporarily_unavailable")
+    if response.status_code >= 400:
+        raise TDModelServiceError(response.status_code, "tags_endpoint_rejected")
+
+    payload = response.json()
+    items = payload.get("models", []) if isinstance(payload, dict) else []
+    names = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("model") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def td_resolve_model_id_v12(configured_name):
+    """
+    Resolve the configured model against live provider IDs.
+    Exact match wins. Suffix normalization is used only if the provider's
+    returned list confirms that normalized ID exists.
+    """
+    candidates = td_model_candidates_v12(configured_name)
+    if not candidates:
+        raise TDModelServiceError(503, "model_not_configured")
+    try:
+        available = td_provider_model_ids_v12()
+    except (requests.RequestException, ValueError) as exc:
+        # Tags lookup is diagnostic/discovery only. Continue with the configured
+        # name if the provider's tags endpoint is temporarily unavailable.
+        print("[Tekden AI] Model listesi okunamadı:", type(exc).__name__)
+        return candidates[0]
+
+    if not available:
+        print("[Tekden AI] Sağlayıcı model listesi boş döndü; ayarlı model adı kullanılacak.")
+        return candidates[0]
+
+    for candidate in candidates:
+        if candidate in available:
+            return candidate
+
+    # Some providers return a namespace or a tag variant. Only accept a
+    # suffix-equivalent result; never silently select an unrelated model.
+    normalized = {
+        candidate.replace("-cloud", "").replace(":cloud", "")
+        for candidate in candidates
+    }
+    for available_name in available:
+        if available_name.replace("-cloud", "").replace(":cloud", "") in normalized:
+            return available_name
+
+    # Do not silently switch to an unrelated model or incur unknown costs.
+    raise TDModelServiceError(404, "configured_model_not_available_in_provider_catalog")
+
+
+def td_safe_provider_error_v12(response, endpoint_label):
+    """Log a bounded provider error message with credentials and payload omitted."""
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            raw_message = payload.get("error") or payload.get("message") or ""
+        else:
+            raw_message = ""
+    except Exception:
+        raw_message = ""
+
+    message = str(raw_message)
+    message = re.sub(r"(?i)bearer\\s+[a-z0-9._~+/=-]+", "Bearer [REDACTED]", message)
+    message = re.sub(r"(?i)(api[_ -]?key|token|password|secret)\\s*[:=]\\s*[^\\s,;]+", r"\\1=[REDACTED]", message)
+    message = re.sub(r"https?://[^\\s]+", "[URL]", message)
+    message = re.sub(r"\\s+", " ", message).strip()[:240]
+    print(
+        "[Tekden AI] Model sağlayıcı yanıtı:",
+        endpoint_label,
+        "HTTP",
+        response.status_code,
+        "Açıklama:",
+        message or "sağlayıcı açıklama döndürmedi",
+    )
+
+
+def td_post_ollama_v12(url, model_name, prepared_messages, endpoint_label):
+    """Shared, bounded POST implementation for both documented API routes."""
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": "Bearer " + OLLAMA_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        json={
+            "model": model_name,
+            "messages": prepared_messages,
+            "stream": False,
+        },
+        timeout=(10, 70),
+    )
+
+    if response.status_code >= 400:
+        td_safe_provider_error_v12(response, endpoint_label)
+        if response.status_code in (401, 403):
+            raise TDModelServiceError(response.status_code, "authentication")
+        if response.status_code == 429:
+            raise TDModelServiceError(429, "rate_limit")
+        if response.status_code in (500, 502, 503, 504):
+            raise TDModelServiceError(response.status_code, "temporary_upstream")
+        if response.status_code in (400, 404, 422):
+            raise TDModelServiceError(response.status_code, "model_or_request_rejected")
+        raise TDModelServiceError(response.status_code, "provider_rejected_request")
+
+    try:
+        payload = response.json()
+    except ValueError:
+        raise TDModelServiceError(502, "provider_returned_non_json")
+
+    answer = td_extract_ollama_content_v11(payload)
+    if not answer:
+        td_safe_provider_error_v12(response, endpoint_label)
+        raise TDModelServiceError(502, "provider_returned_empty_answer")
+    return answer
+
+
+def call_ollama(messages, model=None):
+    """
+    V12 model call:
+    - checks configured model against the provider's live model catalog;
+    - prefers the exact catalog ID and never picks an unrelated model;
+    - tries native API, then OpenAI-compatible API on a transient failure;
+    - does not retry authentication/rate-limit/model-not-found errors blindly.
+    """
+    if not OLLAMA_API_KEY:
+        raise RuntimeError("OLLAMA_API_KEY eksik. Sunucu ayarlarını kontrol et.")
+
+    configured_model = str(model or OLLAMA_MODEL or "").strip()
+    if not configured_model:
+        raise RuntimeError("Model yapılandırması eksik.")
+
+    try:
+        selected_model = td_resolve_model_id_v12(configured_model)
+    except TDModelServiceError as model_error:
+        print(
+            "[Tekden AI] Model kimliği doğrulanamadı:",
+            model_error.status_code,
+            model_error.category,
+        )
+        raise RuntimeError(
+            "Ollama API hatası (" + str(model_error.status_code) + "): " + model_error.category
+        )
+
+    prepared_messages = td_prepare_ollama_messages_v11(messages)
+
+    try:
+        return td_post_ollama_v12(
+            _TD_OLLAMA_PRIMARY_URL_V11,
+            selected_model,
+            prepared_messages,
+            "native_chat",
+        )
+    except TDModelServiceError as primary_error:
+        print(
+            "[Tekden AI] Birincil model API sonucu:",
+            primary_error.status_code,
+            primary_error.category,
+        )
+        if primary_error.status_code in (401, 403, 429, 404, 400, 422):
+            raise RuntimeError(
+                "Ollama API hatası (" + str(primary_error.status_code) + "): " + primary_error.category
+            )
+    except requests.Timeout:
+        print("[Tekden AI] Birincil model API zaman aşımı; uyumlu API yolu deneniyor.")
+    except requests.RequestException as primary_network_error:
+        print("[Tekden AI] Birincil model API bağlantı hatası:", type(primary_network_error).__name__)
+
+    try:
+        return td_post_ollama_v12(
+            _TD_OLLAMA_COMPAT_URL_V11,
+            selected_model,
+            prepared_messages,
+            "openai_compatible_chat",
+        )
+    except TDModelServiceError as fallback_error:
+        print(
+            "[Tekden AI] Yedek model API sonucu:",
+            fallback_error.status_code,
+            fallback_error.category,
+        )
+        if fallback_error.status_code in (500, 502, 503, 504):
+            raise RuntimeError(
+                "Ollama API hatası (" + str(fallback_error.status_code) + "): " + fallback_error.category
+            )
+        raise RuntimeError(
+            "Ollama API hatası (" + str(fallback_error.status_code) + "): " + fallback_error.category
+        )
+    except requests.Timeout:
+        raise RuntimeError("Ollama API hatası (504): compatibility_timeout")
+    except requests.RequestException as fallback_network_error:
+        print("[Tekden AI] Yedek model API bağlantı hatası:", type(fallback_network_error).__name__)
+        raise RuntimeError("Ollama API hatası (502): provider_connection_failed")
+
+
+@app.get("/api/health/model-catalog", include_in_schema=False)
+def td_model_catalog_health_v12():
+    """Safe diagnostic: report whether the configured model exists, not its name."""
+    if not OLLAMA_API_KEY:
+        return {
+            "ok": False,
+            "api_key_configured": False,
+            "model_configured": bool(OLLAMA_MODEL),
+            "catalog_reachable": False,
+            "configured_model_available": False,
+            "reason": "api_key_missing",
+        }
+    try:
+        names = td_provider_model_ids_v12()
+        candidates = td_model_candidates_v12(OLLAMA_MODEL)
+        available = any(name in names for name in candidates)
+        if not available:
+            normalized = {
+                name.replace("-cloud", "").replace(":cloud", "")
+                for name in candidates
+            }
+            available = any(
+                name.replace("-cloud", "").replace(":cloud", "") in normalized
+                for name in names
+            )
+        return {
+            "ok": bool(names and available),
+            "api_key_configured": True,
+            "model_configured": bool(OLLAMA_MODEL),
+            "catalog_reachable": True,
+            "configured_model_available": bool(available),
+            "catalog_count": len(names),
+            "model_names_private": True,
+            "reason": "model_available" if available else "configured_model_not_found",
+        }
+    except TDModelServiceError as exc:
+        return {
+            "ok": False,
+            "api_key_configured": True,
+            "model_configured": bool(OLLAMA_MODEL),
+            "catalog_reachable": False,
+            "configured_model_available": False,
+            "model_names_private": True,
+            "reason": exc.category,
+            "provider_status": exc.status_code,
+        }
+    except Exception as exc:
+        print("[Tekden AI] Model katalog kontrolü başarısız:", type(exc).__name__)
+        return {
+            "ok": False,
+            "api_key_configured": True,
+            "model_configured": bool(OLLAMA_MODEL),
+            "catalog_reachable": False,
+            "configured_model_available": False,
+            "model_names_private": True,
+            "reason": type(exc).__name__,
+        }
+
+
+@app.get("/api/version-v12", include_in_schema=False)
+def td_public_app_version_v12():
+    return {
+        "app": "Tekden AI",
+        "build": "v12-live-model-catalog",
+        "additive_update": True,
+    }
