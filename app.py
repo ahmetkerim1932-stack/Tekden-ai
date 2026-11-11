@@ -7106,7 +7106,7 @@ async function send(){
  const text=$('prompt').value.trim();const file=selectedFile;if(!text&&!file)return;
  const sentWithSearch=!!forceSearch;
  const docIntent=(!file&&!looksLikeGameRequest(text)&&!looksLikeImageRequest(text))?tdDetectDocumentRequest(text):null;
- $('prompt').value='';bubble('user',(text||'Ekli dosyayı analiz et.')+(file?'\n📎 '+file.name:''));
+ $('prompt').value='';const outgoingBubble=bubble('user',(text||'Ekli dosyayı analiz et.')+(file?'\n📎 '+file.name:''));
  setStatus(file?'Dosya analiz ediliyor…':looksLikeImageRequest(text)?'İstenen görsel oluşturuluyor…':(forceSearch?'Derin web araması yapılıyor…':'Yanıt hazırlanıyor…'));$('sendBtn').disabled=true;
  try{
   if(file){const answer=await analyzeAttachment(text,file);bubble('assistant',answer);if(user){try{const saved=await api('/api/save-analysis',{method:'POST',body:JSON.stringify({question:text||'Ekli dosyayı analiz et.',answer,filename:file.name,chat_id:chatId})});if(saved.chat_id)chatId=saved.chat_id;loadChats()}catch(saveError){console.warn('Dosya analizi geçmişe kaydedilemedi',saveError)}}else {guestHistory.push({role:'user',content:(text||'Ekli dosyayı analiz et.')+' [Dosya: '+file.name+']'},{role:'assistant',content:answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}selectedFile=null;$('fileInput').value='';$('fileName').textContent='Dosya seçilmedi';setStatus('Dosya analizi tamamlandı');}
@@ -7115,6 +7115,9 @@ async function send(){
   else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(docIntent?.format==='docx'){await tdDownloadWord(d.answer,d.sources||[],docIntent.title)}else if(docIntent?.format==='pdf'){await tdDownloadPdf(d.answer,d.sources||[],docIntent.title)}else if(['txt','md','json','html','csv'].includes(docIntent?.format)){tdDownloadText(d.answer,docIntent.title,docIntent.format)}if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus(d.save_error||'UYARI: Bu mesaj Supabase’e kaydedilmedi.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else if(d.search_failed)setStatus('Web araması denendi ancak sağlayıcı sonuç döndürmedi. TAVILY_API_KEY ayarını ve arama sağlayıcısı erişimini kontrol et.');else setStatus('Tamamlandı');}
   if($('prompt').value.trim()===text.trim())$('prompt').value='';
  }catch(e){
+  // Failed requests are not successful conversation turns.
+  // Keep their text only in the retry/edit controls below.
+  if(outgoingBubble&&outgoingBubble.parentNode)outgoingBubble.remove();
   const errorNode=bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeGameRequest(text)?'Oyun oluşturulamadı: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);
   if(text||file){
    const retryBtn=document.createElement('button');
@@ -7128,8 +7131,19 @@ async function send(){
     send();
    };
    errorNode.appendChild(retryBtn);
+   const editBtn=document.createElement('button');
+   editBtn.type='button';editBtn.className='secondary message-edit-btn';
+   editBtn.textContent='✎ Düzenle';
+   editBtn.style.cssText='display:inline-block;margin:9px 0 0 8px;padding:7px 11px;font-size:12px';
+   editBtn.onclick=()=>{
+    $('prompt').value=text;
+    forceSearch=sentWithSearch;
+    $('prompt').focus();
+    setStatus('Mesaj düzenleme alanına alındı. Düzenleyip tekrar gönderebilirsin.');
+   };
+   errorNode.appendChild(editBtn);
    const retained=document.createElement('div');
-   retained.textContent='Gönderdiğin metin yukarıdaki mesajında korunuyor. Soru kutusu temizlendi; yeniden göndermek için bu düğmeyi kullanabilir veya mesajın üzerindeki Düzenle seçeneğine basabilirsin.';
+   retained.textContent='Gönderim tamamlanmadığı için mesaj sohbet akışından kaldırıldı. Metnin yeniden dene ve düzenle seçeneklerinde korunuyor; soru kutusu boş bırakıldı.';
    retained.style.cssText='font-size:12px;color:var(--muted);margin-top:7px';
    errorNode.appendChild(retained);
   }
@@ -10733,27 +10747,13 @@ _TD_TOUCH_CHAT_SEND_JS = r"""
 
     sending = true;
     lastActivation = now;
-    const originalText = input.value;
-    const previousAssistantCount = document.querySelectorAll('.bubble.assistant .bubble-content').length;
     button.disabled = true;
     button.setAttribute('aria-busy', 'true');
     try {
+      // send() owns the message lifecycle and clears the composer. This
+      // touch layer must never restore input.value after the main handler.
       await originalSend();
-      // The original handler displays its own error bubble. Restore the text
-      // only after a failed attempt so a temporary mobile network drop is
-      // recoverable without retyping the message.
-      const assistantBubbles = document.querySelectorAll('.bubble.assistant .bubble-content');
-      if (assistantBubbles.length > previousAssistantCount && !input.value.trim()) {
-        const latest = assistantBubbles[assistantBubbles.length - 1];
-        const latestText = (latest && latest.textContent || '').trim();
-        if (/^(Hata:|Dosya analiz edilemedi:|Oyun oluşturulamadı:|Görsel oluşturulamadı:)/i.test(latestText)) {
-          input.value = originalText;
-          input.focus({ preventScroll: true });
-          setSendStatus('Gönderim başarısız oldu. Mesajın korundu; bağlantını kontrol edip tekrar deneyebilirsin.');
-        }
-      }
     } catch (error) {
-      if (!input.value.trim()) input.value = originalText;
       setSendStatus('Mesaj gönderilemedi: ' + String(error && error.message || error));
     } finally {
       sending = false;
@@ -12583,7 +12583,14 @@ async def td_chat_safe_json_errors(request: Request, call_next):
                 status_code = 503
                 detail = "Yapılandırılmış model bu isteği kabul etmedi. Model ayarları kontrol edilmeli."
             elif status_code in (500, 502, 503):
-                detail = "Yanıt sağlayıcısı geçici bir hata döndürdü. Biraz sonra tekrar dene."
+                if "hf_token_not_configured" in category:
+                    detail = "Ana yanıt sağlayıcısı kullanılamıyor ve yedek sağlayıcı için HF_TOKEN ayarlanmamış. Render ortam ayarları kontrol edilmeli."
+                elif "hf_all_candidates_unavailable" in category:
+                    detail = "Ana ve yedek yanıt sağlayıcıları şu anda model sunamıyor. Yedek sağlayıcı erişimi ve model kullanılabilirliği kontrol edilmeli."
+                elif "hf_" in category:
+                    detail = "Yedek yanıt sağlayıcısı da yanıt üretemedi. HF_TOKEN izni, kredi durumu veya sağlayıcı erişimi kontrol edilmeli."
+                else:
+                    detail = "Yanıt sağlayıcısı geçici olarak kullanılamıyor. Sağlayıcı erişimi veya model durumu kontrol edilmeli."
             else:
                 status_code = 502
                 detail = "Yanıt sağlayıcısından geçerli bir sonuç alınamadı."
@@ -13858,17 +13865,12 @@ def td_hf_error_category_v16(status_code):
 
 def td_call_huggingface_fallback_v16(messages):
     """
-    Request a small, low-cost chat model through Hugging Face Inference Providers.
-    Requires the already-configured HF_TOKEN to have Inference Providers access.
-    Never enables automatic paid overages or reveals the token.
+    Try several Hugging Face documented chat models. Continue on model-specific
+    routing failures; stop immediately on account-level auth/quota/rate limits.
     """
     token = str(HF_TOKEN or "").strip()
     if not token:
-        raise TDModelCallError(
-            503,
-            "hf_fallback_unavailable_hf_token_not_configured",
-            allow_basic_fallback=False,
-        )
+        raise TDModelCallError(503, "hf_token_not_configured")
 
     try:
         prepared_messages = td_prepare_ollama_messages_v11(messages)
@@ -13886,61 +13888,81 @@ def td_call_huggingface_fallback_v16(messages):
                 })
 
     if not prepared_messages:
-        raise TDModelCallError(400, "hf_fallback_empty_messages")
+        raise TDModelCallError(400, "hf_empty_messages")
 
     audit_mode = bool(getattr(_TD_MODEL_CONTEXT_V13, "audit_mode", False))
-    read_timeout = 18 if audit_mode else 32
+    timeout_seconds = 14 if audit_mode else 25
+    output_limit = 300 if audit_mode else 450
+    candidates = [
+        "google/gemma-2-2b-it:cheapest",
+        "Qwen/Qwen3-4B-Thinking-2507:cheapest",
+        "Qwen/Qwen2.5-7B-Instruct-1M:cheapest",
+    ]
+    last_category = "hf_no_candidate_completed"
+    last_status = 503
 
-    try:
-        response = requests.post(
-            _TD_HF_CHAT_URL_V16,
-            headers={
-                "Authorization": "Bearer " + token,
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            json={
-                "model": _TD_HF_CHAT_MODEL_V16,
-                "messages": prepared_messages,
-                "max_tokens": 600 if not audit_mode else 350,
-                "stream": False,
-            },
-            timeout=(5, read_timeout),
-        )
-    except requests.Timeout:
-        raise TDModelCallError(504, "hf_provider_timeout")
-    except requests.RequestException as network_error:
-        print(
-            "[Tekden AI] Yedek yanıt sağlayıcısına erişilemedi:",
-            type(network_error).__name__,
-        )
-        raise TDModelCallError(502, "hf_provider_connection_error")
+    for attempt, model_id in enumerate(candidates, start=1):
+        try:
+            response = requests.post(
+                _TD_HF_CHAT_URL_V16,
+                headers={
+                    "Authorization": "Bearer " + token,
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json={
+                    "model": model_id,
+                    "messages": prepared_messages,
+                    "max_tokens": output_limit,
+                    "stream": False,
+                },
+                timeout=(4, timeout_seconds),
+            )
+        except requests.Timeout:
+            last_status, last_category = 504, "hf_model_timeout"
+            print("[Tekden AI] HF model denemesi zaman aşımı:", attempt)
+            continue
+        except requests.RequestException as network_exc:
+            last_status, last_category = 502, "hf_network_error"
+            print("[Tekden AI] HF ağ hatası:", type(network_exc).__name__)
+            continue
 
-    if response.status_code >= 400:
-        category = td_hf_error_category_v16(response.status_code)
-        # Never print the raw provider response; it can contain account data.
-        print(
-            "[Tekden AI] Yedek yanıt sağlayıcısı:",
-            "HTTP",
-            response.status_code,
-            category,
-        )
-        raise TDModelCallError(
-            response.status_code if response.status_code in (402, 408, 413, 429, 504) else 503,
-            category,
-            allow_basic_fallback=False,
-        )
+        if response.status_code >= 400:
+            last_status = response.status_code
+            last_category = td_hf_error_category_v16(response.status_code)
+            print(
+                "[Tekden AI] HF model denemesi:",
+                attempt,
+                "HTTP",
+                response.status_code,
+                last_category,
+            )
+            if response.status_code in (401, 402, 403, 429):
+                raise TDModelCallError(response.status_code, last_category)
+            if response.status_code in (400, 404, 408, 413, 500, 502, 503, 504):
+                continue
+            raise TDModelCallError(response.status_code, last_category)
 
-    try:
-        payload = response.json()
-    except ValueError:
-        raise TDModelCallError(502, "hf_provider_invalid_json")
+        try:
+            payload = response.json()
+        except ValueError:
+            last_status, last_category = 502, "hf_invalid_json"
+            continue
 
-    answer = td_extract_ollama_content_v11(payload)
-    if not answer:
-        raise TDModelCallError(502, "hf_provider_empty_answer")
+        answer = td_extract_ollama_content_v11(payload)
+        if answer:
+            print("[Tekden AI] HF yanıtı alındı. Başarılı model denemesi:", attempt)
+            return answer.strip()
 
-    return answer.strip()
+        last_status, last_category = 502, "hf_empty_answer"
+
+    if last_status in (402, 429):
+        raise TDModelCallError(last_status, last_category)
+    raise TDModelCallError(
+        503,
+        "hf_all_candidates_unavailable:" + last_category,
+        allow_basic_fallback=False,
+    )
 
 
 def call_ollama(messages, model=None):
@@ -13960,7 +13982,11 @@ def call_ollama(messages, model=None):
             raise
 
         if not HF_TOKEN:
-            raise
+            raise TDModelCallError(
+                primary_error.status_code if primary_error.status_code in (402, 503, 504) else 503,
+                "ollama_unavailable_and_hf_token_not_configured:" + primary_error.category,
+                allow_basic_fallback=False,
+            )
 
         print(
             "[Tekden AI] Birincil yanıt yolu kullanılamadı; "
@@ -14004,4 +14030,29 @@ def td_public_app_version_v16():
         "app": "Tekden AI",
         "build": "v16-multi-provider-response-fallback",
         "additive_update": True,
+    }
+
+
+# =============================================================================
+# TEKDEN AI V17 — PROMPT BOX FIX + MULTI-MODEL PROVIDER FALLBACK
+# =============================================================================
+
+@app.get("/api/version-v17", include_in_schema=False)
+def td_public_app_version_v17():
+    return {
+        "app": "Tekden AI",
+        "build": "v17-prompt-clear-multi-model-fallback",
+        "additive_update": True,
+    }
+
+
+@app.get("/api/health/chat-ui-v17", include_in_schema=False)
+def td_chat_ui_health_v17():
+    return {
+        "ok": True,
+        "build": "v17-prompt-clear-multi-model-fallback",
+        "failed_prompt_reinsert_disabled": True,
+        "failed_user_bubble_removed": True,
+        "retry_and_edit_actions": True,
+        "fallback_provider_requires_hf_token": True,
     }
