@@ -7103,6 +7103,7 @@ function tdDetectDocumentRequest(text){
 }
 async function send(){
  const text=$('prompt').value.trim();const file=selectedFile;if(!text&&!file)return;
+ const sentWithSearch=!!forceSearch;
  const docIntent=(!file&&!looksLikeGameRequest(text)&&!looksLikeImageRequest(text))?tdDetectDocumentRequest(text):null;
  $('prompt').value='';bubble('user',(text||'Ekli dosyayı analiz et.')+(file?'\n📎 '+file.name:''));
  setStatus(file?'Dosya analiz ediliyor…':looksLikeImageRequest(text)?'İstenen görsel oluşturuluyor…':(forceSearch?'Derin web araması yapılıyor…':'Yanıt hazırlanıyor…'));$('sendBtn').disabled=true;
@@ -7112,7 +7113,27 @@ async function send(){
   else if(looksLikeImageRequest(text)){await createAndShowImage(text);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İstenen görsel oluşturuldu. İstek: '+text});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Görsel hazır');}
   else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(docIntent?.format==='docx'){await tdDownloadWord(d.answer,d.sources||[],docIntent.title)}else if(docIntent?.format==='pdf'){await tdDownloadPdf(d.answer,d.sources||[],docIntent.title)}else if(['txt','md','json','html','csv'].includes(docIntent?.format)){tdDownloadText(d.answer,docIntent.title,docIntent.format)}if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus(d.save_error||'UYARI: Bu mesaj Supabase’e kaydedilmedi.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else if(d.search_failed)setStatus('Web araması denendi ancak sağlayıcı sonuç döndürmedi. TAVILY_API_KEY ayarını ve arama sağlayıcısı erişimini kontrol et.');else setStatus('Tamamlandı');}
   if($('prompt').value.trim()===text.trim())$('prompt').value='';
- }catch(e){if(text&&!$('prompt').value.trim())$('prompt').value=text;bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeGameRequest(text)?'Oyun oluşturulamadı: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);setStatus('Hata')}
+ }catch(e){
+  const errorNode=bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeGameRequest(text)?'Oyun oluşturulamadı: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);
+  if(text||file){
+   const retryBtn=document.createElement('button');
+   retryBtn.type='button';retryBtn.className='secondary message-edit-btn';
+   retryBtn.textContent='↻ Yeniden dene';
+   retryBtn.style.cssText='display:inline-block;margin:9px 0 0 0;padding:7px 11px;font-size:12px';
+   retryBtn.onclick=()=>{
+    if(text)$('prompt').value=text;
+    forceSearch=sentWithSearch;
+    retryBtn.disabled=true;retryBtn.textContent='Gönderiliyor…';
+    send();
+   };
+   errorNode.appendChild(retryBtn);
+   const retained=document.createElement('div');
+   retained.textContent='Gönderdiğin metin yukarıdaki mesajında korunuyor. Soru kutusu temizlendi; yeniden göndermek için bu düğmeyi kullanabilir veya mesajın üzerindeki Düzenle seçeneğine basabilirsin.';
+   retained.style.cssText='font-size:12px;color:var(--muted);margin-top:7px';
+   errorNode.appendChild(retained);
+  }
+  setStatus('Hata · Gönderilen metin konuşmada korundu; soru kutusu temizlendi.');
+}
  finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)';$('searchBtn').textContent='⌕ Web ara'}
 }
 
@@ -12540,6 +12561,36 @@ async def td_chat_safe_json_errors(request: Request, call_next):
         elif isinstance(matched_exc, requests.RequestException):
             status_code = 502
             detail = "Yanıt servisine ulaşılamadı. Sunucu bağlantısını kontrol edip yeniden dene."
+        elif isinstance(matched_exc, TDModelCallError):
+            status_code = int(matched_exc.status_code or 502)
+            category = str(matched_exc.category or "upstream_error")
+            if status_code == 402:
+                detail = (
+                    "Yanıt modeli mevcut plan kapsamında kullanılamıyor veya ek kullanım hakkı gerekiyor. "
+                    "Temel model de yanıt veremedi. Model erişim ve kullanım durumunu kontrol et."
+                )
+            elif status_code in (401, 403):
+                status_code = 503
+                detail = "Yanıt servisinin erişim ayarlarında sorun var. Sunucu erişim ayarları kontrol edilmeli."
+            elif status_code == 429:
+                status_code = 503
+                detail = "Yanıt servisi kullanım sınırına ulaştı. Biraz sonra tekrar dene."
+            elif status_code in (408, 504):
+                status_code = 504
+                detail = "Yanıt servisi zamanında yanıt vermedi. Tekrar deneyebilirsin."
+            elif status_code in (400, 404, 422):
+                status_code = 503
+                detail = "Yapılandırılmış model bu isteği kabul etmedi. Model ayarları kontrol edilmeli."
+            elif status_code in (500, 502, 503):
+                detail = "Yanıt sağlayıcısı geçici bir hata döndürdü. Biraz sonra tekrar dene."
+            else:
+                status_code = 502
+                detail = "Yanıt sağlayıcısından geçerli bir sonuç alınamadı."
+            print(
+                "[Tekden AI] /api/chat sağlayıcı tanısı:",
+                status_code,
+                category,
+            )
         elif isinstance(matched_exc, RuntimeError):
             message = str(matched_exc).lower()
             if "429" in message:
@@ -13016,10 +13067,10 @@ def td_safe_provider_error_v12(response, endpoint_label):
         raw_message = ""
 
     message = str(raw_message)
-    message = re.sub(r"(?i)bearer\\s+[a-z0-9._~+/=-]+", "Bearer [REDACTED]", message)
-    message = re.sub(r"(?i)(api[_ -]?key|token|password|secret)\\s*[:=]\\s*[^\\s,;]+", r"\\1=[REDACTED]", message)
-    message = re.sub(r"https?://[^\\s]+", "[URL]", message)
-    message = re.sub(r"\\s+", " ", message).strip()[:240]
+    message = re.sub(r"(?i)bearer\s+[a-z0-9._~+/=-]+", "Bearer [REDACTED]", message)
+    message = re.sub(r"(?i)(api[_ -]?key|token|password|secret)\s*[:=]\s*[^\s,;]+", r"\g<1>=[REDACTED]", message)
+    message = re.sub(r"https?://[^\s]+", "[URL]", message)
+    message = re.sub(r"\s+", " ", message).strip()[:240]
     print(
         "[Tekden AI] Model sağlayıcı yanıtı:",
         endpoint_label,
@@ -13360,12 +13411,43 @@ def td_model_request_v13(url, model_name, messages, timeout, endpoint_label):
     )
 
     if response.status_code >= 400:
+        safe_provider_reason = ""
+        try:
+            provider_payload = response.json()
+            if isinstance(provider_payload, dict):
+                safe_provider_reason = str(
+                    provider_payload.get("error")
+                    or provider_payload.get("message")
+                    or ""
+                )
+        except Exception:
+            safe_provider_reason = ""
+        safe_provider_reason = re.sub(
+            r"(?i)bearer\s+[a-z0-9._~+/=-]+",
+            "Bearer [REDACTED]",
+            safe_provider_reason,
+        )
+        safe_provider_reason = re.sub(
+            r"(?i)(api[_ -]?key|token|password|secret)\s*[:=]\s*[^\s,;]+",
+            r"\g<1>=[REDACTED]",
+            safe_provider_reason,
+        )
+        safe_provider_reason = re.sub(r"https?://[^\s]+", "[URL]", safe_provider_reason)
+        safe_provider_reason = re.sub(r"\s+", " ", safe_provider_reason).strip()[:220]
         print(
             "[Tekden AI] Model API yanıtı:",
             endpoint_label,
             "HTTP",
             response.status_code,
+            "category:",
+            safe_provider_reason or "provider_no_detail",
         )
+        if response.status_code == 402:
+            raise TDModelCallError(
+                402,
+                "model_plan_or_usage_credit_required",
+                allow_basic_fallback=True,
+            )
         if response.status_code in (401, 403):
             raise TDModelCallError(response.status_code, "authentication")
         if response.status_code == 429:
@@ -13513,4 +13595,35 @@ def td_public_app_version_v13():
         "app": "Tekden AI",
         "build": "v13-bounded-chat-generation",
         "additive_update": True,
+    }
+
+
+# =============================================================================
+# TEKDEN AI V14 — CHAT FAILURE CLASSIFICATION AND COMPOSER RECOVERY
+# Additive release marker. Existing tools, routes, plans, and UI sections stay.
+# =============================================================================
+
+@app.get("/api/version-v14", include_in_schema=False)
+def td_public_app_version_v14():
+    return {
+        "app": "Tekden AI",
+        "build": "v14-chat-error-classification-composer-recovery",
+        "additive_update": True,
+    }
+
+
+@app.get("/api/health/chat-contract", include_in_schema=False)
+def td_chat_contract_health_v14():
+    """
+    Non-sensitive static health response. It does not spend model credits,
+    reveal environment variables, expose internal hostnames, or test credentials.
+    """
+    return {
+        "ok": True,
+        "build": "v14-chat-error-classification-composer-recovery",
+        "chat_error_classification": True,
+        "http_402_fallback": True,
+        "failed_prompt_kept_in_conversation": True,
+        "composer_cleared_after_failed_send": True,
+        "retry_action": True,
     }
