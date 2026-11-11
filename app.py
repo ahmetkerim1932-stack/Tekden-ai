@@ -13627,3 +13627,198 @@ def td_chat_contract_health_v14():
         "composer_cleared_after_failed_send": True,
         "retry_action": True,
     }
+
+
+# =============================================================================
+# TEKDEN AI V15 — REAL HTTP 402 RECOVERY THROUGH OPTIONAL PRIVATE LOCAL OLLAMA
+# A 402 from Ollama Cloud is an account entitlement/usage condition, not a
+# Python exception that can be bypassed. This patch optionally routes the same
+# request to the operator's own Ollama server when one is configured privately.
+# No server address or credential is returned to the browser or health checks.
+# =============================================================================
+
+def td_local_ollama_settings_v15():
+    """
+    Read optional private local inference settings from the process environment.
+    This does not modify .env or require the app to reveal the private server URL.
+    """
+    base_url = (
+        os.getenv("OLLAMA_LOCAL_URL", "").strip()
+        or os.getenv("OLLAMA_PRIVATE_URL", "").strip()
+    ).rstrip("/")
+    local_model = os.getenv("OLLAMA_LOCAL_MODEL", "").strip()
+    local_token = os.getenv("OLLAMA_LOCAL_API_KEY", "").strip()
+
+    if not base_url:
+        return None
+
+    # Only accept explicit HTTP(S) origins. Never accept credentials in URL,
+    # query strings, fragments, or arbitrary paths from a user request.
+    try:
+        parsed = urllib.parse.urlsplit(base_url)
+        if parsed.scheme not in ("http", "https"):
+            return None
+        if not parsed.netloc or parsed.username or parsed.password:
+            return None
+        if parsed.query or parsed.fragment:
+            return None
+        if parsed.path not in ("", "/"):
+            return None
+    except Exception:
+        return None
+
+    return {
+        "base_url": base_url,
+        "model": local_model,
+        "token": local_token,
+    }
+
+
+def td_local_model_name_v15(configured_model, explicit_local_model=""):
+    """Choose a private local model name without the cloud-only suffix."""
+    if explicit_local_model:
+        return explicit_local_model
+    raw = str(configured_model or OLLAMA_MODEL or "").strip()
+    if raw.endswith("-cloud"):
+        return raw[:-6]
+    if raw.endswith(":cloud"):
+        return raw[:-6]
+    return raw
+
+
+def td_call_private_local_ollama_v15(messages, configured_model):
+    """Try the operator-configured private Ollama endpoint; never expose its URL."""
+    settings = td_local_ollama_settings_v15()
+    if not settings:
+        raise TDModelCallError(
+            402,
+            "cloud_usage_requires_plan_or_credits_and_no_private_local_endpoint_configured",
+            allow_basic_fallback=False,
+        )
+
+    local_model = td_local_model_name_v15(
+        configured_model,
+        settings.get("model", ""),
+    )
+    if not local_model:
+        raise TDModelCallError(503, "private_local_model_not_configured")
+
+    prepared_messages = td_prepare_ollama_messages_v11(messages)
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if settings.get("token"):
+        headers["Authorization"] = "Bearer " + settings["token"]
+
+    # The URL comes only from the server's private environment, never from the
+    # request body. No response includes the URL or token.
+    endpoint = settings["base_url"] + "/api/chat"
+    try:
+        response = requests.post(
+            endpoint,
+            headers=headers,
+            json={
+                "model": local_model,
+                "messages": prepared_messages,
+                "stream": False,
+            },
+            timeout=(4, 55),
+        )
+    except requests.Timeout:
+        raise TDModelCallError(504, "private_local_model_timeout")
+    except requests.RequestException as local_network_error:
+        print(
+            "[Tekden AI] Özel yerel model sunucusuna erişilemedi:",
+            type(local_network_error).__name__,
+        )
+        raise TDModelCallError(503, "private_local_model_unreachable")
+
+    if response.status_code >= 400:
+        # Only log status and a generic category. Never log the private URL,
+        # response body, request payload, or Authorization header.
+        print(
+            "[Tekden AI] Özel yerel model sunucusu yanıtı:",
+            "HTTP",
+            response.status_code,
+        )
+        if response.status_code in (401, 403):
+            raise TDModelCallError(503, "private_local_model_authentication")
+        if response.status_code == 404:
+            raise TDModelCallError(503, "private_local_model_or_route_not_found")
+        if response.status_code in (429, 503):
+            raise TDModelCallError(503, "private_local_model_busy")
+        raise TDModelCallError(502, "private_local_model_rejected_request")
+
+    try:
+        payload = response.json()
+    except ValueError:
+        raise TDModelCallError(502, "private_local_model_invalid_json")
+
+    answer = td_extract_ollama_content_v11(payload)
+    if not answer:
+        raise TDModelCallError(502, "private_local_model_empty_answer")
+    return answer
+
+
+_TD_CLOUD_CALL_V14 = call_ollama
+
+
+def call_ollama(messages, model=None):
+    """
+    V15:
+    - Preserve the existing Ollama Cloud path and model-selection logic.
+    - On HTTP 402 only, optionally route to the operator's private Ollama server.
+    - If no private server is configured, return an accurate actionable 402.
+    - Never pretend a cloud usage restriction was fixed by retrying the same API.
+    """
+    configured_model = str(model or OLLAMA_MODEL or "").strip()
+    try:
+        return _TD_CLOUD_CALL_V14(messages, model)
+    except TDModelCallError as cloud_error:
+        if cloud_error.status_code != 402:
+            raise
+        print(
+            "[Tekden AI] Bulut modelinde HTTP 402 alındı; özel yerel model yolu kontrol ediliyor."
+        )
+        try:
+            local_answer = td_call_private_local_ollama_v15(
+                messages,
+                configured_model,
+            )
+            print("[Tekden AI] Yanıt özel yerel model altyapısından üretildi.")
+            return local_answer
+        except TDModelCallError as local_error:
+            print(
+                "[Tekden AI] Özel yerel model yolu da kullanılamadı:",
+                local_error.category,
+            )
+            raise local_error
+
+
+@app.get("/api/health/model-fallback-v15", include_in_schema=False)
+def td_model_fallback_health_v15():
+    """
+    Safe status only: reports whether private local fallback is configured.
+    It never returns the URL, hostname, model name, or token.
+    """
+    settings = td_local_ollama_settings_v15()
+    return {
+        "ok": bool(OLLAMA_API_KEY or settings),
+        "cloud_api_key_configured": bool(OLLAMA_API_KEY),
+        "private_local_fallback_configured": bool(settings),
+        "private_local_model_explicitly_configured": bool(
+            settings and settings.get("model")
+        ),
+        "private_server_details": "not_disclosed",
+        "http_402_recovery": "private_local_fallback_if_configured",
+    }
+
+
+@app.get("/api/version-v15", include_in_schema=False)
+def td_public_app_version_v15():
+    return {
+        "app": "Tekden AI",
+        "build": "v15-http402-private-local-fallback",
+        "additive_update": True,
+    }
