@@ -1704,6 +1704,11 @@ Yazım ve anlatım kuralları:
             try:
                 answer = call_ollama(msgs, OLLAMA_PRO_MODEL)
             except RuntimeError as model_exc:
+                if isinstance(model_exc, TDModelCallError) and not model_exc.allow_basic_fallback:
+                    # Authentication, rate-limit, connection and timeout errors
+                    # affect both configured models; repeating the same request
+                    # with the base model only lengthens the API request.
+                    raise
                 print("[Tekden AI] Pro model başarısız, temel modele geçiliyor:", type(model_exc).__name__)
                 answer = call_ollama(msgs, OLLAMA_MODEL)
         else:
@@ -1712,6 +1717,7 @@ Yazım ve anlatım kuralları:
         audit_info = {"performed": False, "mode": "not_needed"}
         if plan == "plus" and should_run_epistemic_audit(user_message, sources, body.force_search):
             try:
+                _TD_MODEL_CONTEXT_V13.audit_mode = True
                 answer = epistemic_audit(
                     user_message, answer, sources,
                     model=OLLAMA_PRO_MODEL if plan in ("pro", "plus") else OLLAMA_MODEL,
@@ -1723,6 +1729,8 @@ Yazım ve anlatım kuralları:
             except Exception as audit_exc:
                 audit_info = {"performed": False, "mode": "audit_unavailable"}
                 print("[Tekden AI] Epistemik denetim tamamlanamadı:", type(audit_exc).__name__)
+            finally:
+                _TD_MODEL_CONTEXT_V13.audit_mode = False
 
         # Persist the user/assistant pair atomically in a short transaction.
         # A failed write is reported explicitly; the generated answer is still
@@ -1782,11 +1790,14 @@ Yazım ve anlatım kuralları:
     audit_info = {"performed": False, "mode": "not_needed"}
     if plan == "plus" and should_run_epistemic_audit(user_message, sources, body.force_search):
         try:
+            _TD_MODEL_CONTEXT_V13.audit_mode = True
             answer = epistemic_audit(user_message, answer, sources, model=OLLAMA_MODEL)
             audit_info = {"performed": True, "mode": "source_and_logic" if sources else "logic_and_uncertainty"}
         except Exception as audit_exc:
             audit_info = {"performed": False, "mode": "audit_unavailable"}
             print("[Tekden AI] Misafir yanıt denetimi tamamlanamadı:", type(audit_exc).__name__)
+        finally:
+            _TD_MODEL_CONTEXT_V13.audit_mode = False
     return {"answer": answer, "chat_id": None, "sources": sources, "saved": False, "epistemic_check": audit_info, "search_attempted": use_search, "search_failed": search_failed}
 
 def improve_image_prompt(prompt: str) -> str:
@@ -12540,6 +12551,15 @@ async def td_chat_safe_json_errors(request: Request, call_next):
             elif "ollama_api_key" in message:
                 status_code = 503
                 detail = "Yanıt servisi henüz yapılandırılmamış. Sunucu ayarları kontrol edilmeli."
+            elif "504" in message or "timeout" in message or "timed_out" in message:
+                status_code = 504
+                detail = "Yanıt servisi zamanında yanıt vermedi. İstek süresi sınırlandırıldı; tekrar deneyebilirsin."
+            elif "503" in message:
+                status_code = 503
+                detail = "Yanıt servisi geçici olarak kullanılamıyor. Biraz sonra tekrar dene."
+            elif "404" in message or "400" in message or "422" in message:
+                status_code = 503
+                detail = "Yapılandırılmış model bu isteği kabul etmedi. Model ayarları kontrol edilmeli."
             else:
                 status_code = 502
                 detail = "Yanıt servisi geçerli bir yanıt oluşturamadı. Biraz sonra yeniden dene."
@@ -13193,5 +13213,304 @@ def td_public_app_version_v12():
     return {
         "app": "Tekden AI",
         "build": "v12-live-model-catalog",
+        "additive_update": True,
+    }
+
+
+# =============================================================================
+# TEKDEN AI V13 — BOUNDED CHAT GENERATION AND NON-BLOCKING MODEL DISCOVERY
+# All earlier features and routes are preserved. This section overrides only
+# the model transport and adds guarded request-time handling to existing chat.
+# =============================================================================
+
+_TD_MODEL_CONTEXT_V13 = threading.local()
+_TD_MODEL_CATALOG_CACHE_V13 = {"expires_at": 0.0, "names": []}
+_TD_MODEL_CATALOG_LOCK_V13 = threading.Lock()
+
+
+class TDModelCallError(RuntimeError):
+    """Safe model-call failure with an explicit fallback policy."""
+
+    def __init__(self, status_code, category, allow_basic_fallback=False):
+        self.status_code = int(status_code or 502)
+        self.category = str(category or "upstream_error")
+        self.allow_basic_fallback = bool(allow_basic_fallback)
+        super().__init__(
+            "Ollama API hatası (" + str(self.status_code) + "): " + self.category
+        )
+
+
+def td_api_model_candidates_v13(configured_model):
+    """Prefer API model IDs; keep the configured CLI alias only as a last resort."""
+    raw = str(configured_model or "").strip()
+    if not raw:
+        return []
+    result = []
+    if raw.endswith("-cloud"):
+        result.append(raw[:-6])
+        result.append(raw)
+    elif raw.endswith(":cloud"):
+        # CLI aliases such as family:cloud must be resolved against /api/tags.
+        result.append(raw)
+        result.append(raw[:-6])
+    else:
+        result.append(raw)
+    return [value for index, value in enumerate(result) if value and value not in result[:index]]
+
+
+def td_model_catalog_fast_v13():
+    """
+    Best-effort catalog lookup with a strict 5-second transport budget and a
+    10-minute in-process cache. Catalog failure never blocks chat generation.
+    """
+    now = time.monotonic()
+    cached = _TD_MODEL_CATALOG_CACHE_V13
+    if cached["names"] and now < cached["expires_at"]:
+        return list(cached["names"])
+
+    with _TD_MODEL_CATALOG_LOCK_V13:
+        now = time.monotonic()
+        cached = _TD_MODEL_CATALOG_CACHE_V13
+        if cached["names"] and now < cached["expires_at"]:
+            return list(cached["names"])
+        if not OLLAMA_API_KEY:
+            return []
+        try:
+            response = requests.get(
+                "https://ollama.com/api/tags",
+                headers={
+                    "Authorization": "Bearer " + OLLAMA_API_KEY,
+                    "Accept": "application/json",
+                },
+                timeout=(2, 3),
+            )
+            if response.status_code >= 400:
+                print(
+                    "[Tekden AI] Model kataloğu kullanılamadı:",
+                    "HTTP",
+                    response.status_code,
+                )
+                return []
+            payload = response.json()
+            items = payload.get("models", []) if isinstance(payload, dict) else []
+            names = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or item.get("model") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+            _TD_MODEL_CATALOG_CACHE_V13["names"] = names
+            _TD_MODEL_CATALOG_CACHE_V13["expires_at"] = time.monotonic() + 600
+            return list(names)
+        except Exception as catalog_exc:
+            # This is intentionally not fatal: model generation gets a chance
+            # to use the normalized configured model name below.
+            print(
+                "[Tekden AI] Model kataloğu gecikti/erişilemedi:",
+                type(catalog_exc).__name__,
+            )
+            return []
+
+
+def td_resolve_model_ids_v13(configured_model):
+    """
+    Resolve the configured model against the live catalog if available.
+    If the catalog is offline, use a normalized API candidate instead of
+    aborting the chat before the actual inference request.
+    """
+    candidates = td_api_model_candidates_v13(configured_model)
+    if not candidates:
+        raise TDModelCallError(503, "model_not_configured")
+
+    available = td_model_catalog_fast_v13()
+    if available:
+        exact = [candidate for candidate in candidates if candidate in available]
+        if exact:
+            return exact
+
+        # Some CLI aliases are family:cloud while the API catalog lists the
+        # full family:tag. Only accept a unique family match; never guess among
+        # several different model variants.
+        raw = str(configured_model or "").strip()
+        family = raw[:-6] if raw.endswith(":cloud") else ""
+        if family:
+            matches = [name for name in available if name.startswith(family + ":")]
+            if len(matches) == 1:
+                return matches
+
+    return candidates
+
+
+def td_model_request_v13(url, model_name, messages, timeout, endpoint_label):
+    """Send one non-streaming request and validate the assistant text."""
+    response = requests.post(
+        url,
+        headers={
+            "Authorization": "Bearer " + OLLAMA_API_KEY,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        json={
+            "model": model_name,
+            "messages": messages,
+            "stream": False,
+        },
+        timeout=timeout,
+    )
+
+    if response.status_code >= 400:
+        print(
+            "[Tekden AI] Model API yanıtı:",
+            endpoint_label,
+            "HTTP",
+            response.status_code,
+        )
+        if response.status_code in (401, 403):
+            raise TDModelCallError(response.status_code, "authentication")
+        if response.status_code == 429:
+            raise TDModelCallError(429, "rate_limit")
+        if response.status_code in (400, 404, 422):
+            raise TDModelCallError(
+                response.status_code,
+                "model_or_request_rejected",
+                allow_basic_fallback=True,
+            )
+        if response.status_code in (500, 502, 503, 504):
+            raise TDModelCallError(response.status_code, "temporary_upstream")
+        raise TDModelCallError(response.status_code, "provider_rejected_request")
+
+    try:
+        payload = response.json()
+    except ValueError:
+        raise TDModelCallError(502, "provider_non_json_response")
+
+    text = td_extract_ollama_content_v11(payload)
+    if not text:
+        raise TDModelCallError(502, "provider_empty_response")
+    return text
+
+
+def call_ollama(messages, model=None):
+    """
+    Bounded model transport:
+    - model discovery is cached and capped at five seconds;
+    - API model IDs are used instead of blindly forwarding CLI cloud aliases;
+    - native Ollama Cloud API is primary;
+    - OpenAI-compatible API is a single short fallback for transient failures;
+    - timeouts do not cause a second full Pro-to-Free generation.
+    """
+    started = time.monotonic()
+    audit_mode = bool(getattr(_TD_MODEL_CONTEXT_V13, "audit_mode", False))
+    primary_read_timeout = 16 if audit_mode else 38
+    fallback_read_timeout = 8 if audit_mode else 18
+    candidates = []
+
+    try:
+        if not OLLAMA_API_KEY:
+            raise TDModelCallError(503, "api_key_not_configured")
+
+        candidates = td_resolve_model_ids_v13(model or OLLAMA_MODEL)
+        prepared_messages = td_prepare_ollama_messages_v11(messages)
+
+        last_model_error = None
+        selected_model = candidates[0]
+        for candidate_index, candidate in enumerate(candidates[:2]):
+            selected_model = candidate
+            try:
+                answer = td_model_request_v13(
+                    "https://ollama.com/api/chat",
+                    selected_model,
+                    prepared_messages,
+                    (4, primary_read_timeout),
+                    "native_chat",
+                )
+                return answer
+            except TDModelCallError as model_error:
+                last_model_error = model_error
+                # If the catalog exposed an exact alternative, try that one
+                # only for a model-ID rejection, never for auth or rate limits.
+                if model_error.status_code in (400, 404, 422) and candidate_index + 1 < min(2, len(candidates)):
+                    continue
+                if model_error.status_code in (401, 403, 429):
+                    raise
+                if model_error.status_code not in (500, 502, 503, 504):
+                    if model_error.allow_basic_fallback:
+                        raise
+                    raise
+                break
+            except requests.Timeout:
+                last_model_error = TDModelCallError(504, "native_api_timeout")
+                break
+            except requests.RequestException as network_error:
+                print(
+                    "[Tekden AI] Birincil model API bağlantı hatası:",
+                    type(network_error).__name__,
+                )
+                last_model_error = TDModelCallError(502, "native_api_connection")
+                break
+
+        # One bounded compatibility attempt. This keeps the total request below
+        # the common reverse-proxy request window rather than waiting twice for
+        # the full provider timeout.
+        try:
+            return td_model_request_v13(
+                "https://ollama.com/v1/chat/completions",
+                selected_model,
+                prepared_messages,
+                (4, fallback_read_timeout),
+                "openai_compatible_chat",
+            )
+        except TDModelCallError as fallback_error:
+            print(
+                "[Tekden AI] Yedek model API sonucu:",
+                fallback_error.status_code,
+                fallback_error.category,
+            )
+            if fallback_error.allow_basic_fallback:
+                raise fallback_error
+            raise TDModelCallError(
+                fallback_error.status_code,
+                fallback_error.category,
+                allow_basic_fallback=False,
+            )
+        except requests.Timeout:
+            raise TDModelCallError(504, "compatibility_api_timeout")
+        except requests.RequestException as fallback_network_error:
+            print(
+                "[Tekden AI] Yedek model API bağlantı hatası:",
+                type(fallback_network_error).__name__,
+            )
+            raise TDModelCallError(502, "provider_connection_failed")
+
+    except TDModelCallError as model_error:
+        raise model_error
+    finally:
+        _TD_MODEL_CONTEXT_V13.last_elapsed = time.monotonic() - started
+
+
+@app.get("/api/health/model-catalog-v13", include_in_schema=False)
+def td_model_catalog_health_v13():
+    """Non-sensitive check; never exposes model names, API keys, or server details."""
+    names = td_model_catalog_fast_v13()
+    candidates = td_api_model_candidates_v13(OLLAMA_MODEL)
+    present = bool(names and any(candidate in names for candidate in candidates))
+    return {
+        "ok": bool(OLLAMA_API_KEY and OLLAMA_MODEL),
+        "api_key_configured": bool(OLLAMA_API_KEY),
+        "model_configured": bool(OLLAMA_MODEL),
+        "catalog_reachable": bool(names),
+        "configured_model_found": present if names else None,
+        "catalog_count": len(names),
+        "model_names_private": True,
+        "chat_does_not_depend_on_catalog": True,
+    }
+
+
+@app.get("/api/version-v13", include_in_schema=False)
+def td_public_app_version_v13():
+    return {
+        "app": "Tekden AI",
+        "build": "v13-bounded-chat-generation",
         "additive_update": True,
     }
