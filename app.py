@@ -14056,3 +14056,378 @@ def td_chat_ui_health_v17():
         "retry_and_edit_actions": True,
         "fallback_provider_requires_hf_token": True,
     }
+
+
+# =============================================================================
+# TEKDEN AI V18 — DYNAMIC HUGGING FACE LIVE PROVIDER DISCOVERY
+# Uses the documented /v1/models catalogue. The app no longer assumes that a
+# fixed list of model/provider pairs is currently live.
+# =============================================================================
+
+_TD_HF_MODELS_URL_V18 = "https://router.huggingface.co/v1/models"
+_TD_HF_CATALOG_CACHE_V18 = {"expires_at": 0.0, "items": []}
+_TD_HF_CATALOG_LOCK_V18 = threading.Lock()
+
+# Small conversational models documented by Hugging Face. The discovery step
+# checks which of these have at least one live provider before any chat call.
+_TD_HF_PREFERRED_MODELS_V18 = (
+    "google/gemma-2-2b-it",
+    "Qwen/Qwen3-4B-Thinking-2507",
+    "Qwen/Qwen2.5-7B-Instruct-1M",
+)
+
+
+def td_hf_catalog_v18(force_refresh=False):
+    """Return current OpenAI-compatible chat models and provider metadata."""
+    now = time.monotonic()
+    cached = _TD_HF_CATALOG_CACHE_V18
+    if not force_refresh and cached["items"] and now < cached["expires_at"]:
+        return list(cached["items"])
+
+    with _TD_HF_CATALOG_LOCK_V18:
+        now = time.monotonic()
+        cached = _TD_HF_CATALOG_CACHE_V18
+        if not force_refresh and cached["items"] and now < cached["expires_at"]:
+            return list(cached["items"])
+
+        if not HF_TOKEN:
+            raise TDModelCallError(503, "hf_token_not_configured")
+
+        try:
+            response = requests.get(
+                _TD_HF_MODELS_URL_V18,
+                headers={
+                    "Authorization": "Bearer " + str(HF_TOKEN).strip(),
+                    "Accept": "application/json",
+                },
+                timeout=(4, 9),
+            )
+        except requests.Timeout:
+            raise TDModelCallError(504, "hf_model_catalog_timeout")
+        except requests.RequestException as network_exc:
+            print(
+                "[Tekden AI] HF model kataloğu bağlantı hatası:",
+                type(network_exc).__name__,
+            )
+            raise TDModelCallError(502, "hf_model_catalog_connection_error")
+
+        if response.status_code >= 400:
+            if response.status_code in (401, 403):
+                raise TDModelCallError(response.status_code, "hf_token_inference_permission_denied")
+            if response.status_code == 429:
+                raise TDModelCallError(429, "hf_model_catalog_rate_limited")
+            if response.status_code == 402:
+                raise TDModelCallError(402, "hf_credits_or_billing_required")
+            raise TDModelCallError(
+                503 if response.status_code >= 500 else response.status_code,
+                "hf_model_catalog_http_" + str(response.status_code),
+            )
+
+        try:
+            payload = response.json()
+        except ValueError:
+            raise TDModelCallError(502, "hf_model_catalog_invalid_json")
+
+        items = payload.get("data", []) if isinstance(payload, dict) else []
+        if not isinstance(items, list):
+            raise TDModelCallError(502, "hf_model_catalog_invalid_shape")
+
+        valid_items = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            model_id = str(item.get("id") or "").strip()
+            providers = item.get("providers", [])
+            if not model_id or not isinstance(providers, list):
+                continue
+            valid_providers = []
+            for provider in providers:
+                if not isinstance(provider, dict):
+                    continue
+                provider_id = str(provider.get("provider") or "").strip()
+                provider_status = str(provider.get("status") or "").lower()
+                if provider_id and provider_status == "live":
+                    pricing = provider.get("pricing") if isinstance(provider.get("pricing"), dict) else {}
+                    try:
+                        input_price = float(pricing.get("input")) if pricing.get("input") is not None else None
+                    except (TypeError, ValueError):
+                        input_price = None
+                    try:
+                        output_price = float(pricing.get("output")) if pricing.get("output") is not None else None
+                    except (TypeError, ValueError):
+                        output_price = None
+                    valid_providers.append({
+                        "provider": provider_id,
+                        "is_free": provider.get("is_free") is True,
+                        "input_price": input_price,
+                        "output_price": output_price,
+                    })
+            if valid_providers:
+                valid_items.append({
+                    "id": model_id,
+                    "providers": valid_providers,
+                })
+
+        _TD_HF_CATALOG_CACHE_V18["items"] = valid_items
+        _TD_HF_CATALOG_CACHE_V18["expires_at"] = time.monotonic() + 180
+        return list(valid_items)
+
+
+def td_hf_build_live_routes_v18(catalog_items, max_routes=6):
+    """
+    Build exact model:provider routes only from provider status=live.
+    Preferred compact models rank first. Free promotional providers rank
+    before priced providers; otherwise choose lowest published price.
+    """
+    preferred_rank = {
+        model_id: index
+        for index, model_id in enumerate(_TD_HF_PREFERRED_MODELS_V18)
+    }
+    routes = []
+
+    for item in catalog_items or []:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id") or "").strip()
+        if not model_id:
+            continue
+        # Prefer documented compact chat models; allow other chat models only
+        # after preferred models, with a conservative output cap on every call.
+        model_rank = preferred_rank.get(model_id, 1000)
+        providers = item.get("providers", [])
+        if not isinstance(providers, list):
+            continue
+
+        providers = sorted(
+            providers,
+            key=lambda provider: (
+                0 if provider.get("is_free") else 1,
+                (
+                    (provider.get("input_price") or 0.0)
+                    + (provider.get("output_price") or 0.0)
+                ),
+                str(provider.get("provider") or ""),
+            ),
+        )
+
+        for provider in providers:
+            provider_id = str(provider.get("provider") or "").strip()
+            if not provider_id:
+                continue
+            routes.append({
+                "model": model_id + ":" + provider_id,
+                "model_rank": model_rank,
+                "provider_free": bool(provider.get("is_free")),
+                "price_score": (
+                    (provider.get("input_price") or 0.0)
+                    + (provider.get("output_price") or 0.0)
+                ),
+                "price_known": (
+                    provider.get("input_price") is not None
+                    and provider.get("output_price") is not None
+                ),
+            })
+
+    routes.sort(
+        key=lambda route: (
+            route["model_rank"],
+            0 if route["provider_free"] else 1,
+            0 if route["price_known"] else 1,
+            route["price_score"],
+        )
+    )
+
+    # Avoid a single model dominating the shortlist through many providers.
+    selected = []
+    seen_models = set()
+    for route in routes:
+        model_base = route["model"].rsplit(":", 1)[0]
+        if model_base not in seen_models:
+            selected.append(route)
+            seen_models.add(model_base)
+        if len(selected) >= max_routes:
+            break
+    return selected
+
+
+def td_hf_live_provider_chat_v18(messages):
+    """
+    Discover live chat providers dynamically and try at most three routes.
+    This replaces the brittle fixed list from V17.
+    """
+    catalog = td_hf_catalog_v18()
+    routes = td_hf_build_live_routes_v18(catalog, max_routes=6)
+    if not routes:
+        raise TDModelCallError(503, "hf_no_live_chat_provider_in_model_catalog")
+
+    prepared = []
+    try:
+        source_messages = td_prepare_ollama_messages_v11(messages)
+    except Exception:
+        source_messages = messages or []
+
+    # Convert tool-result messages into user context for a plain chat completion
+    # request. The app does not expose tool-calling through this fallback path.
+    for item in source_messages:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "user").strip()
+        if role == "tool":
+            role = "user"
+        if role not in ("system", "user", "assistant"):
+            role = "user"
+        content = item.get("content")
+        if not isinstance(content, str):
+            content = str(content or "")
+        if content:
+            prepared.append({"role": role, "content": content})
+
+    if not prepared:
+        raise TDModelCallError(400, "hf_chat_messages_empty_after_normalization")
+
+    audit_mode = bool(getattr(_TD_MODEL_CONTEXT_V13, "audit_mode", False))
+    timeout_seconds = 12 if audit_mode else 20
+    max_tokens = 260 if audit_mode else 420
+    last_status = 503
+    last_category = "hf_live_routes_unavailable"
+
+    for route_index, route in enumerate(routes[:3], start=1):
+        try:
+            response = requests.post(
+                "https://router.huggingface.co/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer " + str(HF_TOKEN).strip(),
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json={
+                    "model": route["model"],
+                    "messages": prepared,
+                    "max_tokens": max_tokens,
+                    "stream": False,
+                },
+                timeout=(4, timeout_seconds),
+            )
+        except requests.Timeout:
+            last_status, last_category = 504, "hf_live_provider_timeout"
+            print("[Tekden AI] Canlı model sağlayıcı zaman aşımı. Deneme:", route_index)
+            continue
+        except requests.RequestException as network_exc:
+            last_status, last_category = 502, "hf_live_provider_connection_error"
+            print("[Tekden AI] Canlı model bağlantı hatası:", type(network_exc).__name__)
+            continue
+
+        if response.status_code >= 400:
+            last_status = response.status_code
+            last_category = td_hf_error_category_v16(response.status_code)
+            # Provider body is intentionally not logged. It may contain internal
+            # account identifiers, provider diagnostics, or private metadata.
+            print(
+                "[Tekden AI] Canlı model denemesi başarısız:",
+                "HTTP",
+                response.status_code,
+                "deneme",
+                route_index,
+                last_category,
+            )
+            if response.status_code in (401, 402, 403, 429):
+                raise TDModelCallError(response.status_code, last_category)
+            continue
+
+        try:
+            payload = response.json()
+        except ValueError:
+            last_status, last_category = 502, "hf_live_provider_invalid_json"
+            continue
+
+        answer = td_extract_ollama_content_v11(payload)
+        if answer:
+            print("[Tekden AI] Canlı model sağlayıcısından yanıt alındı. Deneme:", route_index)
+            return answer.strip()
+
+        last_status, last_category = 502, "hf_live_provider_empty_answer"
+
+    if last_status == 402:
+        raise TDModelCallError(402, "hf_credits_or_billing_required")
+    if last_status == 429:
+        raise TDModelCallError(429, "hf_provider_rate_limit")
+    if last_status in (401, 403):
+        raise TDModelCallError(503, "hf_token_inference_permission_denied")
+    raise TDModelCallError(
+        503,
+        "hf_live_provider_routes_failed:" + last_category,
+        allow_basic_fallback=False,
+    )
+
+
+# Capture the V15 Ollama/private-server call and bypass V17's hard-coded HF list.
+_TD_OLLAMA_WITHOUT_HF_V18 = _TD_V15_CALL_OLLAMA_V16
+
+
+def call_ollama(messages, model=None):
+    """Ollama/private endpoint first; live, dynamically discovered HF route second."""
+    try:
+        return _TD_OLLAMA_WITHOUT_HF_V18(messages, model)
+    except TDModelCallError as primary_error:
+        if primary_error.status_code == 413:
+            raise
+        if not HF_TOKEN:
+            raise TDModelCallError(
+                primary_error.status_code if primary_error.status_code in (402, 504) else 503,
+                "ollama_unavailable_and_hf_token_not_configured:" + primary_error.category,
+            )
+        print(
+            "[Tekden AI] Ollama/özel model yolu kullanılamadı; "
+            "Hugging Face canlı model kataloğu kontrol ediliyor:",
+            primary_error.status_code,
+        )
+        return td_hf_live_provider_chat_v18(messages)
+
+
+@app.get("/api/health/hf-live-providers-v18", include_in_schema=False)
+def td_hf_live_providers_health_v18():
+    """
+    Safe diagnostics: counts only. Does not expose provider names, model IDs,
+    API tokens, billing details, hostnames or private server settings.
+    """
+    if not HF_TOKEN:
+        return {
+            "ok": False,
+            "token_configured": False,
+            "catalog_reachable": False,
+            "live_model_count": 0,
+            "live_provider_route_count": 0,
+            "reason": "hf_token_not_configured",
+        }
+    try:
+        catalog = td_hf_catalog_v18(force_refresh=True)
+        routes = td_hf_build_live_routes_v18(catalog, max_routes=100)
+        return {
+            "ok": bool(routes),
+            "token_configured": True,
+            "catalog_reachable": True,
+            "live_model_count": len(catalog),
+            "live_provider_route_count": len(routes),
+            "private_model_and_provider_names": "not_disclosed",
+            "reason": "live_routes_available" if routes else "no_live_chat_provider",
+        }
+    except TDModelCallError as exc:
+        return {
+            "ok": False,
+            "token_configured": True,
+            "catalog_reachable": False,
+            "live_model_count": 0,
+            "live_provider_route_count": 0,
+            "private_model_and_provider_names": "not_disclosed",
+            "reason": exc.category,
+            "provider_status": exc.status_code,
+        }
+
+
+@app.get("/api/version-v18", include_in_schema=False)
+def td_public_app_version_v18():
+    return {
+        "app": "Tekden AI",
+        "build": "v18-dynamic-live-provider-discovery",
+        "additive_update": True,
+    }
