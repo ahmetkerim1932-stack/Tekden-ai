@@ -1568,6 +1568,7 @@ def chat(body: ChatBody, request: Request):
 - Kullanıcıya ürün kimliğini tutarlı biçimde “Tekden AI” olarak sun. Geliştirici/ürün kimliği sorulduğunda Tekden AI uygulamasının Ahmet Kerim Kırgız tarafından tasarlandığını belirt; kendini başka bir markanın ürünü gibi tanıtma.
 - Tekden AI'ın kendine ait uygulama sunucusu altyapısı vardır. Kullanıcı "sunucunuz var mı", "yerli sunucu mu", "GPT'ye/Cloud'a mı bağlısınız" gibi altyapı soruları sorarsa uygulama sunucusunun Tekden AI'a ait olduğunu söyle; model çıkarımının harici servis kullanabildiğini gizleme veya tüm işlemlerin fiziksel olarak yerel sunucuda çalıştığını iddia etme. Daha fazla teknik ayrıntı istenirse şu yanıtı ver: "Üzgünüz, altyapımızın daha ayrıntılı teknik bilgileri gizlidir."
 - Model veya servis sağlayıcılarını kullanıcı sormadıkça gereksiz yere gündeme getirme. Ancak doğrudan “hangi model/servis kullanılıyor?”, “tamamen kendi modelin mi?” veya benzeri bir soru sorulursa doğru ve açık yanıt ver: Tekden AI kendi ürün arayüzü ve uygulamasıdır; bazı özellikler harici model/API sağlayıcıları kullanabilir. Harici servisleri kullanmadığına dair doğrulanmamış iddiada bulunma ve Tekden AI'ın kendi temel modelini eğittiğini söyleme.
+- “Tekden AI bağımsız mı/ayrı mı?” diye sorulursa ürün ve uygulama sunucusu altyapısının Tekden AI'a ait olduğunu söyle. Model yanıtlarının bazı durumlarda harici API sağlayıcılarından alınabildiğini gizleme. Kullanıcı ayrıntı isterse: “Uygulama altyapımız Tekden AI'a aittir. Sağlayıcı ve sunucu yapılandırmasının ayrıntılarını güvenlik nedeniyle paylaşmıyoruz.” de. Tamamen bağımsız model çalıştırıldığına dair doğrulanmamış iddia üretme.
 
 Sohbet sürekliliği:
 - Aynı sohbet içindeki önceki kullanıcı mesajlarını ve kendi yanıtlarını bağlam olarak kullan. Kullanıcı “bunu”, “önceki”, “devam et”, “aynısı” veya benzeri ifadeler kullandığında mevcut sohbet geçmişinden neye gönderme yaptığını çözmeye çalış; gereksiz yere aynı bilgileri yeniden sorma.
@@ -14330,8 +14331,10 @@ def td_hf_live_provider_chat_v18(messages):
                 route_index,
                 last_category,
             )
+            # Tek bir sağlayıcının yetki, kredi veya hız sınırı hatası
+            # diğer canlı sağlayıcı rotalarını denemeyi engellemesin.
             if response.status_code in (401, 402, 403, 429):
-                raise TDModelCallError(response.status_code, last_category)
+                continue
             continue
 
         try:
@@ -14348,9 +14351,9 @@ def td_hf_live_provider_chat_v18(messages):
         last_status, last_category = 502, "hf_live_provider_empty_answer"
 
     if last_status == 402:
-        raise TDModelCallError(402, "hf_credits_or_billing_required")
+        raise TDModelCallError(402, "hf_all_tried_routes_require_credits")
     if last_status == 429:
-        raise TDModelCallError(429, "hf_provider_rate_limit")
+        raise TDModelCallError(429, "hf_all_tried_routes_rate_limited")
     if last_status in (401, 403):
         raise TDModelCallError(503, "hf_token_inference_permission_denied")
     raise TDModelCallError(
@@ -14365,23 +14368,49 @@ _TD_OLLAMA_WITHOUT_HF_V18 = _TD_V15_CALL_OLLAMA_V16
 
 
 def call_ollama(messages, model=None):
-    """Ollama/private endpoint first; live, dynamically discovered HF route second."""
+    """Primary Ollama route, then live HF routes; normalize legacy exceptions."""
     try:
-        return _TD_OLLAMA_WITHOUT_HF_V18(messages, model)
-    except TDModelCallError as primary_error:
-        if primary_error.status_code == 413:
-            raise
+        answer = _TD_OLLAMA_WITHOUT_HF_V18(messages, model)
+        if isinstance(answer, str) and answer.strip():
+            return answer.strip()
+        raise TDModelCallError(502, "primary_provider_empty_answer")
+    except Exception as primary_error:
+        # Older provider layers sometimes raise plain RuntimeError instead of
+        # TDModelCallError. Normalize those too, otherwise HF fallback is skipped.
+        if isinstance(primary_error, TDModelCallError):
+            primary_status = primary_error.status_code
+            primary_category = primary_error.category
+        else:
+            primary_text = str(primary_error)
+            status_match = re.search(r"HTTP\s*(4\d\d|5\d\d)|\((4\d\d|5\d\d)\)", primary_text, re.I)
+            primary_status = int(next((g for g in status_match.groups() if g), "503")) if status_match else 503
+            primary_category = "primary_provider_" + type(primary_error).__name__.lower()
+
+        if primary_status == 413:
+            raise TDModelCallError(413, "request_too_large")
         if not HF_TOKEN:
             raise TDModelCallError(
-                primary_error.status_code if primary_error.status_code in (402, 504) else 503,
-                "ollama_unavailable_and_hf_token_not_configured:" + primary_error.category,
+                primary_status if primary_status in (402, 504) else 503,
+                "ollama_unavailable_and_hf_token_not_configured:" + primary_category,
             )
         print(
-            "[Tekden AI] Ollama/özel model yolu kullanılamadı; "
-            "Hugging Face canlı model kataloğu kontrol ediliyor:",
-            primary_error.status_code,
+            "[Tekden AI] Birincil yanıt sağlayıcısı kullanılamadı; "
+            "Hugging Face canlı sağlayıcı rotaları deneniyor:",
+            primary_status,
+            primary_category,
         )
-        return td_hf_live_provider_chat_v18(messages)
+        try:
+            fallback_answer = td_hf_live_provider_chat_v18(messages)
+            if isinstance(fallback_answer, str) and fallback_answer.strip():
+                return fallback_answer.strip()
+            raise TDModelCallError(502, "hf_fallback_empty_answer")
+        except TDModelCallError as fallback_error:
+            print(
+                "[Tekden AI] Hugging Face yedek rotaları da yanıt veremedi:",
+                fallback_error.status_code,
+                fallback_error.category,
+            )
+            raise
 
 
 @app.get("/api/health/hf-live-providers-v18", include_in_schema=False)
@@ -14430,4 +14459,18 @@ def td_public_app_version_v18():
         "app": "Tekden AI",
         "build": "v18-dynamic-live-provider-discovery",
         "additive_update": True,
+    }
+
+
+# =============================================================================
+# TEKDEN AI V19 — CHAT FALLBACK ERROR RECOVERY
+# =============================================================================
+@app.get("/api/version-v19", include_in_schema=False)
+def td_public_app_version_v19():
+    return {
+        "app": "Tekden AI",
+        "build": "v19-chat-fallback-error-recovery",
+        "additive_update": True,
+        "primary_runtime_errors_normalized": True,
+        "hf_provider_routes_tried_before_failure": True,
     }
