@@ -34,6 +34,9 @@ POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
 # Hugging Face free-tier credits are limited and may change.
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+# Optional free-tier-first Groq provider. Keep this key in Render Environment only.
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip() or "openai/gpt-oss-20b"
 # eroq music generation API. Keep this key server-side only.
 EROQ_API_KEY = os.getenv("EROQ_API_KEY", "").strip() or os.getenv("MUSIC_API_KEY", "").strip()
 EROQ_API_BASE = "https://eroq.ai/v1"
@@ -14473,4 +14476,194 @@ def td_public_app_version_v19():
         "additive_update": True,
         "primary_runtime_errors_normalized": True,
         "hf_provider_routes_tried_before_failure": True,
+    }
+
+
+# =============================================================================
+# TEKDEN AI V20 — GROQ FREE-TIER + PRIVATE LOCAL OLLAMA FAILOVER
+# =============================================================================
+def td_groq_chat_v20(messages):
+    """
+    Free-tier-first provider using Groq's OpenAI-compatible endpoint.
+    Groq enforces its own free-plan quotas; no paid upgrade is attempted.
+    """
+    if not GROQ_API_KEY:
+        raise TDModelCallError(503, "groq_api_key_not_configured")
+
+    try:
+        source_messages = td_prepare_ollama_messages_v11(messages)
+    except Exception:
+        source_messages = messages or []
+
+    prepared = []
+    for item in source_messages:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "user").strip().lower()
+        if role == "tool":
+            role = "user"
+        if role not in ("system", "user", "assistant"):
+            role = "user"
+        content = item.get("content")
+        if not isinstance(content, str):
+            content = str(content or "")
+        if content.strip():
+            prepared.append({"role": role, "content": content})
+
+    if not prepared:
+        raise TDModelCallError(400, "groq_chat_messages_empty")
+
+    try:
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer " + GROQ_API_KEY,
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json={
+                "model": GROQ_MODEL,
+                "messages": prepared,
+                "max_tokens": 700,
+                "stream": False,
+            },
+            timeout=(5, 35),
+        )
+    except requests.Timeout:
+        raise TDModelCallError(504, "groq_provider_timeout")
+    except requests.RequestException as exc:
+        print("[Tekden AI] Groq bağlantı hatası:", type(exc).__name__)
+        raise TDModelCallError(502, "groq_provider_connection_error")
+
+    if response.status_code >= 400:
+        status = int(response.status_code)
+        if status == 429:
+            category = "groq_free_tier_rate_limit"
+        elif status in (401, 403):
+            category = "groq_api_key_or_permission_error"
+        elif status == 402:
+            category = "groq_billing_or_entitlement_required"
+        else:
+            category = "groq_http_error"
+        print("[Tekden AI] Groq sağlayıcısı başarısız: HTTP", status, category)
+        raise TDModelCallError(
+            status if status in (402, 429, 504) else 503,
+            category,
+        )
+
+    try:
+        payload = response.json()
+        choices = payload.get("choices") or []
+        message = choices[0].get("message", {}) if choices else {}
+        answer = message.get("content") if isinstance(message, dict) else None
+        if isinstance(answer, list):
+            answer = "".join(
+                str(part.get("text") or "")
+                for part in answer
+                if isinstance(part, dict)
+            )
+        if isinstance(answer, str) and answer.strip():
+            return answer.strip()
+    except (ValueError, TypeError, IndexError, AttributeError):
+        pass
+
+    raise TDModelCallError(502, "groq_provider_empty_or_invalid_answer")
+
+
+# Preserve the complete V19 chain (Ollama Cloud -> configured private Ollama
+# on cloud 402 -> Hugging Face fallback) as the final recovery path.
+_TD_V19_CALL_OLLAMA_WITH_HF = call_ollama
+
+
+def call_ollama(messages, model=None):
+    """
+    Provider order:
+      1) Groq free-tier API (when GROQ_API_KEY exists)
+      2) Private/local Ollama endpoint (when OLLAMA_LOCAL_URL is configured)
+      3) Existing V19 chain: Ollama Cloud/private Ollama/Hugging Face
+
+    Provider keys and private endpoint URLs are never returned by diagnostics.
+    """
+    failures = []
+
+    if GROQ_API_KEY:
+        try:
+            answer = td_groq_chat_v20(messages)
+            if answer:
+                print("[Tekden AI] Yanıt Groq ücretsiz kullanım rotasından alındı.")
+                return answer
+        except TDModelCallError as groq_error:
+            failures.append(("groq", groq_error.status_code, groq_error.category))
+            print(
+                "[Tekden AI] Groq kullanılamadı; yedek sağlayıcıya geçiliyor:",
+                groq_error.status_code,
+                groq_error.category,
+            )
+
+    # Try the existing authenticated private Ollama endpoint directly before
+    # cloud APIs. It is skipped unless the operator has configured it privately.
+    try:
+        local_answer = td_call_private_local_ollama_v15(
+            messages,
+            str(model or OLLAMA_MODEL or "").strip(),
+        )
+        if local_answer:
+            print("[Tekden AI] Yanıt özel Ollama sunucusundan alındı.")
+            return local_answer
+    except TDModelCallError as local_error:
+        failures.append(("private_ollama", local_error.status_code, local_error.category))
+        print(
+            "[Tekden AI] Özel Ollama rotası kullanılamadı; mevcut yedek zincire geçiliyor:",
+            local_error.status_code,
+            local_error.category,
+        )
+
+    try:
+        return _TD_V19_CALL_OLLAMA_WITH_HF(messages, model)
+    except Exception as final_error:
+        if isinstance(final_error, TDModelCallError):
+            final_status = final_error.status_code
+            final_category = final_error.category
+        else:
+            final_status = 503
+            final_category = "legacy_provider_chain_" + type(final_error).__name__.lower()
+        print(
+            "[Tekden AI] Son yedek zincir de yanıt veremedi:",
+            final_status,
+            final_category,
+        )
+        raise TDModelCallError(
+            final_status if final_status in (402, 413, 429, 504) else 503,
+            "all_provider_routes_failed:" + final_category,
+            allow_basic_fallback=False,
+        )
+
+
+@app.get("/api/health/providers-v20", include_in_schema=False)
+def td_provider_health_v20():
+    local_settings = td_local_ollama_settings_v15()
+    return {
+        "ok": bool(GROQ_API_KEY or local_settings or OLLAMA_API_KEY or HF_TOKEN),
+        "groq_key_configured": bool(GROQ_API_KEY),
+        "private_ollama_configured": bool(local_settings and local_settings.get("model")),
+        "ollama_cloud_key_configured": bool(OLLAMA_API_KEY),
+        "huggingface_key_configured": bool(HF_TOKEN),
+        "provider_order": [
+            "groq_free_tier",
+            "private_ollama_if_configured",
+            "existing_ollama_cloud_and_huggingface_fallback",
+        ],
+        "private_endpoint_details": "not_disclosed",
+    }
+
+
+@app.get("/api/version-v20", include_in_schema=False)
+def td_public_app_version_v20():
+    return {
+        "app": "Tekden AI",
+        "build": "v20-groq-local-ollama-failover",
+        "additive_update": True,
+        "free_tier_provider": "groq_optional",
+        "private_local_ollama_fallback": "optional",
+        "existing_v19_fallback_chain_preserved": True,
     }
