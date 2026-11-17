@@ -6795,7 +6795,7 @@ HTML = r"""<!doctype html>
 <div class="layout"><aside class="sidebar"><div class="brand">Tekden <span>AI</span></div>
 <div class="sideactions"><button id="mobileSidebarClose" class="secondary" type="button" style="display:none">✕ Menüyü kapat</button><button id="newChat">＋ Yeni sohbet</button><button id="proStudioBtn" class="secondary" style="display:none;border-color:#c5a4ff;color:#6132b8;background:linear-gradient(110deg,#f4edff,#edf5ff)" onclick="location.href='/pro-studio'">✦ Pro Stüdyo</button>
 <button id="plusWorkspaceBtn" class="secondary" type="button" style="display:none;border-color:#9dc8f5;color:#155db1;background:linear-gradient(110deg,#eff7ff,#e8f5ff)" onclick="location.href='/plus-workspace'">✦ Plus Workspace</button>
-<button class="secondary" onclick="openSongStudio()" style="border-color:#d8c9ff;color:#6941b6;background:#faf7ff">🎤 Şarkı Stüdyosu</button></div>
+<button class="secondary" id="videoStudioNavBtnV24" type="button" onclick="location.href='/video-studio'" style="display:flex!important;width:100%;justify-content:flex-start;align-items:center;gap:8px;border:1px solid #83c5ff;color:#0759ad;background:linear-gradient(110deg,#e5f4ff,#d8edff);font-weight:800;box-shadow:0 4px 14px rgba(20,110,210,.12)">🎬 Video Studio</button><button class="secondary" onclick="openSongStudio()" style="border-color:#d8c9ff;color:#6941b6;background:#faf7ff">🎤 Şarkı Stüdyosu</button></div>
 <div><small style="color:var(--muted)">SOHBETLER</small></div><div class="sideutility"><button class="secondary" id="activeChatsBtn">Son sohbetler</button><button class="secondary" id="archivedChatsBtn">Arşiv</button></div><div class="history" id="history"><div class="notice">Geçmişi görmek için giriş yap.</div></div>
 <div class="userbar" id="userbar"><div class="notice">Misafir modu · Sohbetler kaydedilmez.</div></div></aside>
 <main class="main"><header class="top"><button class="secondary mobile" id="mobileNew">＋</button><div><strong>Tekden AI</strong><br><small>Yardımcı yapay zekân</small></div><nav class="topnav"><button class="active" onclick="newChat()">◉ Sohbet</button><button onclick="$('prompt').value='Görsel oluştur: ';$('prompt').focus()">▧ Görsel</button><button onclick="$('fileInput').click()">▤ Dosya Analizi</button><button onclick="forceSearch=true;$('searchBtn').style.borderColor='var(--accent)';$('prompt').focus()">⌕ Web Arama</button><button onclick="$('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';$('prompt').focus()">▣ Uygulama</button><button onclick="$('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: '; $('prompt').focus()">🎮 Oyun</button><button onclick="openSongStudio()">🎤 Şarkı</button><button onclick="location.href='/kesfet'">✦ Keşfet</button><button id="adminNavBtn" style="display:none" onclick="location.href='/yonetim'">⚙ Yönetim</button></nav><div style="display:flex;gap:8px;align-items:center"><button class="secondary" id="mobileToolsBtn" type="button" aria-label="Diğer araçlar" aria-expanded="false">⋮</button><button class="secondary profilebtn" id="profileBtn" aria-label="Profil"><span class="avatar" id="topAvatar">?</span><span id="profileButtonText">Profil</span></button></div></header>
@@ -14854,14 +14854,14 @@ TD_VIDEO_STUDIO_HTML_V21 = r'''<!doctype html>
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Tekden AI · Video Studio</title>
 <style>
-body{margin:0;background:#081321;color:#eef5ff;font:15px/1.5 system-ui}main{max-width:980px;margin:30px auto;padding:16px}
-.card{background:#12243a;border:1px solid #2a4564;border-radius:18px;padding:20px;margin:14px 0}
-h1{font-size:36px;margin:10px 0}p,.hint{color:#b4c5da}label{display:block;margin:13px 0 5px;font-weight:650}
-input,textarea,select{width:100%;box-sizing:border-box;background:#081626;color:white;border:1px solid #365371;border-radius:10px;padding:12px;font:inherit}
-textarea{min-height:120px}button{background:#247bea;color:white;border:0;border-radius:11px;padding:13px 18px;font-weight:750;cursor:pointer}
-button:disabled{opacity:.5}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.status{background:#081626;border:1px solid #2a4564;border-radius:10px;padding:12px;margin-top:14px}
-progress{width:100%;margin-top:12px}video{width:100%;max-height:520px;margin-top:14px;background:#000;border-radius:12px}
-a{color:#9bcaff}@media(max-width:640px){.grid{grid-template-columns:1fr}h1{font-size:29px}}
+body{margin:0;background:linear-gradient(145deg,#f4f9ff,#eaf4ff 55%,#f8fbff);color:#172b46;font:15px/1.55 system-ui}main{max-width:980px;margin:30px auto;padding:16px}
+.card{background:rgba(255,255,255,.94);border:1px solid #d5e7fb;border-radius:18px;padding:20px;margin:14px 0;box-shadow:0 12px 34px rgba(34,94,160,.08)}
+h1{font-size:36px;margin:10px 0;color:#123d70}p,.hint{color:#526b88}label{display:block;margin:13px 0 5px;font-weight:700;color:#24415f}
+input,textarea,select{width:100%;box-sizing:border-box;background:#fff;color:#172b46;border:1px solid #c6dcf4;border-radius:10px;padding:12px;font:inherit;outline-color:#2785ed}
+textarea{min-height:120px}button{background:linear-gradient(110deg,#0878f9,#42a5ff);color:white;border:0;border-radius:11px;padding:13px 18px;font-weight:750;cursor:pointer;box-shadow:0 6px 18px rgba(8,120,249,.18)}
+button:disabled{opacity:.5}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.status{background:#f0f7ff;border:1px solid #cfe2f8;border-radius:10px;padding:12px;margin-top:14px;color:#23496f}
+progress{width:100%;margin-top:12px;accent-color:#0878f9}video{width:100%;max-height:520px;margin-top:14px;background:#dceafa;border-radius:12px}
+a{color:#0868cf;font-weight:650}@media(max-width:640px){.grid{grid-template-columns:1fr}h1{font-size:29px}main{margin:12px auto;padding:12px}.card{padding:16px}}
 </style></head><body><main>
 <a href="/">← Tekden AI'ya dön</a><h1>🎬 Video Studio</h1>
 <p>Metnini kısa bir videoya dönüştür. Ücretsiz sağlayıcı kotası uygunsa ücretsiz çalışır; kota dolduğunda ücretli servise otomatik geçiş yapmaz.</p>
@@ -14965,11 +14965,13 @@ def td_video_studio_poll_v21(request: Request, body: dict):
 def td_public_app_version_v21():
     return {
         "app": "Tekden AI",
-        "build": "v23-video-studio-route-ui-fix",
+        "build": "v24-video-studio-sidebar-bright-ui",
         "additive_update": True,
         "video_studio": True,
         "video_studio_free_until": TD_VIDEO_STUDIO_FREE_UNTIL_V21,
         "video_studio_route_ui_fix": True,
+        "video_studio_sidebar_button": True,
+        "video_studio_bright_theme": True,
         "video_studio_pro_only_after": True,
         "provider": "agnes_optional",
         "paid_provider_adapter": "ready_for_extension",
