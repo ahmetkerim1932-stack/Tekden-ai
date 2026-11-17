@@ -6446,7 +6446,23 @@ $('profilePlansBtn')?.addEventListener('click',()=>{td175PlusNotice.style.displa
 // Better onboarding: give first-time visitors a one-click starter prompt.
 if(!localStorage.getItem('tekden_seen_toolkit')){localStorage.setItem('tekden_seen_toolkit','1');setTimeout(()=>{if(!user&&guestHistory.length===0)setStatus('İpucu: ✦ Araç kutusunda 25 hazır prompt, not defteri ve kişisel yanıt ayarları var.');},900)}
 
-</script><a id="tdVideoStudioShortcutV21" href="/video-studio" style="position:fixed;right:18px;bottom:18px;z-index:9996;padding:12px 16px;border-radius:999px;background:linear-gradient(100deg,#086cff,#5b9cff);color:#fff;font:700 14px system-ui;text-decoration:none;box-shadow:0 8px 28px #075bc955">🎬 Video Studio</a></body></html>"""
+</script><a id="tdVideoStudioShortcutV21" href="/video-studio" style="position:fixed;right:18px;bottom:18px;z-index:9996;padding:12px 16px;border-radius:999px;background:linear-gradient(100deg,#086cff,#5b9cff);color:#fff;font:700 14px system-ui;text-decoration:none;box-shadow:0 8px 28px #075bc955">🎬 Video Studio</a><script>
+(function(){
+  function ensureVideoStudioShortcut(){
+    var link=document.getElementById('tdVideoStudioShortcutV21');
+    if(!link){
+      link=document.createElement('a');
+      link.id='tdVideoStudioShortcutV21';
+      link.href='/video-studio';
+      link.textContent='🎬 Video Studio';
+      document.body.appendChild(link);
+    }
+    link.style.cssText='position:fixed!important;right:18px!important;bottom:18px!important;z-index:2147483000!important;display:inline-flex!important;align-items:center!important;padding:12px 16px!important;border-radius:999px!important;background:linear-gradient(100deg,#086cff,#5b9cff)!important;color:#fff!important;font:700 14px system-ui!important;text-decoration:none!important;box-shadow:0 8px 28px #075bc955!important;visibility:visible!important;opacity:1!important';
+  }
+  if(document.readyState==='loading'){document.addEventListener('DOMContentLoaded',ensureVideoStudioShortcut,{once:true});}
+  else{ensureVideoStudioShortcut();}
+})();
+</script></body></html>"""
 
 @app.post("/api/game")
 def create_game(body: GameBody, request: Request):
@@ -14882,10 +14898,11 @@ TD_VIDEO_STUDIO_FREE_UNTIL_V21 = "2026-12-01"  # 00:00, Europe/Istanbul
 def td_video_studio_is_pro_only_v21() -> bool:
     try:
         from zoneinfo import ZoneInfo
-        today = datetime.datetime.now(ZoneInfo("Europe/Istanbul")).date()
+        today = datetime.now(ZoneInfo("Europe/Istanbul")).date()
     except Exception:
-        today = datetime.date.today()
-    return today >= datetime.date.fromisoformat(TD_VIDEO_STUDIO_FREE_UNTIL_V21)
+        today = datetime.now().date()
+    free_until = datetime.strptime(TD_VIDEO_STUDIO_FREE_UNTIL_V21, "%Y-%m-%d").date()
+    return today >= free_until
 
 def td_require_video_studio_access_v21(request: Request):
     user = require_user(request)
@@ -14939,7 +14956,7 @@ def td_video_studio_create_v21(body: TDVideoCreateBodyV21, request: Request):
 
 @app.post("/api/video-studio/poll")
 def td_video_studio_poll_v21(request: Request, body: dict):
-    user = require_user(request)
+    user = td_require_video_studio_access_v21(request)
     video_id = td_read_video_ticket_v21((body or {}).get("ticket"), user["id"])
     return {"ok": True, **td_video_provider_status_v21(video_id)}
 
@@ -14948,10 +14965,11 @@ def td_video_studio_poll_v21(request: Request, body: dict):
 def td_public_app_version_v21():
     return {
         "app": "Tekden AI",
-        "build": "v21-video-studio-free-first",
+        "build": "v23-video-studio-route-ui-fix",
         "additive_update": True,
         "video_studio": True,
         "video_studio_free_until": TD_VIDEO_STUDIO_FREE_UNTIL_V21,
+        "video_studio_route_ui_fix": True,
         "video_studio_pro_only_after": True,
         "provider": "agnes_optional",
         "paid_provider_adapter": "ready_for_extension",
