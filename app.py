@@ -38,7 +38,10 @@ HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip() or "openai/gpt-oss-20b"
 AGNES_API_KEY = os.getenv("AGNES_API_KEY", "").strip()
-AGNES_VIDEO_MODEL = os.getenv("AGNES_VIDEO_MODEL", "agnes-video-v2.0").strip() or "agnes-video-v2.0"
+AGNES_VIDEO_MODEL = os.getenv("AGNES_VIDEO_MODEL", "agnes-video-2.5-flash").strip() or "agnes-video-2.5-flash"
+# Agnes removed the legacy v2.0 video model; normalize stale Render env values.
+if AGNES_VIDEO_MODEL in ("agnes-video-v2.0", "agnes-video-new-flash"):
+    AGNES_VIDEO_MODEL = "agnes-video-2.5-flash"
 # eroq music generation API. Keep this key server-side only.
 EROQ_API_KEY = os.getenv("EROQ_API_KEY", "").strip() or os.getenv("MUSIC_API_KEY", "").strip()
 EROQ_API_BASE = "https://eroq.ai/v1"
@@ -14753,7 +14756,7 @@ def td_video_http_error_v21(status):
     if status in (400, 422):
         return HTTPException(400, "Video isteği sağlayıcı tarafından kabul edilmedi. İsteği sadeleştirip dene.")
     if status >= 500:
-        return HTTPException(503, "Video sağlayıcısı geçici olarak yanıt vermiyor.")
+        return HTTPException(503, "Video sağlayıcısının ücretsiz üretim kuyruğu şu anda dolu veya servis yoğun. Bu istek için henüz video görevi oluşturulmadı; 1-2 dakika sonra yeniden deneyebilirsin.")
     return HTTPException(502, "Video sağlayıcısından beklenmeyen yanıt alındı.")
 
 
@@ -14772,13 +14775,15 @@ def td_video_provider_create_v21(body):
             f" Spoken narration language: {body.language}. "
             f"Speak exactly this text without translating or adding words: {body.narration.strip()}"
         )
+    # Current Agnes Video 2.5 Flash schema. The old v2.0 width/height/num_frames
+    # fields are rejected by the current API.
     payload = {
         "model": AGNES_VIDEO_MODEL,
         "prompt": prompt[:6000],
-        "width": width,
-        "height": height,
-        "num_frames": int(body.duration_seconds) * 24 + 1,
-        "frame_rate": 24,
+        "mode": "text",
+        "seconds": str(max(4, min(12, int(body.duration_seconds)))),
+        "size": "720P",
+        "aspect_ratio": body.aspect_ratio if body.aspect_ratio in ("16:9", "9:16", "1:1") else "16:9",
     }
     response = None
     retry_delays = {500: (5, 15), 502: (5, 15), 503: (8, 20), 504: (5, 15), 520: (5, 15), 522: (5, 15), 524: (5, 15)}
@@ -14845,7 +14850,7 @@ def td_video_provider_status_v21(video_id):
         response = requests.get(
             "https://apihub.agnes-ai.com/agnesapi",
             headers={"Authorization": "Bearer " + AGNES_API_KEY},
-            params={"video_id": video_id},
+            params={"video_id": video_id, "model_name": AGNES_VIDEO_MODEL},
             timeout=(8, 35),
         )
     except requests.Timeout:
@@ -14862,11 +14867,13 @@ def td_video_provider_status_v21(video_id):
     raw = str(data.get("status") or data.get("state") or "processing").lower()
     status = {
         "completed": "completed", "complete": "completed", "success": "completed",
-        "succeeded": "completed", "failed": "failed", "error": "failed",
+        "succeeded": "completed", "done": "completed", "failed": "failed",
+        "error": "failed", "cancelled": "failed",
         "pending": "processing", "queued": "processing", "running": "processing",
-        "processing": "processing",
+        "in_progress": "processing", "processing": "processing",
     }.get(raw, "processing")
-    video_url = data.get("video_url") or data.get("url")
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    video_url = data.get("video_url") or data.get("url") or metadata.get("url")
     if isinstance(data.get("output"), dict):
         video_url = video_url or data["output"].get("video_url") or data["output"].get("url")
     if video_url:
@@ -14999,7 +15006,7 @@ def td_video_studio_poll_v21(request: Request, body: dict):
 def td_public_app_version_v21():
     return {
         "app": "Tekden AI",
-        "build": "v25-video-studio-provider-retry",
+        "build": "v26-video-studio-agnes-25-schema",
         "additive_update": True,
         "video_studio": True,
         "video_studio_free_until": TD_VIDEO_STUDIO_FREE_UNTIL_V21,
@@ -15007,6 +15014,7 @@ def td_public_app_version_v21():
         "video_studio_sidebar_button": True,
         "video_studio_bright_theme": True,
         "video_provider_transient_retry": True,
+        "video_provider_model_schema": "agnes-video-2.5-flash",
         "video_studio_pro_only_after": True,
         "provider": "agnes_optional",
         "paid_provider_adapter": "ready_for_extension",
