@@ -14758,7 +14758,7 @@ def td_video_http_error_v21(status):
 
 
 def td_video_provider_create_v21(body):
-    # Provider adapter: replace/add another provider here later without changing UI.
+    # Provider adapter with bounded retry for temporary upstream capacity errors.
     if not AGNES_API_KEY:
         raise HTTPException(503, "Video üretimi için Render Environment bölümüne AGNES_API_KEY eklemelisin.")
     width, height = td_video_dimensions_v21(body.aspect_ratio)
@@ -14780,20 +14780,54 @@ def td_video_provider_create_v21(body):
         "num_frames": int(body.duration_seconds) * 24 + 1,
         "frame_rate": 24,
     }
-    try:
-        response = requests.post(
-            "https://apihub.agnes-ai.com/v1/videos",
-            headers={"Authorization": "Bearer " + AGNES_API_KEY, "Content-Type": "application/json"},
-            json=payload,
-            timeout=(8, 60),
-        )
-    except requests.Timeout:
-        raise HTTPException(504, "Video isteği zaman aşımına uğradı.")
-    except requests.RequestException as exc:
-        print("[Tekden AI] Video sağlayıcı bağlantı hatası:", type(exc).__name__)
-        raise HTTPException(502, "Video sağlayıcısına bağlanılamadı.")
-    if response.status_code >= 400:
+    response = None
+    retry_delays = {500: (5, 15), 502: (5, 15), 503: (8, 20), 504: (5, 15), 520: (5, 15), 522: (5, 15), 524: (5, 15)}
+    for attempt in range(3):
+        try:
+            response = requests.post(
+                "https://apihub.agnes-ai.com/v1/videos",
+                headers={"Authorization": "Bearer " + AGNES_API_KEY, "Content-Type": "application/json"},
+                json=payload,
+                timeout=(8, 75),
+            )
+        except requests.Timeout:
+            if attempt < 2:
+                time.sleep((5, 15)[attempt])
+                continue
+            raise HTTPException(504, "Video isteği zaman aşımına uğradı. Biraz sonra yeniden deneyebilirsin.")
+        except requests.RequestException as exc:
+            print("[Tekden AI] Video sağlayıcı bağlantı hatası:", type(exc).__name__)
+            if attempt < 2:
+                time.sleep((5, 15)[attempt])
+                continue
+            raise HTTPException(502, "Video sağlayıcısına bağlanılamadı. Biraz sonra yeniden dene.")
+
+        if response.status_code < 400:
+            break
+
+        delays = retry_delays.get(response.status_code)
+        if delays and attempt < 2:
+            print("[Tekden AI] Video sağlayıcı geçici HTTP hatası; tekrar denenecek:",
+                  response.status_code, "deneme", attempt + 1)
+            time.sleep(delays[attempt])
+            continue
+
+        # Keep provider details in server logs only; never expose keys or raw bodies.
+        provider_code = ""
+        try:
+            err_data = response.json()
+            if isinstance(err_data, dict):
+                provider_code = str(err_data.get("code") or err_data.get("error_code") or "")
+        except Exception:
+            pass
+        print("[Tekden AI] Video sağlayıcı son HTTP hatası:",
+              response.status_code, "provider_code=", re.sub(r"[^A-Za-z0-9_.-]", "", provider_code)[:80])
+        if response.status_code == 503 and provider_code.lower() in ("video_queue_full", "queue_full"):
+            raise HTTPException(503, "Video sağlayıcısının ücretsiz video kuyruğu şu anda dolu. Bir süre sonra tekrar dene.")
         raise td_video_http_error_v21(response.status_code)
+
+    if response is None or response.status_code >= 400:
+        raise HTTPException(503, "Video sağlayıcısı şu anda yoğun. Birkaç dakika sonra yeniden dene.")
     try:
         result = response.json()
     except ValueError:
@@ -14965,13 +14999,14 @@ def td_video_studio_poll_v21(request: Request, body: dict):
 def td_public_app_version_v21():
     return {
         "app": "Tekden AI",
-        "build": "v24-video-studio-sidebar-bright-ui",
+        "build": "v25-video-studio-provider-retry",
         "additive_update": True,
         "video_studio": True,
         "video_studio_free_until": TD_VIDEO_STUDIO_FREE_UNTIL_V21,
         "video_studio_route_ui_fix": True,
         "video_studio_sidebar_button": True,
         "video_studio_bright_theme": True,
+        "video_provider_transient_retry": True,
         "video_studio_pro_only_after": True,
         "provider": "agnes_optional",
         "paid_provider_adapter": "ready_for_extension",
