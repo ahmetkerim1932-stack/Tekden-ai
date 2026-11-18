@@ -14792,7 +14792,9 @@ def _td_create_fal_v27(body,prompt):
     if not FAL_KEY or not FAL_ALLOW_PAID: raise TDVideoProviderErrorV27("fal",0,"disabled")
     endpoint="https://queue.fal.run/"+FAL_VIDEO_MODEL.strip("/")
     d=_td_post_json_v27("fal",endpoint,{"Authorization":FAL_KEY,"Content-Type":"application/json"},
-      {"prompt":prompt,"duration":max(5,min(10,int(body.duration_seconds))),"aspect_ratio":body.aspect_ratio})
+      {"prompt":prompt,"duration":str(max(5,min(10,int(body.duration_seconds)))),
+       "aspect_ratio":body.aspect_ratio if body.aspect_ratio in ("16:9","9:16","1:1") else "16:9",
+       "generate_audio":False,"enable_safety_checker":True})
     if not d.get("request_id"): raise TDVideoProviderErrorV27("fal",502,"missing_request_id")
     return str(d["request_id"]),{"status_url":d.get("status_url"),"response_url":d.get("response_url"),"endpoint":endpoint}
 
@@ -14827,11 +14829,18 @@ def td_video_provider_create_v21(body):
             print("[Tekden AI] Video task created:",name)
             return {"provider":name,"video_id":tid,"extra":extra}
         except TDVideoProviderErrorV27 as e:
+            # Missing key / paid fallback disabled is not a provider failure:
+            # skip it and continue checking later configured providers.
+            if e.code in ("disabled", "not_configured"):
+                failures.append((name, e.status, e.code))
+                print("[Tekden AI] Video provider skipped:", name, e.code)
+                continue
             failures.append((name,e.status,e.code))
             print("[Tekden AI] Video provider failed:",name,e.status,re.sub(r"[^A-Za-z0-9_.-]","",e.code)[:60])
-            # Fail over only for provider capacity/server/network errors, never for bad
-            # credentials, invalid requests, or exhausted billing credits.
-            if e.status not in (429,500,502,503,504,520,522,524): break
+            # Continue after explicit provider rejection/capacity errors. Do not
+            # fail over after ambiguous network timeouts to avoid duplicate jobs.
+            if e.status not in (400,401,402,403,404,409,422,429,500,503):
+                break
     if failures:
         summary=", ".join(f"{n}:{st or 'kapalı'}" for n,st,_ in failures)
         raise HTTPException(503,"Video sağlayıcıları görev oluşturamadı ("+summary+"). Ücretli yedekler varsayılan olarak kapalıdır.")
@@ -14982,8 +14991,10 @@ def td_video_studio_status_v21(request: Request):
         "providers": {"agnes": bool(AGNES_API_KEY), "replicate": bool(REPLICATE_API_TOKEN and REPLICATE_ALLOW_PAID),
                       "fal": bool(FAL_KEY and FAL_ALLOW_PAID), "runway": bool(RUNWAY_API_KEY and RUNWAY_ALLOW_PAID),
                       "yepapi": bool(YEPAPI_API_KEY and YEPAPI_ALLOW_PAID)},
+        "provider_keys_present": {"agnes": bool(AGNES_API_KEY), "replicate": bool(REPLICATE_API_TOKEN),
+                      "fal": bool(FAL_KEY), "runway": bool(RUNWAY_API_KEY), "yepapi": bool(YEPAPI_API_KEY)},
         "paid_fallbacks_default_off": True,
-        "note": "Ücretli yedekler varsayılan olarak kapalıdır.",
+        "note": "Kapalı veya anahtarsız sağlayıcılar atlanır; yalnızca açıkça etkinleştirilmiş sağlayıcılar denenir. Ücretli yedekler varsayılan olarak kapalıdır.",
     }
 
 
@@ -15007,7 +15018,7 @@ def td_video_studio_poll_v21(request: Request, body: dict):
 def td_public_app_version_v21():
     return {
         "app": "Tekden AI",
-        "build": "v27-five-video-providers-fallback",
+        "build": "v29-video-provider-failover-fix",
         "additive_update": True,
         "video_studio": True,
         "video_studio_free_until": TD_VIDEO_STUDIO_FREE_UNTIL_V21,
@@ -15024,3 +15035,7 @@ def td_public_app_version_v21():
 
 # V28 hotfix: provider exception naming consistency.
 TD_VIDEO_STUDIO_BUILD = 'v28-provider-error-hotfix'
+
+
+# V29: disabled providers are skipped instead of terminating failover.
+TD_VIDEO_STUDIO_BUILD = 'v29-video-provider-failover-fix'
