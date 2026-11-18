@@ -14708,187 +14708,189 @@ def td_video_dimensions_v21(ratio):
     )
 
 
-def td_video_ticket_v21(video_id, user_id):
-    payload = json.dumps({
-        "video_id": str(video_id),
-        "user_id": int(user_id),
-        "expires": int(time.time()) + 7200,
-    }, separators=(",", ":"))
-    encoded = b64e(payload)
-    signature = hmac.new(
-        SESSION_SECRET.encode(),
-        ("td-video-v21:" + encoded).encode(),
-        hashlib.sha256,
-    ).hexdigest()
-    return encoded + "." + signature
 
+class TDVideoProviderErrorV27(Exception):
+    def __init__(self, provider, status, code=""):
+        self.provider, self.status, self.code = provider, int(status or 0), str(code or "")
+
+def _td_env_true_v27(name):
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "").strip()
+REPLICATE_VIDEO_MODEL = os.getenv("REPLICATE_VIDEO_MODEL", "minimax/video-01").strip()
+FAL_KEY = os.getenv("FAL_KEY", "").strip()
+FAL_VIDEO_MODEL = os.getenv("FAL_VIDEO_MODEL", "fal-ai/kling-video/v3/standard/text-to-video").strip()
+RUNWAY_API_KEY = os.getenv("RUNWAY_API_KEY", "").strip()
+RUNWAY_VIDEO_MODEL = os.getenv("RUNWAY_VIDEO_MODEL", "gen4.5").strip()
+YEPAPI_API_KEY = os.getenv("YEPAPI_API_KEY", "").strip()
+YEPAPI_VIDEO_MODEL = os.getenv("YEPAPI_VIDEO_MODEL", "pixverse/pixverse-v6").strip()
+REPLICATE_ALLOW_PAID = _td_env_true_v27("REPLICATE_ALLOW_PAID")
+FAL_ALLOW_PAID = _td_env_true_v27("FAL_ALLOW_PAID")
+RUNWAY_ALLOW_PAID = _td_env_true_v27("RUNWAY_ALLOW_PAID")
+YEPAPI_ALLOW_PAID = _td_env_true_v27("YEPAPI_ALLOW_PAID")
+
+def td_video_ticket_v21(video_id, user_id, provider="agnes", extra=None):
+    payload = json.dumps({"video_id":str(video_id),"provider":provider,"extra":extra or {},
+                          "user_id":int(user_id),"expires":int(time.time())+7200}, separators=(",",":"))
+    encoded = b64e(payload)
+    signature = hmac.new(SESSION_SECRET.encode(),("td-video-v21:"+encoded).encode(),hashlib.sha256).hexdigest()
+    return encoded+"."+signature
 
 def td_read_video_ticket_v21(ticket, user_id):
     try:
-        encoded, signature = str(ticket or "").split(".", 1)
-        expected = hmac.new(
-            SESSION_SECRET.encode(),
-            ("td-video-v21:" + encoded).encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            raise ValueError("signature")
-        data = json.loads(b64d(encoded))
-        if int(data.get("user_id", -1)) != int(user_id):
-            raise ValueError("owner")
-        if int(data.get("expires", 0)) < int(time.time()):
-            raise ValueError("expired")
-        video_id = str(data.get("video_id") or "")
-        if not video_id or len(video_id) > 256:
-            raise ValueError("id")
-        return video_id
+        encoded, signature = str(ticket or "").split(".",1)
+        expected = hmac.new(SESSION_SECRET.encode(),("td-video-v21:"+encoded).encode(),hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(signature,expected): raise ValueError()
+        data=json.loads(b64d(encoded))
+        if int(data.get("user_id",-1))!=int(user_id) or int(data.get("expires",0))<int(time.time()): raise ValueError()
+        if data.get("provider","agnes") not in ("agnes","replicate","fal","runway","yepapi"): raise ValueError()
+        if not data.get("video_id"): raise ValueError()
+        return {"video_id":str(data["video_id"]),"provider":data.get("provider","agnes"),"extra":data.get("extra") or {}}
     except Exception:
-        raise HTTPException(400, "Video görevi bağlantısı geçersiz veya süresi dolmuş.")
+        raise HTTPException(400,"Video görevi bağlantısı geçersiz veya süresi dolmuş.")
 
+def _td_video_prompt_v27(body):
+    prompt=f"{body.visual_style}. {body.prompt.strip()}. Cinematic composition, natural motion, stable subjects, realistic lighting, no watermark or random text."
+    if body.narration.strip():
+        prompt+=f" Spoken narration language: {body.language}. Speak exactly this text: {body.narration.strip()}"
+    return prompt[:6000]
 
-def td_video_http_error_v21(status):
-    if status in (401, 403):
-        return HTTPException(503, "Video sağlayıcısı anahtarı veya hesap erişimi doğrulanamadı.")
-    if status == 402:
-        return HTTPException(402, "Video sağlayıcısının ücretsiz kullanım hakkı veya erişim kotası tükenmiş olabilir.")
-    if status == 429:
-        return HTTPException(429, "Video üretim sırası dolu veya ücretsiz istek sınırına ulaşıldı. Biraz sonra dene.")
-    if status in (400, 422):
-        return HTTPException(400, "Video isteği sağlayıcı tarafından kabul edilmedi. İsteği sadeleştirip dene.")
-    if status >= 500:
-        return HTTPException(503, "Video sağlayıcısının ücretsiz üretim kuyruğu şu anda dolu veya servis yoğun. Bu istek için henüz video görevi oluşturulmadı; 1-2 dakika sonra yeniden deneyebilirsin.")
-    return HTTPException(502, "Video sağlayıcısından beklenmeyen yanıt alındı.")
+def _td_post_json_v27(provider,url,headers,payload):
+    try: r=requests.post(url,headers=headers,json=payload,timeout=(8,75))
+    except requests.Timeout: raise TDVideoProviderError(provider,504,"timeout")
+    except requests.RequestException as e: raise TDVideoProviderError(provider,502,type(e).__name__)
+    if r.status_code>=400:
+        code=""
+        try:
+            d=r.json(); code=str(d.get("code") or d.get("error_code") or d.get("error") or "")[:100]
+        except Exception: pass
+        raise TDVideoProviderError(provider,r.status_code,code)
+    try: return r.json()
+    except Exception: raise TDVideoProviderError(provider,502,"invalid_json")
 
+def _td_create_agnes_v27(body,prompt):
+    if not AGNES_API_KEY: raise TDVideoProviderError("agnes",0,"not_configured")
+    d=_td_post_json_v27("agnes","https://apihub.agnes-ai.com/v1/videos",
+      {"Authorization":"Bearer "+AGNES_API_KEY,"Content-Type":"application/json"},
+      {"model":AGNES_VIDEO_MODEL,"prompt":prompt,"mode":"text","seconds":str(max(4,min(12,int(body.duration_seconds)))),
+       "size":"720P","aspect_ratio":body.aspect_ratio if body.aspect_ratio in ("16:9","9:16","1:1") else "16:9"})
+    tid=d.get("video_id") or d.get("id") or d.get("task_id")
+    if not tid: raise TDVideoProviderError("agnes",502,"missing_task_id")
+    return str(tid),{}
+
+def _td_create_replicate_v27(body,prompt):
+    if not REPLICATE_API_TOKEN or not REPLICATE_ALLOW_PAID: raise TDVideoProviderError("replicate",0,"disabled")
+    owner,sep,model=REPLICATE_VIDEO_MODEL.partition("/")
+    if not sep: raise TDVideoProviderError("replicate",0,"invalid_model")
+    d=_td_post_json_v27("replicate",f"https://api.replicate.com/v1/models/{owner}/{model}/predictions",
+      {"Authorization":"Bearer "+REPLICATE_API_TOKEN,"Content-Type":"application/json","Prefer":"wait=1"},
+      {"input":{"prompt":prompt,"prompt_optimizer":True}})
+    if not d.get("id"): raise TDVideoProviderError("replicate",502,"missing_prediction_id")
+    return str(d["id"]),{"get_url":(d.get("urls") or {}).get("get")}
+
+def _td_create_fal_v27(body,prompt):
+    if not FAL_KEY or not FAL_ALLOW_PAID: raise TDVideoProviderError("fal",0,"disabled")
+    endpoint="https://queue.fal.run/"+FAL_VIDEO_MODEL.strip("/")
+    d=_td_post_json_v27("fal",endpoint,{"Authorization":FAL_KEY,"Content-Type":"application/json"},
+      {"prompt":prompt,"duration":max(5,min(10,int(body.duration_seconds))),"aspect_ratio":body.aspect_ratio})
+    if not d.get("request_id"): raise TDVideoProviderError("fal",502,"missing_request_id")
+    return str(d["request_id"]),{"status_url":d.get("status_url"),"response_url":d.get("response_url"),"endpoint":endpoint}
+
+def _td_create_runway_v27(body,prompt):
+    if not RUNWAY_API_KEY or not RUNWAY_ALLOW_PAID: raise TDVideoProviderError("runway",0,"disabled")
+    ratio={"16:9":"1280:720","9:16":"720:1280","1:1":"960:960"}.get(body.aspect_ratio,"1280:720")
+    d=_td_post_json_v27("runway","https://api.dev.runwayml.com/v1/text_to_video",
+      {"Authorization":"Bearer "+RUNWAY_API_KEY,"X-Runway-Version":"2024-11-06","Content-Type":"application/json"},
+      {"model":RUNWAY_VIDEO_MODEL,"promptText":prompt[:1000],"ratio":ratio,"duration":5 if int(body.duration_seconds)<=5 else 10})
+    if not d.get("id"): raise TDVideoProviderError("runway",502,"missing_task_id")
+    return str(d["id"]),{}
+
+def _td_create_yepapi_v27(body,prompt):
+    if not YEPAPI_API_KEY or not YEPAPI_ALLOW_PAID: raise TDVideoProviderError("yepapi",0,"disabled")
+    d=_td_post_json_v27("yepapi","https://api.yepapi.com/v1/media/queue",
+      {"x-api-key":YEPAPI_API_KEY,"Content-Type":"application/json"},
+      {"model":YEPAPI_VIDEO_MODEL,"prompt":prompt,"options":{"aspectRatio":body.aspect_ratio,"resolution":"720p",
+       "duration":str(max(5,min(10,int(body.duration_seconds)))),"generateAudio":False}})
+    inner=d.get("data") if isinstance(d.get("data"),dict) else d
+    tid=inner.get("jobId") or inner.get("job_id") or inner.get("id")
+    if not tid: raise TDVideoProviderError("yepapi",502,"missing_job_id")
+    return str(tid),{}
 
 def td_video_provider_create_v21(body):
-    # Provider adapter with bounded retry for temporary upstream capacity errors.
-    if not AGNES_API_KEY:
-        raise HTTPException(503, "Video üretimi için Render Environment bölümüne AGNES_API_KEY eklemelisin.")
-    width, height = td_video_dimensions_v21(body.aspect_ratio)
-    prompt = (
-        f"{body.visual_style}. {body.prompt.strip()}. "
-        "Create a polished coherent video, natural motion, stable subjects, "
-        "cinematic composition, realistic lighting, no watermark or random text."
-    )
-    if body.narration.strip():
-        prompt += (
-            f" Spoken narration language: {body.language}. "
-            f"Speak exactly this text without translating or adding words: {body.narration.strip()}"
-        )
-    # Current Agnes Video 2.5 Flash schema. The old v2.0 width/height/num_frames
-    # fields are rejected by the current API.
-    payload = {
-        "model": AGNES_VIDEO_MODEL,
-        "prompt": prompt[:6000],
-        "mode": "text",
-        "seconds": str(max(4, min(12, int(body.duration_seconds)))),
-        "size": "720P",
-        "aspect_ratio": body.aspect_ratio if body.aspect_ratio in ("16:9", "9:16", "1:1") else "16:9",
-    }
-    response = None
-    retry_delays = {500: (5, 15), 502: (5, 15), 503: (8, 20), 504: (5, 15), 520: (5, 15), 522: (5, 15), 524: (5, 15)}
-    for attempt in range(3):
+    prompt=_td_video_prompt_v27(body)
+    providers=[("agnes",_td_create_agnes_v27),("replicate",_td_create_replicate_v27),
+               ("fal",_td_create_fal_v27),("runway",_td_create_runway_v27),("yepapi",_td_create_yepapi_v27)]
+    failures=[]
+    for name,fn in providers:
         try:
-            response = requests.post(
-                "https://apihub.agnes-ai.com/v1/videos",
-                headers={"Authorization": "Bearer " + AGNES_API_KEY, "Content-Type": "application/json"},
-                json=payload,
-                timeout=(8, 75),
-            )
-        except requests.Timeout:
-            if attempt < 2:
-                time.sleep((5, 15)[attempt])
-                continue
-            raise HTTPException(504, "Video isteği zaman aşımına uğradı. Biraz sonra yeniden deneyebilirsin.")
-        except requests.RequestException as exc:
-            print("[Tekden AI] Video sağlayıcı bağlantı hatası:", type(exc).__name__)
-            if attempt < 2:
-                time.sleep((5, 15)[attempt])
-                continue
-            raise HTTPException(502, "Video sağlayıcısına bağlanılamadı. Biraz sonra yeniden dene.")
+            tid,extra=fn(body,prompt)
+            print("[Tekden AI] Video task created:",name)
+            return {"provider":name,"video_id":tid,"extra":extra}
+        except TDVideoProviderError as e:
+            failures.append((name,e.status,e.code))
+            print("[Tekden AI] Video provider failed:",name,e.status,re.sub(r"[^A-Za-z0-9_.-]","",e.code)[:60])
+            # Fail over only for provider capacity/server/network errors, never for bad
+            # credentials, invalid requests, or exhausted billing credits.
+            if e.status not in (429,500,502,503,504,520,522,524): break
+    if failures:
+        summary=", ".join(f"{n}:{st or 'kapalı'}" for n,st,_ in failures)
+        raise HTTPException(503,"Video sağlayıcıları görev oluşturamadı ("+summary+"). Ücretli yedekler varsayılan olarak kapalıdır.")
+    raise HTTPException(503,"Yapılandırılmış video sağlayıcısı bulunamadı.")
 
-        if response.status_code < 400:
-            break
+def _td_get_json_v27(provider,url,headers):
+    try: r=requests.get(url,headers=headers,timeout=(8,45))
+    except requests.Timeout: raise HTTPException(504,"Video durumu sorgulanırken zaman aşımı oluştu.")
+    except requests.RequestException: raise HTTPException(502,"Video durumu şu anda alınamıyor.")
+    if r.status_code>=400: raise td_video_http_error_v21(r.status_code)
+    try: return r.json()
+    except Exception: raise HTTPException(502,"Video sağlayıcısından geçersiz durum yanıtı alındı.")
 
-        delays = retry_delays.get(response.status_code)
-        if delays and attempt < 2:
-            print("[Tekden AI] Video sağlayıcı geçici HTTP hatası; tekrar denenecek:",
-                  response.status_code, "deneme", attempt + 1)
-            time.sleep(delays[attempt])
-            continue
-
-        # Keep provider details in server logs only; never expose keys or raw bodies.
-        provider_code = ""
-        try:
-            err_data = response.json()
-            if isinstance(err_data, dict):
-                provider_code = str(err_data.get("code") or err_data.get("error_code") or "")
-        except Exception:
-            pass
-        print("[Tekden AI] Video sağlayıcı son HTTP hatası:",
-              response.status_code, "provider_code=", re.sub(r"[^A-Za-z0-9_.-]", "", provider_code)[:80])
-        if response.status_code == 503 and provider_code.lower() in ("video_queue_full", "queue_full"):
-            raise HTTPException(503, "Video sağlayıcısının ücretsiz video kuyruğu şu anda dolu. Bir süre sonra tekrar dene.")
-        raise td_video_http_error_v21(response.status_code)
-
-    if response is None or response.status_code >= 400:
-        raise HTTPException(503, "Video sağlayıcısı şu anda yoğun. Birkaç dakika sonra yeniden dene.")
-    try:
-        result = response.json()
-    except ValueError:
-        raise HTTPException(502, "Video sağlayıcısı geçersiz yanıt döndürdü.")
-    video_id = result.get("video_id") or result.get("id") or result.get("task_id")
-    if not video_id:
-        raise HTTPException(502, "Video sağlayıcısı görev numarası döndürmedi.")
-    return str(video_id)
-
-
-def td_video_provider_status_v21(video_id):
-    if not AGNES_API_KEY:
-        raise HTTPException(503, "Video sağlayıcısı anahtarı yapılandırılmamış.")
-    try:
-        response = requests.get(
-            "https://apihub.agnes-ai.com/agnesapi",
-            headers={"Authorization": "Bearer " + AGNES_API_KEY},
-            params={"video_id": video_id, "model_name": AGNES_VIDEO_MODEL},
-            timeout=(8, 35),
-        )
-    except requests.Timeout:
-        raise HTTPException(504, "Video durumu sorgulanırken zaman aşımı oluştu.")
-    except requests.RequestException as exc:
-        print("[Tekden AI] Video durum bağlantı hatası:", type(exc).__name__)
-        raise HTTPException(502, "Video durumu şu anda alınamıyor.")
-    if response.status_code >= 400:
-        raise td_video_http_error_v21(response.status_code)
-    try:
-        data = response.json()
-    except ValueError:
-        raise HTTPException(502, "Video durumu yanıtı okunamadı.")
-    raw = str(data.get("status") or data.get("state") or "processing").lower()
-    status = {
-        "completed": "completed", "complete": "completed", "success": "completed",
-        "succeeded": "completed", "done": "completed", "failed": "failed",
-        "error": "failed", "cancelled": "failed",
-        "pending": "processing", "queued": "processing", "running": "processing",
-        "in_progress": "processing", "processing": "processing",
-    }.get(raw, "processing")
-    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
-    video_url = data.get("video_url") or data.get("url") or metadata.get("url")
-    if isinstance(data.get("output"), dict):
-        video_url = video_url or data["output"].get("video_url") or data["output"].get("url")
-    if video_url:
-        parsed = urllib.parse.urlsplit(str(video_url))
-        if parsed.scheme != "https" or not parsed.netloc:
-            video_url = None
-    return {
-        "status": status,
-        "progress": max(0, min(100, int(data.get("progress") or (100 if status == "completed" else 0)))),
-        "video_url": video_url if status == "completed" else None,
-        "message": "Video hazır." if status == "completed" else (
-            "Video üretimi başarısız oldu." if status == "failed" else
-            "Video hazırlanıyor. Bu işlem birkaç dakika sürebilir."
-        ),
-    }
+def td_video_provider_status_v21(task):
+    if isinstance(task,str): task={"provider":"agnes","video_id":task,"extra":{}}
+    provider=task.get("provider","agnes"); tid=str(task.get("video_id") or ""); extra=task.get("extra") or {}
+    if provider=="agnes":
+        d=_td_get_json_v27(provider,"https://apihub.agnes-ai.com/agnesapi?"+urllib.parse.urlencode({"video_id":tid,"model_name":AGNES_VIDEO_MODEL}),{"Authorization":"Bearer "+AGNES_API_KEY})
+        raw=str(d.get("status") or d.get("state") or "processing").lower()
+        meta=d.get("metadata") if isinstance(d.get("metadata"),dict) else {}
+        url=d.get("video_url") or d.get("url") or meta.get("url")
+        if isinstance(d.get("output"),dict): url=url or d["output"].get("video_url") or d["output"].get("url")
+    elif provider=="replicate":
+        d=_td_get_json_v27(provider,extra.get("get_url") or "https://api.replicate.com/v1/predictions/"+urllib.parse.quote(tid,safe=""),{"Authorization":"Bearer "+REPLICATE_API_TOKEN})
+        raw=str(d.get("status") or "processing").lower(); out=d.get("output")
+        url=out[-1] if isinstance(out,list) and out else out if isinstance(out,str) else None
+    elif provider=="fal":
+        status_url=extra.get("status_url") or "https://queue.fal.run/"+FAL_VIDEO_MODEL.strip("/")+"/requests/"+urllib.parse.quote(tid,safe="")+"/status"
+        d=_td_get_json_v27(provider,status_url,{"Authorization":FAL_KEY})
+        raw=str(d.get("status") or "processing").lower(); url=None
+        if raw.upper() in ("COMPLETED","SUCCEEDED"):
+            result_url=extra.get("response_url") or "https://queue.fal.run/"+FAL_VIDEO_MODEL.strip("/")+"/requests/"+urllib.parse.quote(tid,safe="")
+            rd=_td_get_json_v27(provider,result_url,{"Authorization":FAL_KEY})
+            v=rd.get("video") if isinstance(rd.get("video"),dict) else {}
+            url=v.get("url") or rd.get("video_url") or rd.get("url")
+    elif provider=="runway":
+        d=_td_get_json_v27(provider,"https://api.dev.runwayml.com/v1/tasks/"+urllib.parse.quote(tid,safe=""),
+          {"Authorization":"Bearer "+RUNWAY_API_KEY,"X-Runway-Version":"2024-11-06"})
+        raw=str(d.get("status") or "processing").lower(); out=d.get("output")
+        url=out[0] if isinstance(out,list) and out else d.get("video_url")
+    elif provider=="yepapi":
+        d=_td_get_json_v27(provider,"https://api.yepapi.com/v1/media/status/"+urllib.parse.quote(tid,safe=""),{"x-api-key":YEPAPI_API_KEY})
+        inner=d.get("data") if isinstance(d.get("data"),dict) else d
+        raw=str(inner.get("status") or "processing").lower()
+        result=inner.get("result") if isinstance(inner.get("result"),dict) else {}
+        v=result.get("video") if isinstance(result.get("video"),dict) else {}
+        url=v.get("url") or inner.get("video_url")
+        if not url and v.get("base64"): url="data:"+str(v.get("mimeType") or "video/mp4")+";base64,"+str(v["base64"])
+    else: raise HTTPException(400,"Bilinmeyen video sağlayıcısı.")
+    status={"completed":"completed","complete":"completed","success":"completed","succeeded":"completed","done":"completed",
+      "failed":"failed","error":"failed","cancelled":"failed","canceled":"failed","pending":"processing","queued":"processing",
+      "starting":"processing","running":"processing","in_progress":"processing","processing":"processing"}.get(raw.lower(), "processing")
+    if url:
+        parsed=urllib.parse.urlsplit(str(url))
+        if parsed.scheme not in ("https","data") or (parsed.scheme=="https" and not parsed.netloc): url=None
+    return {"status":status,"progress":max(0,min(100,int(d.get("progress") or (100 if status=="completed" else 0)))),
+      "video_url":url if status=="completed" else None,
+      "message":"Video hazır." if status=="completed" else ("Video üretimi başarısız oldu." if status=="failed" else f"{provider} üzerinde video hazırlanıyor."),
+      "provider":provider}
 
 
 TD_VIDEO_STUDIO_HTML_V21 = r'''<!doctype html>
@@ -14927,7 +14929,7 @@ async function poll(){try{let d=await api('/api/video-studio/poll',{ticket});say
 if(d.status==='completed'&&d.video_url){$('v').src=d.video_url;$('v').hidden=false;$('download').href=d.video_url;$('download').hidden=false;say('Video hazır!',100);$('go').disabled=false;ticket=null;return}
 if(d.status==='failed'){say('Video üretimi başarısız. İsteği sadeleştirip tekrar deneyebilirsin.',0);$('go').disabled=false;ticket=null;return}
 timer=setTimeout(poll,12000)}catch(err){say(err.message,0);timer=setTimeout(poll,18000)}}
-api('/api/video-studio/status').then(d=>say(d.configured?'Video sağlayıcısı hazır.':'Arayüz hazır; Render Environment bölümüne AGNES_API_KEY eklenmeli.',0)).catch(e=>say(e.message,0));
+api('/api/video-studio/status').then(d=>say(d.configured?'Video sağlayıcıları kontrol edildi.':'Arayüz hazır; en az bir sağlayıcı anahtarı yapılandırılmalı.',0)).catch(e=>say(e.message,0));
 </script></body></html>'''
 
 
@@ -14975,38 +14977,37 @@ def td_video_studio_status_v21(request: Request):
     td_require_video_studio_access_v21(request)
     return {
         "ok": True,
-        "provider": "agnes",
-        "configured": bool(AGNES_API_KEY),
-        "model": AGNES_VIDEO_MODEL if AGNES_API_KEY else None,
-        "paid_provider_adapter_ready": True,
-        "note": "Ücretsiz kullanım sağlayıcının güncel erişim ve kota koşullarına bağlıdır.",
+        "provider": "multi",
+        "configured": bool(AGNES_API_KEY or (REPLICATE_API_TOKEN and REPLICATE_ALLOW_PAID) or (FAL_KEY and FAL_ALLOW_PAID) or (RUNWAY_API_KEY and RUNWAY_ALLOW_PAID) or (YEPAPI_API_KEY and YEPAPI_ALLOW_PAID)),
+        "providers": {"agnes": bool(AGNES_API_KEY), "replicate": bool(REPLICATE_API_TOKEN and REPLICATE_ALLOW_PAID),
+                      "fal": bool(FAL_KEY and FAL_ALLOW_PAID), "runway": bool(RUNWAY_API_KEY and RUNWAY_ALLOW_PAID),
+                      "yepapi": bool(YEPAPI_API_KEY and YEPAPI_ALLOW_PAID)},
+        "paid_fallbacks_default_off": True,
+        "note": "Ücretli yedekler varsayılan olarak kapalıdır.",
     }
 
 
 @app.post("/api/video-studio/create")
 def td_video_studio_create_v21(body: TDVideoCreateBodyV21, request: Request):
     user = td_require_video_studio_access_v21(request)
-    video_id = td_video_provider_create_v21(body)
-    return {
-        "ok": True,
-        "ticket": td_video_ticket_v21(video_id, user["id"]),
-        "status": "processing",
-        "message": "Video görevi oluşturuldu. Hazır olana kadar durumunu kontrol edebilirsin.",
-    }
+    task = td_video_provider_create_v21(body)
+    return {"ok": True, "ticket": td_video_ticket_v21(task["video_id"], user["id"], task["provider"], task.get("extra")),
+            "status": "processing", "provider": task["provider"],
+            "message": task["provider"] + " sağlayıcısında video görevi oluşturuldu."}
 
 
 @app.post("/api/video-studio/poll")
 def td_video_studio_poll_v21(request: Request, body: dict):
     user = td_require_video_studio_access_v21(request)
-    video_id = td_read_video_ticket_v21((body or {}).get("ticket"), user["id"])
-    return {"ok": True, **td_video_provider_status_v21(video_id)}
+    task = td_read_video_ticket_v21((body or {}).get("ticket"), user["id"])
+    return {"ok": True, **td_video_provider_status_v21(task)}
 
 
 @app.get("/api/version-v21", include_in_schema=False)
 def td_public_app_version_v21():
     return {
         "app": "Tekden AI",
-        "build": "v26-video-studio-agnes-25-schema",
+        "build": "v27-five-video-providers-fallback",
         "additive_update": True,
         "video_studio": True,
         "video_studio_free_until": TD_VIDEO_STUDIO_FREE_UNTIL_V21,
@@ -15016,6 +15017,6 @@ def td_public_app_version_v21():
         "video_provider_transient_retry": True,
         "video_provider_model_schema": "agnes-video-2.5-flash",
         "video_studio_pro_only_after": True,
-        "provider": "agnes_optional",
-        "paid_provider_adapter": "ready_for_extension",
+        "provider": "agnes-replicate-fal-runway-yepapi",
+        "video_provider_fallbacks": 5,
     }
