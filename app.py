@@ -14757,63 +14757,63 @@ def _td_video_prompt_v27(body):
 
 def _td_post_json_v27(provider,url,headers,payload):
     try: r=requests.post(url,headers=headers,json=payload,timeout=(8,75))
-    except requests.Timeout: raise TDVideoProviderError(provider,504,"timeout")
-    except requests.RequestException as e: raise TDVideoProviderError(provider,502,type(e).__name__)
+    except requests.Timeout: raise TDVideoProviderErrorV27(provider,504,"timeout")
+    except requests.RequestException as e: raise TDVideoProviderErrorV27(provider,502,type(e).__name__)
     if r.status_code>=400:
         code=""
         try:
             d=r.json(); code=str(d.get("code") or d.get("error_code") or d.get("error") or "")[:100]
         except Exception: pass
-        raise TDVideoProviderError(provider,r.status_code,code)
+        raise TDVideoProviderErrorV27(provider,r.status_code,code)
     try: return r.json()
-    except Exception: raise TDVideoProviderError(provider,502,"invalid_json")
+    except Exception: raise TDVideoProviderErrorV27(provider,502,"invalid_json")
 
 def _td_create_agnes_v27(body,prompt):
-    if not AGNES_API_KEY: raise TDVideoProviderError("agnes",0,"not_configured")
+    if not AGNES_API_KEY: raise TDVideoProviderErrorV27("agnes",0,"not_configured")
     d=_td_post_json_v27("agnes","https://apihub.agnes-ai.com/v1/videos",
       {"Authorization":"Bearer "+AGNES_API_KEY,"Content-Type":"application/json"},
       {"model":AGNES_VIDEO_MODEL,"prompt":prompt,"mode":"text","seconds":str(max(4,min(12,int(body.duration_seconds)))),
        "size":"720P","aspect_ratio":body.aspect_ratio if body.aspect_ratio in ("16:9","9:16","1:1") else "16:9"})
     tid=d.get("video_id") or d.get("id") or d.get("task_id")
-    if not tid: raise TDVideoProviderError("agnes",502,"missing_task_id")
+    if not tid: raise TDVideoProviderErrorV27("agnes",502,"missing_task_id")
     return str(tid),{}
 
 def _td_create_replicate_v27(body,prompt):
-    if not REPLICATE_API_TOKEN or not REPLICATE_ALLOW_PAID: raise TDVideoProviderError("replicate",0,"disabled")
+    if not REPLICATE_API_TOKEN or not REPLICATE_ALLOW_PAID: raise TDVideoProviderErrorV27("replicate",0,"disabled")
     owner,sep,model=REPLICATE_VIDEO_MODEL.partition("/")
-    if not sep: raise TDVideoProviderError("replicate",0,"invalid_model")
+    if not sep: raise TDVideoProviderErrorV27("replicate",0,"invalid_model")
     d=_td_post_json_v27("replicate",f"https://api.replicate.com/v1/models/{owner}/{model}/predictions",
       {"Authorization":"Bearer "+REPLICATE_API_TOKEN,"Content-Type":"application/json","Prefer":"wait=1"},
       {"input":{"prompt":prompt,"prompt_optimizer":True}})
-    if not d.get("id"): raise TDVideoProviderError("replicate",502,"missing_prediction_id")
+    if not d.get("id"): raise TDVideoProviderErrorV27("replicate",502,"missing_prediction_id")
     return str(d["id"]),{"get_url":(d.get("urls") or {}).get("get")}
 
 def _td_create_fal_v27(body,prompt):
-    if not FAL_KEY or not FAL_ALLOW_PAID: raise TDVideoProviderError("fal",0,"disabled")
+    if not FAL_KEY or not FAL_ALLOW_PAID: raise TDVideoProviderErrorV27("fal",0,"disabled")
     endpoint="https://queue.fal.run/"+FAL_VIDEO_MODEL.strip("/")
     d=_td_post_json_v27("fal",endpoint,{"Authorization":FAL_KEY,"Content-Type":"application/json"},
       {"prompt":prompt,"duration":max(5,min(10,int(body.duration_seconds))),"aspect_ratio":body.aspect_ratio})
-    if not d.get("request_id"): raise TDVideoProviderError("fal",502,"missing_request_id")
+    if not d.get("request_id"): raise TDVideoProviderErrorV27("fal",502,"missing_request_id")
     return str(d["request_id"]),{"status_url":d.get("status_url"),"response_url":d.get("response_url"),"endpoint":endpoint}
 
 def _td_create_runway_v27(body,prompt):
-    if not RUNWAY_API_KEY or not RUNWAY_ALLOW_PAID: raise TDVideoProviderError("runway",0,"disabled")
+    if not RUNWAY_API_KEY or not RUNWAY_ALLOW_PAID: raise TDVideoProviderErrorV27("runway",0,"disabled")
     ratio={"16:9":"1280:720","9:16":"720:1280","1:1":"960:960"}.get(body.aspect_ratio,"1280:720")
     d=_td_post_json_v27("runway","https://api.dev.runwayml.com/v1/text_to_video",
       {"Authorization":"Bearer "+RUNWAY_API_KEY,"X-Runway-Version":"2024-11-06","Content-Type":"application/json"},
       {"model":RUNWAY_VIDEO_MODEL,"promptText":prompt[:1000],"ratio":ratio,"duration":5 if int(body.duration_seconds)<=5 else 10})
-    if not d.get("id"): raise TDVideoProviderError("runway",502,"missing_task_id")
+    if not d.get("id"): raise TDVideoProviderErrorV27("runway",502,"missing_task_id")
     return str(d["id"]),{}
 
 def _td_create_yepapi_v27(body,prompt):
-    if not YEPAPI_API_KEY or not YEPAPI_ALLOW_PAID: raise TDVideoProviderError("yepapi",0,"disabled")
+    if not YEPAPI_API_KEY or not YEPAPI_ALLOW_PAID: raise TDVideoProviderErrorV27("yepapi",0,"disabled")
     d=_td_post_json_v27("yepapi","https://api.yepapi.com/v1/media/queue",
       {"x-api-key":YEPAPI_API_KEY,"Content-Type":"application/json"},
       {"model":YEPAPI_VIDEO_MODEL,"prompt":prompt,"options":{"aspectRatio":body.aspect_ratio,"resolution":"720p",
        "duration":str(max(5,min(10,int(body.duration_seconds)))),"generateAudio":False}})
     inner=d.get("data") if isinstance(d.get("data"),dict) else d
     tid=inner.get("jobId") or inner.get("job_id") or inner.get("id")
-    if not tid: raise TDVideoProviderError("yepapi",502,"missing_job_id")
+    if not tid: raise TDVideoProviderErrorV27("yepapi",502,"missing_job_id")
     return str(tid),{}
 
 def td_video_provider_create_v21(body):
@@ -14826,7 +14826,7 @@ def td_video_provider_create_v21(body):
             tid,extra=fn(body,prompt)
             print("[Tekden AI] Video task created:",name)
             return {"provider":name,"video_id":tid,"extra":extra}
-        except TDVideoProviderError as e:
+        except TDVideoProviderErrorV27 as e:
             failures.append((name,e.status,e.code))
             print("[Tekden AI] Video provider failed:",name,e.status,re.sub(r"[^A-Za-z0-9_.-]","",e.code)[:60])
             # Fail over only for provider capacity/server/network errors, never for bad
@@ -15020,3 +15020,7 @@ def td_public_app_version_v21():
         "provider": "agnes-replicate-fal-runway-yepapi",
         "video_provider_fallbacks": 5,
     }
+
+
+# V28 hotfix: provider exception naming consistency.
+TD_VIDEO_STUDIO_BUILD = 'v28-provider-error-hotfix'
