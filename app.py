@@ -34,6 +34,18 @@ POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "").strip()
 POLLINATIONS_IMAGE_MODEL = os.getenv("POLLINATIONS_IMAGE_MODEL", "flux").strip()
 # Hugging Face free-tier credits are limited and may change.
 HF_TOKEN = os.getenv("HF_TOKEN", "").strip()
+
+# V30 image-provider fallback settings. Keys remain server-side only.
+CF_ACCOUNT_ID = os.getenv("CF_ACCOUNT_ID", "").strip()
+CF_API_TOKEN = os.getenv("CF_API_TOKEN", "").strip()
+CF_IMAGE_MODEL = os.getenv("CF_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell").strip()
+CF_IMAGE_ALLOW_PAID = os.getenv("CF_IMAGE_ALLOW_PAID", "false").strip().lower() in ("1", "true", "yes", "on")
+STABILITY_API_KEY = os.getenv("STABILITY_API_KEY", "").strip()
+STABILITY_IMAGE_ALLOW_PAID = os.getenv("STABILITY_IMAGE_ALLOW_PAID", "false").strip().lower() in ("1", "true", "yes", "on")
+IMAGE_REPLICATE_API_TOKEN = os.getenv("IMAGE_REPLICATE_API_TOKEN", "").strip()
+IMAGE_REPLICATE_MODEL = os.getenv("IMAGE_REPLICATE_MODEL", "black-forest-labs/flux-schnell").strip()
+IMAGE_REPLICATE_ALLOW_PAID = os.getenv("IMAGE_REPLICATE_ALLOW_PAID", "false").strip().lower() in ("1", "true", "yes", "on")
+POLLINATIONS_IMAGE_ALLOW_PAID = os.getenv("POLLINATIONS_IMAGE_ALLOW_PAID", "false").strip().lower() in ("1", "true", "yes", "on")
 # Optional free-tier-first Groq provider. Keep this key in Render Environment only.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b").strip() or "openai/gpt-oss-20b"
@@ -6664,42 +6676,204 @@ def vocal_song_status(generation_id: str, request: Request):
         # Transient network issues are reported as processing; the client polls again.
         return {"ok": True, "status": "processing", "audio_generated": False, "temporary_issue": "Geçici bağlantı sorunu; tekrar kontrol edilecek."}
 
+def _td_image_data_uri_v30(content: bytes, content_type: str) -> str:
+    if not content or not content_type.startswith("image/"):
+        raise ValueError("Provider did not return image bytes.")
+    encoded = base64.b64encode(content).decode("ascii")
+    return f"data:{content_type};base64,{encoded}"
+
+
+def _td_image_http_failure_v30(provider: str, response):
+    status = int(response.status_code)
+    # Keep provider response bodies out of public errors; they can contain IDs or diagnostics.
+    if status in (401, 403):
+        raise RuntimeError(f"{provider}:auth_{status}")
+    if status == 402:
+        raise RuntimeError(f"{provider}:quota_or_billing")
+    if status == 429:
+        raise RuntimeError(f"{provider}:rate_limited")
+    if status in (400, 404, 422):
+        raise RuntimeError(f"{provider}:request_rejected_{status}")
+    if status >= 500:
+        raise RuntimeError(f"{provider}:temporarily_unavailable_{status}")
+    raise RuntimeError(f"{provider}:http_{status}")
+
+
+def _td_image_try_huggingface_v30(prompt: str):
+    if not HF_TOKEN:
+        raise RuntimeError("huggingface:not_configured")
+    url = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-3-medium-diffusers"
+    r = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {HF_TOKEN}", "Accept": "image/*"},
+        json={"inputs": prompt},
+        timeout=(12, 180),
+    )
+    if not r.ok:
+        _td_image_http_failure_v30("huggingface", r)
+    ctype = r.headers.get("content-type", "image/png").split(";")[0]
+    return _td_image_data_uri_v30(r.content, ctype), "huggingface/stable-diffusion-3-medium"
+
+
+def _td_image_try_pollinations_v30(prompt: str):
+    if not POLLINATIONS_API_KEY:
+        raise RuntimeError("pollinations:not_configured")
+    if not POLLINATIONS_IMAGE_ALLOW_PAID:
+        raise RuntimeError("pollinations:disabled_by_budget_guard")
+    model = POLLINATIONS_IMAGE_MODEL or "flux"
+    url = "https://gen.pollinations.ai/image/" + urllib.parse.quote(prompt, safe="")
+    r = requests.get(
+        url,
+        headers={"Authorization": "Bearer " + POLLINATIONS_API_KEY, "Accept": "image/*"},
+        params={"model": model, "safe": "true"},
+        timeout=(12, 180),
+    )
+    if not r.ok:
+        _td_image_http_failure_v30("pollinations", r)
+    ctype = r.headers.get("content-type", "image/jpeg").split(";")[0]
+    return _td_image_data_uri_v30(r.content, ctype), "pollinations/" + model
+
+
+def _td_image_try_cloudflare_v30(prompt: str):
+    if not (CF_ACCOUNT_ID and CF_API_TOKEN):
+        raise RuntimeError("cloudflare:not_configured")
+    if not CF_IMAGE_ALLOW_PAID:
+        raise RuntimeError("cloudflare:disabled_by_budget_guard")
+    model = CF_IMAGE_MODEL or "@cf/black-forest-labs/flux-1-schnell"
+    url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/ai/run/{model}"
+    r = requests.post(
+        url,
+        headers={"Authorization": "Bearer " + CF_API_TOKEN, "Content-Type": "application/json"},
+        json={"prompt": prompt},
+        timeout=(12, 180),
+    )
+    if not r.ok:
+        _td_image_http_failure_v30("cloudflare", r)
+    try:
+        payload = r.json()
+        result = payload.get("result") or {}
+        image_b64 = result.get("image") if isinstance(result, dict) else None
+        if not image_b64:
+            raise ValueError("missing image field")
+        return "data:image/png;base64," + str(image_b64), model
+    except Exception as exc:
+        raise RuntimeError("cloudflare:invalid_image_response") from exc
+
+
+def _td_image_try_stability_v30(prompt: str):
+    if not STABILITY_API_KEY:
+        raise RuntimeError("stability:not_configured")
+    if not STABILITY_IMAGE_ALLOW_PAID:
+        raise RuntimeError("stability:disabled_by_budget_guard")
+    r = requests.post(
+        "https://api.stability.ai/v2beta/stable-image/generate/core",
+        headers={"Authorization": "Bearer " + STABILITY_API_KEY, "Accept": "image/*"},
+        files={"none": (None, "")},
+        data={"prompt": prompt, "output_format": "png"},
+        timeout=(12, 180),
+    )
+    if not r.ok:
+        _td_image_http_failure_v30("stability", r)
+    ctype = r.headers.get("content-type", "image/png").split(";")[0]
+    return _td_image_data_uri_v30(r.content, ctype), "stability/stable-image-core"
+
+
+def _td_image_try_replicate_v30(prompt: str):
+    if not IMAGE_REPLICATE_API_TOKEN:
+        raise RuntimeError("replicate_image:not_configured")
+    if not IMAGE_REPLICATE_ALLOW_PAID:
+        raise RuntimeError("replicate_image:disabled_by_budget_guard")
+    model_parts = IMAGE_REPLICATE_MODEL.split("/", 1)
+    if len(model_parts) != 2:
+        raise RuntimeError("replicate_image:invalid_model_name")
+    owner, model = model_parts
+    r = requests.post(
+        f"https://api.replicate.com/v1/models/{owner}/{model}/predictions",
+        headers={
+            "Authorization": "Bearer " + IMAGE_REPLICATE_API_TOKEN,
+            "Content-Type": "application/json",
+            "Prefer": "wait=60",
+        },
+        json={"input": {"prompt": prompt}},
+        timeout=(12, 90),
+    )
+    if not r.ok:
+        _td_image_http_failure_v30("replicate_image", r)
+    try:
+        payload = r.json()
+        output = payload.get("output")
+        if isinstance(output, list):
+            image_url = next((x for x in output if isinstance(x, str) and x.startswith("https://")), "")
+        elif isinstance(output, str):
+            image_url = output
+        else:
+            image_url = ""
+        if not image_url:
+            raise ValueError("prediction still processing or output missing")
+        image_response = requests.get(image_url, timeout=(12, 90))
+        if not image_response.ok:
+            _td_image_http_failure_v30("replicate_image_download", image_response)
+        ctype = image_response.headers.get("content-type", "image/png").split(";")[0]
+        return _td_image_data_uri_v30(image_response.content, ctype), "replicate/" + IMAGE_REPLICATE_MODEL
+    except Exception as exc:
+        raise RuntimeError("replicate_image:pending_or_invalid_output") from exc
+
+
+@app.get("/api/image/status")
+def image_provider_status_v30():
+    return {
+        "ok": True,
+        "primary": "Puter (browser-side)",
+        "fallback_order": ["huggingface", "pollinations", "cloudflare", "stability", "replicate"],
+        "providers": {
+            "huggingface": {"key_present": bool(HF_TOKEN), "enabled": bool(HF_TOKEN), "budget_guard": "provider credit limits apply"},
+            "pollinations": {"key_present": bool(POLLINATIONS_API_KEY), "enabled": bool(POLLINATIONS_API_KEY and POLLINATIONS_IMAGE_ALLOW_PAID), "paid_guard": not POLLINATIONS_IMAGE_ALLOW_PAID},
+            "cloudflare": {"key_present": bool(CF_ACCOUNT_ID and CF_API_TOKEN), "enabled": bool(CF_ACCOUNT_ID and CF_API_TOKEN and CF_IMAGE_ALLOW_PAID), "paid_guard": not CF_IMAGE_ALLOW_PAID},
+            "stability": {"key_present": bool(STABILITY_API_KEY), "enabled": bool(STABILITY_API_KEY and STABILITY_IMAGE_ALLOW_PAID), "paid_guard": not STABILITY_IMAGE_ALLOW_PAID},
+            "replicate": {"key_present": bool(IMAGE_REPLICATE_API_TOKEN), "enabled": bool(IMAGE_REPLICATE_API_TOKEN and IMAGE_REPLICATE_ALLOW_PAID), "paid_guard": not IMAGE_REPLICATE_ALLOW_PAID},
+        },
+        "automatic_paid_usage": False,
+        "note": "Puter önce tarayıcıda denenir. Sunucu yedekleri yalnızca anahtarı bulunan ve bütçe koruması açık olan sağlayıcılarda denenir.",
+    }
+
+
 @app.post("/api/image")
 def image(body: ImageBody):
-    # Hugging Face Inference Providers currently includes a small monthly credit
-    # allowance for free accounts; this is limited, not unlimited free generation.
-    if not HF_TOKEN:
-        raise HTTPException(
-            503,
-            "Görsel üretimi için Render Environment bölümüne HF_TOKEN ekle. "
-            "Hugging Face ücretsiz hesabındaki aylık kullanım kredisi sınırlıdır."
-        )
-
     enhanced_prompt = improve_image_prompt(body.prompt)
-    url = "https://router.huggingface.co/hf-inference/models/stabilityai/stable-diffusion-3-medium-diffusers"
-    try:
-        r = requests.post(
-            url,
-            headers={"Authorization": f"Bearer {HF_TOKEN}", "Accept": "image/*"},
-            json={"inputs": enhanced_prompt},
-            timeout=180,
-        )
-        if not r.ok:
-            if r.status_code in (401, 403):
-                raise HTTPException(502, "Hugging Face anahtarı kabul edilmedi veya model erişimi yok. HF_TOKEN değerini kontrol et.")
-            if r.status_code == 429:
-                raise HTTPException(429, "Ücretsiz görsel üretim kotası dolmuş olabilir. Bir süre sonra yeniden dene.")
-            if r.status_code == 402:
-                raise HTTPException(402, "Hugging Face ücretsiz kredisi tükenmiş olabilir; hesabındaki kullanım durumunu kontrol et.")
-            raise HTTPException(502, "Görsel servisi hata verdi: " + r.text[:300])
+    providers = [
+        ("huggingface", _td_image_try_huggingface_v30),
+        ("pollinations", _td_image_try_pollinations_v30),
+        ("cloudflare", _td_image_try_cloudflare_v30),
+        ("stability", _td_image_try_stability_v30),
+        ("replicate", _td_image_try_replicate_v30),
+    ]
+    failures = []
+    for name, provider_fn in providers:
+        try:
+            image_data, model_name = provider_fn(enhanced_prompt)
+            print("[Tekden AI] Image provider succeeded:", name)
+            return {"image_data": image_data, "model": model_name, "provider": name}
+        except (requests.Timeout, requests.ConnectionError):
+            failures.append(name + ":network")
+            print("[Tekden AI] Image provider temporarily unavailable:", name)
+            continue
+        except RuntimeError as exc:
+            reason = str(exc)
+            failures.append(reason)
+            print("[Tekden AI] Image provider skipped/failed:", reason[:100])
+            continue
+        except requests.RequestException:
+            failures.append(name + ":request_error")
+            print("[Tekden AI] Image provider request error:", name)
+            continue
 
-        content_type = r.headers.get("content-type", "")
-        if not content_type.startswith("image/"):
-            raise HTTPException(502, "Görsel servisi görsel yerine beklenmeyen yanıt döndürdü.")
-        data = base64.b64encode(r.content).decode("ascii")
-        return {"image_data": f"data:{content_type};base64,{data}", "model": "stabilityai/stable-diffusion-3-medium-diffusers"}
-    except requests.RequestException as e:
-        raise HTTPException(502, f"Görsel servisine bağlanılamadı: {str(e)[:200]}")
+    safe_failures = ", ".join(failures[:5]) if failures else "no_provider_configured"
+    raise HTTPException(
+        503,
+        "Görsel sağlayıcıları şu anda görsel oluşturamadı. Sağlayıcı ayarlarını ve kullanım kotalarını kontrol edin. "
+        "Kontrol özeti: " + safe_failures[:260],
+    )
+
 
 HTML = r"""<!doctype html>
 <html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -6967,12 +7141,23 @@ function imagePromptFromRequest(text){
  return 'Create an image that closely follows this exact user request. Preserve the requested subject, objects, setting, action, visual style, mood, colors, camera angle, and composition. Do not replace the subject, do not invent unrelated elements, and do not turn the request into a generic interpretation. If the user specifies multiple details, include all of them. Avoid unwanted text, logos, and watermarks unless explicitly requested. User request (keep its meaning faithfully): '+p;
 }
 async function createAndShowImage(requestText){
- if(!window.puter?.ai?.txt2img)throw new Error('Görsel servisi yüklenemedi. Sayfayı yenileyip tekrar dene.');
  const prompt=imagePromptFromRequest(requestText);
- // Gemini image generation generally follows detailed natural-language instructions better than the previous fast FLUX model.
- const img=await puter.ai.txt2img(prompt,{model:'google/gemini-3-pro-image'});
- if(!img?.src)throw new Error('Görsel servisi görsel döndürmedi.');
- imageBubble(img.src);
+ let puterError=null;
+ // Keep the current Puter/Gemini route as primary. If its quota or service is unavailable,
+ // transparently continue to the server-side five-provider fallback chain.
+ try{
+  if(!window.puter?.ai?.txt2img)throw new Error('Puter servisi yüklenemedi.');
+  const img=await puter.ai.txt2img(prompt,{model:'google/gemini-3-pro-image'});
+  if(!img?.src)throw new Error('Puter görsel döndürmedi.');
+  imageBubble(img.src);
+  return {provider:'puter'};
+ }catch(e){puterError=e;}
+ const response=await fetch('/api/image',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({prompt})});
+ let payload={};try{payload=await response.json()}catch(_){}
+ if(!response.ok)throw new Error((payload.detail||'Yedek görsel sağlayıcıları da yanıt vermedi.')+(puterError?' (Puter: '+String(puterError.message||puterError).slice(0,100)+')':''));
+ if(!payload.image_data)throw new Error('Yedek sağlayıcı görsel verisi döndürmedi.');
+ imageBubble(payload.image_data);
+ return {provider:payload.provider||'fallback',model:payload.model||''};
 }
 function getPuterText(result){
  if(typeof result==='string')return result;
@@ -15018,7 +15203,7 @@ def td_video_studio_poll_v21(request: Request, body: dict):
 def td_public_app_version_v21():
     return {
         "app": "Tekden AI",
-        "build": "v29-video-provider-failover-fix",
+        "build": "v30-five-image-provider-fallbacks",
         "additive_update": True,
         "video_studio": True,
         "video_studio_free_until": TD_VIDEO_STUDIO_FREE_UNTIL_V21,
@@ -15030,6 +15215,8 @@ def td_public_app_version_v21():
         "video_studio_pro_only_after": True,
         "provider": "agnes-replicate-fal-runway-yepapi",
         "video_provider_fallbacks": 5,
+        "image_provider": "puter-huggingface-pollinations-cloudflare-stability-replicate",
+        "image_provider_fallbacks": 5,
     }
 
 
@@ -15039,3 +15226,9 @@ TD_VIDEO_STUDIO_BUILD = 'v28-provider-error-hotfix'
 
 # V29: disabled providers are skipped instead of terminating failover.
 TD_VIDEO_STUDIO_BUILD = 'v29-video-provider-failover-fix'
+
+
+# =============================================================================
+# TEKDEN AI V30 — FIVE IMAGE PROVIDER FALLBACKS
+# =============================================================================
+TD_IMAGE_STUDIO_BUILD = "v30-five-image-provider-fallbacks"
