@@ -6979,8 +6979,9 @@ HTML = r"""<!doctype html>
 <div id="mobileToolsMenu" aria-label="Tekden AI araçları">
   <div class="mobile-menu-label">HIZLI ERİŞİM</div>
   <div class="mobile-menu-shortcuts">
-    <button class="secondary" type="button" data-mobile-action="studio"><span class="menuIcon">▣</span><span>Pro Stüdyo</span></button>
-    <button class="secondary" id="plusWorkspaceMobileBtn" type="button" data-mobile-action="plus-workspace" style="display:none"><span class="menuIcon">✦</span><span>Plus Workspace</span></button>
+    <button class="secondary" type="button" data-mobile-action="video"><span class="menuIcon">🎬</span><span>Video Studio</span></button>
+    <button class="secondary" id="proStudioMobileBtn" type="button" data-mobile-action="studio"><span class="menuIcon">▣</span><span>Pro Stüdyo</span></button>
+    <button class="secondary" id="plusWorkspaceMobileBtn" type="button" data-mobile-action="plus-workspace"><span class="menuIcon">✦</span><span>Plus Workspace</span></button>
     <button class="secondary" type="button" data-mobile-action="song"><span class="menuIcon">🎤</span><span>Şarkı Stüdyosu</span></button>
     <button class="secondary" type="button" data-mobile-action="image"><span class="menuIcon">▧</span><span>Görsel</span></button>
   </div>
@@ -7116,7 +7117,7 @@ function renderUser(){
  const mobileAdmin=$('mobileAdminBtn');if(mobileAdmin)mobileAdmin.style.display=user&&user.is_owner?'flex':'none';
  const studioButton=$('proStudioBtn');if(studioButton)studioButton.style.display=user&&['pro','plus'].includes(user.plan)?'block':'none';
  const plusWorkspaceButton=$('plusWorkspaceBtn');if(plusWorkspaceButton)plusWorkspaceButton.style.display=user&&String(user.plan||'').trim().toLowerCase()==='plus'?'block':'none';
- const plusWorkspaceMobileButton=$('plusWorkspaceMobileBtn');if(plusWorkspaceMobileButton)plusWorkspaceMobileButton.style.display=user&&String(user.plan||'').trim().toLowerCase()==='plus'?'flex':'none';
+ const plusWorkspaceMobileButton=$('plusWorkspaceMobileBtn');if(plusWorkspaceMobileButton)plusWorkspaceMobileButton.style.display='flex';const proStudioMobileButton=$('proStudioMobileBtn');if(proStudioMobileButton)proStudioMobileButton.style.display='flex';
  $('profileUsername').textContent=user?user.username:'Misafir';
  $('profilePlan').textContent=user?(user.plan==='plus'?'Tekden AI Plus':(user.plan==='pro'?'Tekden AI Pro':'Free')):'Giriş yapılmadı';
  $('profileFeatures').textContent=user&&user.plan==='plus'?'PLUS: Pro özelliklerinin tamamı ve 150 Plus iş akışı. Model ve harici sağlayıcı özellikleri yapılandırmaya bağlıdır.':(user&&user.plan==='pro'?'PRO: yapılandırılmışsa daha güçlü model, kapsamlı web araştırması, uzun proje bağlamı, özel oyun üretimi, HTML oyun indirme ve yaratıcı proje iş akışları.':'Standart sohbet ve temel araçlar.');
@@ -7468,15 +7469,33 @@ restoreGuestHistory();refreshMe();
    if(action==='history'){const side=document.querySelector('.sidebar');if(side)side.classList.add('mobile-open');document.getElementById('activeChatsBtn')?.click();}
    else if(action==='toolbox'){const x=document.getElementById('tdToolsOpen');if(x)x.click();else alert('Araç kutusu şu anda açılamıyor.');}
    else if(action==='mind'){const x=document.getElementById('tkMindOpen')||document.getElementById('tkMindLockedOpen');if(x)x.click();else alert('Zihin Atölyesi bu hesapta görüntülenemiyor.');}
-   else if(action==='studio'){location.href='/pro-studio';}
-   else if(action==='plus-workspace'){location.href='/plus-workspace';}
+   else if(action==='video'){
+     if(!user){showModal();const err=document.getElementById('authError');if(err)err.textContent='Video Studio için önce giriş yapmalısın.';}
+     else location.href='/video-studio';
+   }
+   else if(action==='studio'){
+     if(!user){showModal();const err=document.getElementById('authError');if(err)err.textContent='Pro Stüdyo için önce giriş yapmalısın.';}
+     else if(!['pro','plus'].includes(String(user.plan||'').toLowerCase()))document.getElementById('plansBack').style.display='flex';
+     else location.href='/pro-studio';
+   }
+   else if(action==='plus-workspace'){
+     if(!user){showModal();const err=document.getElementById('authError');if(err)err.textContent='Plus Workspace için önce giriş yapmalısın.';}
+     else if(String(user.plan||'').toLowerCase()!=='plus')document.getElementById('plansBack').style.display='flex';
+     else location.href='/plus-workspace';
+   }
    else if(action==='discover'){location.href='/kesfet';}
    else if(action==='plans'){document.getElementById('plansBack').style.display='flex';}
    else if(action==='docx'){if(!window.tdLastAssistant){alert('Önce bir yanıt oluştur.');return;}tdDownloadWord(window.tdLastAssistant,window.tdLastAssistantSources||[]);}
    else if(action==='pdf'){if(!window.tdLastAssistant){alert('Önce bir yanıt oluştur.');return;}tdPrintPdf(window.tdLastAssistant,window.tdLastAssistantSources||[],tdDocTitle(window.tdLastAssistant));}
    else if(action==='image'){document.getElementById('prompt').value='Görsel oluştur: ';document.getElementById('prompt').focus();}
    else if(action==='file'){document.getElementById('fileInput').click();}
-   else if(action==='web'){forceSearch=true;const x=document.getElementById('searchBtn');if(x){x.style.borderColor='var(--accent)';x.textContent='⌕ Web açık';}document.getElementById('prompt').focus();}
+   else if(action==='web'){
+     const x=document.getElementById('searchBtn');
+     if(x && !forceSearch) x.click();
+     const prompt=document.getElementById('prompt');
+     if(prompt){prompt.placeholder='Web’de araştırılacak sorunu yaz…';prompt.focus();}
+     if(typeof setStatus==='function')setStatus('Web araması açıldı. Sorunu yazıp Gönder’e bas.');
+   }
    else if(action==='app'){document.getElementById('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';document.getElementById('prompt').focus();}
    else if(action==='game'){document.getElementById('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: ';document.getElementById('prompt').focus();}
    else if(action==='song'&&typeof openSongStudio==='function'){openSongStudio();}
@@ -8405,6 +8424,11 @@ def home(request: Request):
   .attachlabel { position:relative !important; z-index:2 !important; }
   .tools { position:relative !important; z-index:1 !important; }
   #mobileToolsMenu { z-index:500 !important; }
+  .mobile-menu-shortcuts { display:grid !important; grid-template-columns:repeat(2,minmax(0,1fr)) !important; gap:8px !important; }
+  .mobile-menu-shortcuts button { min-height:58px !important; flex-direction:row !important; justify-content:flex-start !important; text-align:left !important; padding:10px 11px !important; font-size:12px !important; }
+  .mobile-menu-shortcuts .menuIcon { flex:0 0 24px !important; width:24px !important; font-size:19px !important; }
+  #mobileToolsMenu button, #mobileToolsMenu summary { -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
+  #mobileToolsMenu { overscroll-behavior:contain !important; }
   #tkMindShade, #tkMindLockedBack { z-index:700 !important; }
 }
 @media (min-width: 721px) {
@@ -15203,7 +15227,7 @@ def td_video_studio_poll_v21(request: Request, body: dict):
 def td_public_app_version_v21():
     return {
         "app": "Tekden AI",
-        "build": "v30-five-image-provider-fallbacks",
+        "build": "v31-mobile-navigation-and-studio-fix",
         "additive_update": True,
         "video_studio": True,
         "video_studio_free_until": TD_VIDEO_STUDIO_FREE_UNTIL_V21,
@@ -15232,3 +15256,4 @@ TD_VIDEO_STUDIO_BUILD = 'v29-video-provider-failover-fix'
 # TEKDEN AI V30 — FIVE IMAGE PROVIDER FALLBACKS
 # =============================================================================
 TD_IMAGE_STUDIO_BUILD = "v30-five-image-provider-fallbacks"
+TD_MOBILE_NAV_BUILD = "v31-mobile-navigation-and-studio-fix"
