@@ -21,7 +21,7 @@ OWNER_USERNAME = os.getenv("OWNER_USERNAME", "AhmetKerim.").strip()
 OWNER_PASSWORD = os.getenv("OWNER_PASSWORD", "").strip()
 # Owner-only admin PIN. The public website does not require this code.
 ADMIN_ACCESS_PIN = os.getenv("ADMIN_ACCESS_PIN", os.getenv("SITE_ACCESS_PIN", "")).strip()
-ADMIN_UI_BUILD_ID = "2026-11-05-research-moderation-seo-v1"
+ADMIN_UI_BUILD_ID = "2026-11-20-app-analytics-v1"
 SITE_ACCESS_PIN = ADMIN_ACCESS_PIN  # compatibility with signed-token helpers below
 SITE_ACCESS_COOKIE = "tekden_admin_gate"
 SITE_ACCESS_SECONDS = 12 * 60 * 60
@@ -464,6 +464,37 @@ def init_db():
                                  (extra_username, hash_password(extra_password), extra_plan))
 
 
+        # Anonymous, consent-based Android app analytics. No raw IP address is stored.
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_device_registry (
+            device_hash TEXT PRIMARY KEY,
+            first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            launch_count INTEGER NOT NULL DEFAULT 1,
+            user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            app_version TEXT NOT NULL DEFAULT 'unknown',
+            user_agent TEXT NOT NULL DEFAULT ''
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_app_devices_last_seen ON app_device_registry(last_seen DESC)")
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_feedback (
+            id BIGSERIAL PRIMARY KEY,
+            device_hash TEXT NOT NULL,
+            user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+            answer TEXT NOT NULL CHECK (answer IN ('used','not_yet','later')),
+            favorite_feature TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_app_feedback_created ON app_feedback(created_at DESC)")
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS app_download_events (
+            id BIGSERIAL PRIMARY KEY,
+            source TEXT NOT NULL DEFAULT 'tracked_link',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_app_download_events_created ON app_download_events(created_at DESC)")
+
+
 # Product capability catalogue used by the plan UI and future billing screens.
 # Keep feature claims conditional on the external providers actually being configured.
 PLAN_FEATURES = {
@@ -874,6 +905,16 @@ class FeedbackBody(BaseModel):
     category: str = Field(default="suggestion", min_length=3, max_length=24)
     message: str = Field(min_length=8, max_length=3000)
     page: str = Field(default="", max_length=120)
+
+class AppLaunchBody(BaseModel):
+    consent: bool = True
+    app_version: str = Field(default="unknown", max_length=32)
+
+
+class AppFeedbackBody(BaseModel):
+    answer: str = Field(pattern="^(used|not_yet|later)$")
+    favorite_feature: str = Field(default="", max_length=80)
+
 
 class SavedPromptBody(BaseModel):
     title: str = Field(min_length=2, max_length=80)
@@ -8302,6 +8343,36 @@ def home(request: Request):
     zihin_atolyesi_ui = MIND_LAB_HTML if user_has_plus_access(visitor) else MIND_LAB_LOCKED_HTML
     additions = monetization_link + zihin_atolyesi_ui
     page = HTML.replace("</body>", additions + "</body>", 1) if "</body>" in HTML else HTML + additions
+    # Optional analytics consent shown only inside Android WebView.
+    app_analytics_prompt = r"""
+<div id="tkAppAnalyticsConsent" style="display:none;position:fixed;inset:0;z-index:100000;background:#07142699;align-items:center;justify-content:center;padding:18px">
+ <div style="width:min(420px,100%);background:#fff;color:#17304f;border:1px solid #d7e5f5;border-radius:20px;padding:22px;box-shadow:0 20px 70px #001a3d44;font:14px/1.55 system-ui">
+  <b style="font-size:18px">Tekden AI uygulama deneyimi</b>
+  <p>Uygulamayı geliştirmek için anonim ilk açılış ve kullanım sayısını takip etmemize izin verir misiniz? Hesapla giriş yaptıysanız kullanıcı adınız cihaz kaydıyla ilişkilendirilebilir. Ham IP adresi kaydetmeyiz. İzin isteğe bağlıdır.</p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+   <button id="tkAppAnalyticsYes" style="border:0;border-radius:10px;padding:11px 14px;background:#1769e8;color:white;font-weight:700">İzin ver</button>
+   <button id="tkAppAnalyticsNo" style="border:1px solid #cbd8e8;border-radius:10px;padding:11px 14px;background:#f5f8fc;color:#17304f">Hayır, teşekkürler</button>
+  </div>
+ </div>
+</div>
+<script>
+(()=>{try{
+ const ua=navigator.userAgent||'';
+ const isAndroidWebView=/Android/i.test(ua)&&(/; wv\)/i.test(ua)||(/Version\//i.test(ua)&&/Chrome\//i.test(ua)));
+ if(!isAndroidWebView)return;
+ const key='tekden_app_analytics_consent_v1';
+ const choice=localStorage.getItem(key);
+ const send=()=>fetch('/api/app/launch',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({consent:true,app_version:'31'})}).catch(()=>{});
+ if(choice==='yes'){send();return;} if(choice==='no')return;
+ const modal=document.getElementById('tkAppAnalyticsConsent');if(!modal)return;
+ modal.style.display='flex';
+ document.getElementById('tkAppAnalyticsYes').onclick=()=>{localStorage.setItem(key,'yes');modal.remove();send();};
+ document.getElementById('tkAppAnalyticsNo').onclick=()=>{localStorage.setItem(key,'no');modal.remove();};
+}catch(e){} })();
+</script>
+"""
+    if "</body>" in page:
+        page = page.replace("</body>", app_analytics_prompt + "</body>", 1)
     # A visibly distinct mobile refresh. This is injected into the final served HTML,
     # not just into an unused stylesheet or a separate page.
     mobile_refresh_css = r"""
@@ -8461,16 +8532,22 @@ ADMIN_HTML = r"""<!doctype html>
 <section class="hero"><h1>Yönetim Paneli</h1><p>Üyelik, kullanım, moderasyon ve servis yapılandırmasının genel görünümü.</p></section>
 <div id="notice" class="notice">Yönetim verileri yükleniyor…</div>
 <section class="grid" id="stats"><div class="card"><small>Üye sayısı</small><div class="value">—</div></div><div class="card"><small>Sohbet sayısı</small><div class="value">—</div></div><div class="card"><small>Mesaj sayısı</small><div class="value">—</div></div><div class="card"><small>Aktif erişim engeli</small><div class="value">—</div></div></section>
-<nav class="tabs"><button class="active" data-view="overview">Genel bakış</button><button data-view="users">Üyeler</button><button data-view="bans">Erişim engelleri</button><button data-view="services">Servisler</button></nav>
+<nav class="tabs"><button class="active" data-view="overview">Genel bakış</button><button data-view="users">Üyeler</button><button data-view="app">Uygulama takibi</button><button data-view="bans">Erişim engelleri</button><button data-view="services">Servisler</button></nav>
 <section class="view active" id="view-overview"><div class="grid" id="plans"></div><div class="card" style="margin-top:12px"><b>Son 7 gündeki yeni üyeler</b><div class="value" id="newUsers">—</div><small class="muted">Veritabanındaki kayıt tarihine göre</small></div></section>
 <section class="view" id="view-users"><div class="card"><b>Son üyeler</b><div class="scroll" id="usersTable"><div class="empty">Yükleniyor…</div></div></div></section>
+<section class="view" id="view-app">
+ <div class="grid" id="appStats"><div class="card"><small>İlk açılış / izin veren cihaz</small><div class="value">—</div></div></div>
+ <div class="notice" style="margin-top:12px">WhatsApp üzerinden doğrudan gönderilen APK dosyalarının indirme sayısı geriye dönük ölçülemez. İlk açılış sayısı, uygulama içindeki anonim analitik iznini kabul eden cihazları gösterir.</div>
+ <div class="card" style="margin-top:12px"><b>Son uygulama cihazları</b><div class="scroll" id="appDevices"><div class="empty">Yükleniyor…</div></div></div>
+ <div class="card" style="margin-top:12px"><b>Uygulama geri bildirimleri</b><div class="scroll" id="appFeedback"><div class="empty">Henüz geri bildirim yok.</div></div></div>
+</section>
 <section class="view" id="view-bans"><div class="card"><b>Aktif moderasyon engelleri</b><div class="scroll" id="bansTable"><div class="empty">Yükleniyor…</div></div></div></section>
 <section class="view" id="view-services"><div class="card"><b>Yapılandırma durumu</b><p class="muted">Buradaki göstergeler gizli anahtarların değerini göstermez. Çoğu yalnızca ortam değişkeninin tanımlı olup olmadığını belirtir; sağlayıcının canlı çalıştığını garanti etmez.</p><div class="servicegrid" id="servicesGrid"></div></div></section>
 </main><script>
 const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(url,opts={}){const r=await fetch(url,{credentials:'same-origin',...opts,headers:{'Content-Type':'application/json',...(opts.headers||{})}});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||'İstek başarısız');return d}
 function table(headers,rows){return '<table class="table"><thead><tr>'+headers.map(x=>'<th>'+x+'</th>').join('')+'</tr></thead><tbody>'+rows+'</tbody></table>'}
-async function load(){ $('notice').textContent='Yönetim verileri güncelleniyor…';try{const [o,u,b]=await Promise.all([api('/api/admin/overview'),api('/api/admin/users'),api('/api/admin/bans')]);const c=o.counts;$('stats').innerHTML=[['Üye sayısı',c.users],['Sohbet sayısı',c.chats],['Mesaj sayısı',c.messages],['Aktif erişim engeli',c.active_bans]].map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');$('plans').innerHTML=Object.entries(o.plans).map(([k,v])=>'<div class="card"><small>'+esc(k.toUpperCase())+' üyeleri</small><div class="value">'+v+'</div></div>').join('');$('newUsers').textContent=c.new_users_7d;$('usersTable').innerHTML=table(['Kullanıcı','Plan','Kayıt tarihi'],u.users.map(x=>'<tr><td>'+esc(x.username)+'</td><td><span class="pill">'+esc(x.plan)+'</span></td><td>'+esc(x.created_at||'')+'</td></tr>').join('')||'<tr><td colspan="3">Henüz üye yok.</td></tr>');$('bansTable').innerHTML=table(['IP / Hesap','Neden','Bitiş','İşlem'],b.bans.map(x=>'<tr><td>'+esc(x.ip_address)+(x.user_id?' · kullanıcı #'+esc(x.user_id):'')+'</td><td>'+esc(x.reason)+'</td><td>'+esc(x.expires_at||'')+'</td><td><button data-revoke="'+x.id+'">Engeli kaldır</button></td></tr>').join('')||'<tr><td colspan="4">Aktif engel yok.</td></tr>');$('servicesGrid').innerHTML=o.services.map(x=>'<div class="service"><b class="'+(x.configured?'ok':'warn')+'">'+(x.configured?'● ':'○ ')+esc(x.name)+'</b><small class="muted">'+esc(x.detail)+'</small></div>').join('');$('notice').textContent='Son güncelleme: '+new Date().toLocaleString('tr-TR')+'. Bu panel yalnızca yönetim özetlerini gösterir.';}catch(e){$('notice').className='notice error';$('notice').textContent=e.message}}
+async function load(){ $('notice').textContent='Yönetim verileri güncelleniyor…';try{const [o,u,b,a]=await Promise.all([api('/api/admin/overview'),api('/api/admin/users'),api('/api/admin/bans'),api('/api/admin/app-stats')]);const c=o.counts;$('stats').innerHTML=[['Üye sayısı',c.users],['Sohbet sayısı',c.chats],['Mesaj sayısı',c.messages],['Aktif erişim engeli',c.active_bans]].map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');$('plans').innerHTML=Object.entries(o.plans).map(([k,v])=>'<div class="card"><small>'+esc(k.toUpperCase())+' üyeleri</small><div class="value">'+v+'</div></div>').join('');$('newUsers').textContent=c.new_users_7d;$('usersTable').innerHTML=table(['Kullanıcı','Plan','Kayıt tarihi'],u.users.map(x=>'<tr><td>'+esc(x.username)+'</td><td><span class="pill">'+esc(x.plan)+'</span></td><td>'+esc(x.created_at||'')+'</td></tr>').join('')||'<tr><td colspan="3">Henüz üye yok.</td></tr>');$('bansTable').innerHTML=table(['IP / Hesap','Neden','Bitiş','İşlem'],b.bans.map(x=>'<tr><td>'+esc(x.ip_address)+(x.user_id?' · kullanıcı #'+esc(x.user_id):'')+'</td><td>'+esc(x.reason)+'</td><td>'+esc(x.expires_at||'')+'</td><td><button data-revoke="'+x.id+'">Engeli kaldır</button></td></tr>').join('')||'<tr><td colspan="4">Aktif engel yok.</td></tr>');$('servicesGrid').innerHTML=o.services.map(x=>'<div class="service"><b class="'+(x.configured?'ok':'warn')+'">'+(x.configured?'● ':'○ ')+esc(x.name)+'</b><small class="muted">'+esc(x.detail)+'</small></div>').join('');const ac=a.counts;$('appStats').innerHTML=[['İlk açılış / izin veren cihaz',ac.first_opens],['Son 7 gün aktif',ac.active_7d],['Son 30 gün aktif',ac.active_30d],['Toplam açılış',ac.launches],['Takipli indirme bağlantısı tıklaması',ac.tracked_download_clicks],['Geri bildirim',ac.feedback_count]].map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');$('appDevices').innerHTML=table(['Hesap','Sürüm','İlk açılış','Son kullanım','Açılış sayısı'],a.devices.map(x=>'<tr><td>'+esc(x.account)+'</td><td>'+esc(x.app_version)+'</td><td>'+esc(x.first_seen)+'</td><td>'+esc(x.last_seen)+'</td><td>'+esc(x.launch_count)+'</td></tr>').join('')||'<tr><td colspan="5">Henüz izin veren uygulama cihazı yok.</td></tr>');$('appFeedback').innerHTML=table(['Hesap','Yanıt','Beğenilen özellik','Tarih'],a.feedback.map(x=>'<tr><td>'+esc(x.account)+'</td><td>'+esc(x.answer)+'</td><td>'+esc(x.favorite_feature)+'</td><td>'+esc(x.created_at)+'</td></tr>').join('')||'<tr><td colspan="4">Henüz geri bildirim yok.</td></tr>');$('notice').textContent='Son güncelleme: '+new Date().toLocaleString('tr-TR')+'. Bu panel yalnızca yönetim özetlerini gösterir.';}catch(e){$('notice').className='notice error';$('notice').textContent=e.message}}
 document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-view]').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('.view').forEach(x=>x.classList.toggle('active',x.id==='view-'+b.dataset.view))}));$('refresh').addEventListener('click',load);$('bansTable').addEventListener('click',async e=>{const b=e.target.closest('[data-revoke]');if(!b)return;if(!confirm('Bu erişim engelini kaldırmak istiyor musun?'))return;try{await api('/api/admin/bans/'+b.dataset.revoke,{method:'DELETE'});await load()}catch(err){alert(err.message)}});load();
 </script></body></html>"""
 
@@ -8589,6 +8666,92 @@ def owner_management_page(request: Request):
 @app.get("/yonetim-paneli", include_in_schema=False)
 def owner_management_alias():
     return RedirectResponse(url="/yonetim", status_code=307)
+
+
+@app.post("/api/app/launch")
+def app_launch_telemetry(body: AppLaunchBody, request: Request):
+    """Record a consented Android WebView launch using a one-way device-cookie hash."""
+    if not body.consent:
+        raise HTTPException(400, "Analitik izni verilmedi.")
+    ua = request.headers.get("user-agent", "")
+    if "Android" not in ua or not ("; wv)" in ua or "Version/" in ua):
+        raise HTTPException(400, "Bu uç nokta yalnızca Android uygulaması içindir.")
+    token_hash = device_cookie_hash(request)
+    if not token_hash:
+        raise HTTPException(400, "Cihaz tanımlayıcısı henüz hazır değil; uygulamayı yenileyin.")
+    user = None
+    try:
+        user = current_user(request)
+    except Exception:
+        pass
+    with db() as conn:
+        conn.execute("""
+            INSERT INTO app_device_registry(device_hash, user_id, app_version, user_agent)
+            VALUES(%s,%s,%s,%s)
+            ON CONFLICT(device_hash) DO UPDATE SET
+                last_seen=NOW(), launch_count=app_device_registry.launch_count+1,
+                user_id=COALESCE(EXCLUDED.user_id, app_device_registry.user_id),
+                app_version=EXCLUDED.app_version, user_agent=EXCLUDED.user_agent
+        """, (token_hash, user["id"] if user else None, body.app_version, "Android WebView"))
+    return {"ok": True}
+
+
+@app.post("/api/app/feedback")
+def app_feedback(body: AppFeedbackBody, request: Request):
+    token_hash = device_cookie_hash(request)
+    if not token_hash:
+        raise HTTPException(400, "Cihaz tanımlayıcısı bulunamadı.")
+    user = None
+    try:
+        user = current_user(request)
+    except Exception:
+        pass
+    with db() as conn:
+        conn.execute("""INSERT INTO app_feedback(device_hash,user_id,answer,favorite_feature)
+                        VALUES(%s,%s,%s,%s)""",
+                     (token_hash, user["id"] if user else None, body.answer,
+                      clean_short_text(body.favorite_feature, 80)))
+    return {"ok": True}
+
+
+@app.post("/api/app/download-event")
+def app_download_event():
+    with db() as conn:
+        conn.execute("INSERT INTO app_download_events(source) VALUES('tracked_link')")
+    return {"ok": True, "counted": "download_link_click"}
+
+
+@app.get("/api/admin/app-stats")
+def owner_admin_app_stats(request: Request):
+    require_owner(request)
+    with db() as conn:
+        counts = conn.execute("""
+            SELECT
+              (SELECT COUNT(*) FROM app_device_registry) AS first_opens,
+              (SELECT COUNT(*) FROM app_device_registry WHERE last_seen >= NOW()-INTERVAL '30 days') AS active_30d,
+              (SELECT COUNT(*) FROM app_device_registry WHERE last_seen >= NOW()-INTERVAL '7 days') AS active_7d,
+              (SELECT COALESCE(SUM(launch_count),0) FROM app_device_registry) AS launches,
+              (SELECT COUNT(*) FROM app_download_events) AS tracked_download_clicks,
+              (SELECT COUNT(*) FROM app_feedback) AS feedback_count
+        """).fetchone()
+        devices = conn.execute("""
+            SELECT COALESCE(u.username, 'Misafir / anonim') AS account,
+                   d.app_version, d.first_seen, d.last_seen, d.launch_count
+            FROM app_device_registry d LEFT JOIN users u ON u.id=d.user_id
+            ORDER BY d.last_seen DESC LIMIT 100
+        """).fetchall()
+        feedback = conn.execute("""
+            SELECT COALESCE(u.username, 'Anonim') AS account, f.answer,
+                   f.favorite_feature, f.created_at
+            FROM app_feedback f LEFT JOIN users u ON u.id=f.user_id
+            ORDER BY f.created_at DESC LIMIT 50
+        """).fetchall()
+    def serialize(rows, fields):
+        return [{**dict(row), **{f: row[f].isoformat() if row.get(f) else "" for f in fields}} for row in rows]
+    return {"counts": dict(counts),
+            "devices": serialize(devices, ["first_seen", "last_seen"]),
+            "feedback": serialize(feedback, ["created_at"]),
+            "privacy_note": "Cihazlar tek yönlü çerez özetiyle tanımlanır; hesap adı yalnızca oturum açılmışsa gösterilir."}
 
 
 @app.get("/api/admin/overview")
