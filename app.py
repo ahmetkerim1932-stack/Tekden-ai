@@ -15528,7 +15528,7 @@ TD_MOBILE_NAV_BUILD = "v31-mobile-navigation-and-studio-fix"
 def td_public_app_version_v34():
     return {
         "app": "Tekden AI",
-        "build": "v34-studio-keyboard-intelligence",
+        "build": "v36-overlay-navigation-keyboard-repair",
         "base": "v33-auth-ui-repair",
         "studio_navigation": True,
         "owner_aware_plan_access_ui": True,
@@ -15551,13 +15551,87 @@ async def td_v35_mobile_studio_ux(request: Request, call_next):
         chunks.append(chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8"))
     html = b"".join(chunks).decode(response.charset or "utf-8", errors="replace")
     if "td-v35-mobile-ux" not in html:
-        css_head = '<style id="td-v35-mobile-ux">\n@media(max-width:720px){\n#songStudioBack{z-index:10050!important;align-items:flex-start!important;justify-content:center!important;padding:calc(10px + env(safe-area-inset-top)) 10px calc(10px + env(safe-area-inset-bottom))!important;overflow-y:auto!important;-webkit-overflow-scrolling:touch!important}\n#songStudioBack .songmodal{width:100%!important;max-width:680px!important;max-height:calc(100dvh - 20px - env(safe-area-inset-top) - env(safe-area-inset-bottom))!important;overflow-y:auto!important;margin:auto!important;padding:16px!important}\n#songStudioBack .td-song-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;position:sticky;top:-16px;padding:4px 0 10px;background:#fff;z-index:2}\n#songStudioBack .td-song-head h2{font-size:18px;line-height:1.3;margin:0;flex:1}#songStudioBack .td-song-head button{flex:0 0 auto;padding:8px 10px}\n#songStudioBack .songmodal .row{display:grid!important;grid-template-columns:1fr!important}\n.main{height:var(--td-v35-vh,100dvh)!important;max-height:var(--td-v35-vh,100dvh)!important;min-height:0!important;overflow:hidden!important}\n.main>.top{flex:0 0 auto!important}.main>.messages{flex:1 1 auto!important;min-height:0!important;overflow-y:auto!important;padding-bottom:calc(var(--td-v35-composer-h,125px) + 20px)!important;-webkit-overflow-scrolling:touch!important}\n.main>.composerwrap{position:fixed!important;left:0!important;right:0!important;bottom:var(--td-v35-keyboard,0px)!important;width:100%!important;z-index:400!important;flex:none!important;padding:7px 9px calc(7px + env(safe-area-inset-bottom))!important;background:rgba(255,255,255,.98)!important;border-top:1px solid #dce8f6!important;transform:none!important}\n.main>.composerwrap .composer{width:100%!important;max-width:none!important;margin:0!important;padding:8px!important;border-radius:16px!important}\n.main>.composerwrap #prompt{min-height:44px!important;max-height:120px!important;resize:none!important;scroll-margin-bottom:20px!important}\n}\n.td-song-head{display:flex;align-items:center;justify-content:space-between;gap:10px}\n</style>\n'
+        css_head = '<style id="td-v35-mobile-ux">\n@media(max-width:720px){\n#songStudioBack{z-index:10050!important;align-items:flex-start!important;justify-content:center!important;padding:calc(10px + env(safe-area-inset-top)) 10px calc(10px + env(safe-area-inset-bottom))!important;overflow-y:auto!important;-webkit-overflow-scrolling:touch!important}\n#songStudioBack .songmodal{width:100%!important;max-width:680px!important;max-height:calc(100dvh - 20px - env(safe-area-inset-top) - env(safe-area-inset-bottom))!important;overflow-y:auto!important;margin:auto!important;padding:16px!important}\n#songStudioBack .td-song-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;position:sticky;top:-16px;padding:4px 0 10px;background:#fff;z-index:2}\n#songStudioBack .td-song-head h2{font-size:18px;line-height:1.3;margin:0;flex:1}#songStudioBack .td-song-head button{flex:0 0 auto;padding:8px 10px}\n#songStudioBack .songmodal .row{display:grid!important;grid-template-columns:1fr!important}\n.main{height:var(--td-v35-vh,100dvh)!important;max-height:var(--td-v35-vh,100dvh)!important;min-height:0!important;overflow:hidden!important}\n.main>.top{flex:0 0 auto!important}.main>.messages{flex:1 1 auto!important;min-height:0!important;overflow-y:auto!important;padding-bottom:calc(var(--td-v35-composer-h,125px) + 20px)!important;-webkit-overflow-scrolling:touch!important}\n.main>.composerwrap{position:fixed!important;left:0!important;right:0!important;bottom:var(--td-v36-kb-bottom,var(--td-v35-keyboard,0px))!important;width:100%!important;z-index:30!important;flex:none!important;padding:7px 9px calc(7px + env(safe-area-inset-bottom))!important;background:rgba(255,255,255,.98)!important;border-top:1px solid #dce8f6!important;transform:none!important}\n.main>.composerwrap .composer{width:100%!important;max-width:none!important;margin:0!important;padding:8px!important;border-radius:16px!important}\n.main>.composerwrap #prompt{min-height:44px!important;max-height:120px!important;resize:none!important;scroll-margin-bottom:20px!important}\n}\n.td-song-head{display:flex;align-items:center;justify-content:space-between;gap:10px}\n</style>\n'
         js_tail = '<script id="td-v35-viewport-fix">\n(function(){const root=document.documentElement,main=document.querySelector(\'.main\'),composer=document.querySelector(\'.main>.composerwrap\'),messages=document.getElementById(\'messages\'),input=document.getElementById(\'prompt\');if(!main||!composer||!input)return;let raf=0;function measure(){cancelAnimationFrame(raf);raf=requestAnimationFrame(()=>{const vv=window.visualViewport,h=Math.max(260,vv?vv.height:window.innerHeight),top=vv?vv.offsetTop:0,kb=Math.max(0,window.innerHeight-h-top);root.style.setProperty(\'--td-v35-vh\',h+\'px\');root.style.setProperty(\'--td-v35-keyboard\',kb+\'px\');root.style.setProperty(\'--td-v35-composer-h\',Math.max(100,composer.getBoundingClientRect().height)+\'px\');if(document.activeElement===input&&messages)messages.scrollTop=messages.scrollHeight;});}if(window.visualViewport){visualViewport.addEventListener(\'resize\',measure,{passive:true});visualViewport.addEventListener(\'scroll\',measure,{passive:true});}window.addEventListener(\'resize\',measure,{passive:true});window.addEventListener(\'orientationchange\',()=>setTimeout(measure,250),{passive:true});input.addEventListener(\'focus\',()=>{measure();setTimeout(measure,120);setTimeout(measure,320);});input.addEventListener(\'input\',measure);input.addEventListener(\'blur\',()=>setTimeout(measure,150));if(window.ResizeObserver)new ResizeObserver(measure).observe(composer);measure();})();\n</script>\n<script id="td-v35-studio-back">\n(function(){document.addEventListener(\'keydown\',e=>{if(e.key===\'Escape\'){const m=document.getElementById(\'songStudioBack\');if(m&&m.style.display===\'flex\'&&typeof closeSongStudio===\'function\')closeSongStudio();}});window.addEventListener(\'popstate\',()=>{const m=document.getElementById(\'songStudioBack\');if(m&&m.style.display===\'flex\'&&typeof closeSongStudio===\'function\')closeSongStudio(true);});const m=document.getElementById(\'songStudioBack\');if(m)m.addEventListener(\'click\',e=>{if(e.target===m&&typeof closeSongStudio===\'function\')closeSongStudio();});})();\n</script>'
+
+        css_head = css_head.replace(
+            "</style>",
+            r'''
+/* V36: overlay and composer stacking repair */
+@media(max-width:720px){
+  .modalback{z-index:12000!important;position:fixed!important;inset:0!important;display:none;overflow-y:auto!important;overscroll-behavior:contain!important;padding:calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom))!important;align-items:flex-start!important}
+  .modalback[style*="display: flex"],.modalback[style*="display:flex"]{display:flex!important}
+  .modalback>.modal{width:100%!important;max-width:560px!important;max-height:calc(100dvh - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom))!important;overflow-y:auto!important;margin:auto!important;-webkit-overflow-scrolling:touch!important}
+  #songStudioBack{z-index:13000!important}
+  .main>.composerwrap{z-index:30!important}
+  body.td-v36-overlay-open .main>.composerwrap{visibility:hidden!important;pointer-events:none!important}
+}
+@media(max-width:720px) and (max-height:520px){
+  .modalback{align-items:flex-start!important}
+  .modalback>.modal{max-height:calc(100dvh - 12px)!important;margin:6px auto!important}
+}
+</style>''', 1)
         html = html.replace("</head>", css_head + "</head>", 1)
+
+        js_tail += r'''
+<script id="td-v36-overlay-nav-keyboard">
+(function(){
+ const body=document.body, composer=document.querySelector('.main>.composerwrap');
+ const overlayIds=['modalback','profileBack','plansBack','songStudioBack'];
+ function visible(el){if(!el)return false;const s=getComputedStyle(el);return s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity||1)>0;}
+ function syncOverlays(){
+   const open=overlayIds.some(id=>visible(document.getElementById(id)));
+   body.classList.toggle('td-v36-overlay-open',open);
+   overlayIds.forEach(id=>{const el=document.getElementById(id);if(el){el.setAttribute('aria-hidden',visible(el)?'false':'true');}});
+ }
+ overlayIds.forEach(id=>{const el=document.getElementById(id);if(el)new MutationObserver(syncOverlays).observe(el,{attributes:true,attributeFilter:['style','class','hidden']});});
+ new MutationObserver(syncOverlays).observe(body,{childList:true,subtree:true});
+ document.addEventListener('click',e=>{const a=e.target.closest('a[href],button[onclick]');if(!a)return;
+   const href=a.getAttribute('href')||'';
+   if(['/video-studio','/pro-studio','/plus-workspace'].includes(href)){e.preventDefault();location.assign(href);return;}
+ },true);
+ document.addEventListener('keydown',e=>{
+   if(e.key==='Escape'){
+     const song=document.getElementById('songStudioBack');
+     if(visible(song)&&typeof window.closeSongStudio==='function'){e.preventDefault();window.closeSongStudio();return;}
+     const top=[...overlayIds].reverse().map(id=>document.getElementById(id)).find(visible);
+     if(top){const close=top.querySelector('button[aria-label*="kapat"],#closeProfile,#closePlans,#closeModal');if(close)close.click();}
+   }
+ });
+ window.addEventListener('popstate',()=>{const song=document.getElementById('songStudioBack');if(visible(song)&&typeof window.closeSongStudio==='function')window.closeSongStudio(true);});
+ if(composer){
+   const input=document.getElementById('prompt'), vv=window.visualViewport;
+   let raf=0;
+   function placeComposer(){
+     cancelAnimationFrame(raf);raf=requestAnimationFrame(()=>{
+       if(visible(document.getElementById('songStudioBack'))||overlayIds.some(id=>id!=='songStudioBack'&&visible(document.getElementById(id)))){syncOverlays();return;}
+       const viewport=window.visualViewport;
+       const height=viewport?viewport.height:window.innerHeight;
+       const offset=viewport?viewport.offsetTop:0;
+       const bottom=Math.max(0,window.innerHeight-height-offset);
+       document.documentElement.style.setProperty('--td-v36-kb-bottom',bottom+'px');
+       document.documentElement.style.setProperty('--td-v36-vh',height+'px');
+       if(document.activeElement===input){setTimeout(()=>{try{input.scrollIntoView({block:'nearest',behavior:'smooth'});}catch(_){}},60);}
+     });
+   }
+   if(vv){vv.addEventListener('resize',placeComposer,{passive:true});vv.addEventListener('scroll',placeComposer,{passive:true});}
+   window.addEventListener('resize',placeComposer,{passive:true});
+   window.addEventListener('orientationchange',()=>setTimeout(placeComposer,250),{passive:true});
+   if(input){input.addEventListener('focus',()=>{placeComposer();setTimeout(placeComposer,180);setTimeout(placeComposer,380);});input.addEventListener('blur',()=>setTimeout(placeComposer,150));}
+   placeComposer();
+ }
+ syncOverlays();
+})();
+</script>
+'''
         html = html.replace("</body>", js_tail + "</body>", 1)
+
     html = html.replace("onclick=\"location.href='/pro-studio'\"", "onclick=\"window.location.assign('/pro-studio')\"")
     html = html.replace("onclick=\"location.href='/plus-workspace'\"", "onclick=\"window.location.assign('/plus-workspace')\"")
     html = html.replace("onclick=\"location.href='/video-studio'\"", "onclick=\"window.location.assign('/video-studio')\"")
     headers = {k:v for k,v in response.headers.items() if k.lower() not in ("content-length", "content-encoding", "etag")}
     headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
     return HTMLResponse(html, status_code=response.status_code, headers=headers, background=response.background)
+
+# V36 overlay, composer stacking, and mobile navigation repair
+TD_UI_BUILD_V36 = "v36-overlay-navigation-keyboard-repair"
