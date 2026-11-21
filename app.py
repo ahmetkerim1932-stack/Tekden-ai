@@ -1653,6 +1653,7 @@ Yazım ve anlatım kuralları:
 - Web kaynakları sağlandıysa yanıtını bu kaynaklara dayandır, kaynakların desteklemediği iddiaları kesin sunma ve yanıt sonunda kaynak URL'lerini belirt.
 """
     system += "\n\n" + plan_rules
+    system += "\n\nYanıt kalitesi ve akıl yürütme standardı:\n- Önce kullanıcının asıl amacını ve konuşmadaki bağlamı belirle; önceki kararları ve kısıtları koru.\n- Basit soruya doğrudan yanıt ver. Karmaşık görevlerde çözümü mantıklı adımlara ayır ve uygulanabilir bir sonuç sun.\n- Eksik bilgi sonucu ciddi biçimde değiştirecekse yalnızca en gerekli netleştirme sorusunu sor; aksi durumda makul varsayımı açıkça belirterek ilerle.\n- Bilgi, tahmin, öneri ve varsayımı birbirinden ayır. Emin olmadığın ayrıntıları kesinmiş gibi sunma; tarih, fiyat, sürüm ve güncel durum gibi değişken bilgileri gerektiğinde doğrula.\n- Kod ve teknik destek taleplerinde önce mevcut yapıyı ve hata nedenini incele; çalışan özellikleri kaldırma, gizli anahtar isteme, test edilmemiş işlemi test edilmiş gibi anlatma. Değişikliklerden sonra ilgili kontrolleri belirt.\n- Kullanıcı bir proje üzerinde çalışıyorsa yalnızca genel tavsiye vermek yerine mümkün olduğunda doğrudan kullanılabilir çıktı, kontrol listesi veya sonraki somut adımı üret.\n- Gereksiz tekrar, uzun giriş ve yapay övgü kullanma. Kullanıcının dilinde doğal, anlaşılır ve tutarlı yanıt ver."
     # Zihin Atölyesi odak uyarlaması yalnızca Plus planında etkinleşir.
     focus_state = (body.focus_state or "neutral").strip().lower() if plan == "plus" else "neutral"
     focus_rules = {
@@ -7533,6 +7534,14 @@ restoreGuestHistory();refreshMe();
  const trigger=document.getElementById('mobileToolsBtn');
  const sidebarClose=document.getElementById('mobileSidebarClose');
  if(!menu||!trigger)return;
+  const tdHasProAccess=()=>!!user&&(['pro','plus'].includes(String(user.plan||'').toLowerCase())||user.is_owner===true);
+  const tdHasPlusAccess=()=>!!user&&(String(user.plan||'').toLowerCase()==='plus'||user.is_owner===true);
+  const tdNavigateStudio=(path)=>{
+    if(!path||!path.startsWith('/'))return;
+    setStatus('Stüdyo açılıyor…');
+    try{window.location.assign(new URL(path,window.location.origin).href);}
+    catch(err){console.error('Stüdyo yönlendirme hatası:',err);setStatus('Stüdyo açılamadı. Sayfayı yenileyip tekrar dene.');}
+  };
  sidebarClose?.addEventListener('click',()=>document.querySelector('.sidebar')?.classList.remove('mobile-open'));
  trigger.addEventListener('click',function(e){
    e.stopPropagation();
@@ -7553,17 +7562,17 @@ restoreGuestHistory();refreshMe();
    else if(action==='mind'){const x=document.getElementById('tkMindOpen')||document.getElementById('tkMindLockedOpen');if(x)x.click();else alert('Zihin Atölyesi bu hesapta görüntülenemiyor.');}
    else if(action==='video'){
      if(!user){showModal();const err=document.getElementById('authError');if(err)err.textContent='Video Studio için önce giriş yapmalısın.';}
-     else location.href='/video-studio';
+     else tdNavigateStudio('/video-studio');
    }
    else if(action==='studio'){
      if(!user){showModal();const err=document.getElementById('authError');if(err)err.textContent='Pro Stüdyo için önce giriş yapmalısın.';}
-     else if(!['pro','plus'].includes(String(user.plan||'').toLowerCase()))document.getElementById('plansBack').style.display='flex';
-     else location.href='/pro-studio';
+     else if(!tdHasProAccess()){document.getElementById('plansBack').style.display='flex';setStatus('Pro Stüdyo için Pro veya Plus üyeliği gerekiyor.');}
+     else tdNavigateStudio('/pro-studio');
    }
    else if(action==='plus-workspace'){
      if(!user){showModal();const err=document.getElementById('authError');if(err)err.textContent='Plus Workspace için önce giriş yapmalısın.';}
-     else if(String(user.plan||'').toLowerCase()!=='plus')document.getElementById('plansBack').style.display='flex';
-     else location.href='/plus-workspace';
+     else if(!tdHasPlusAccess()){document.getElementById('plansBack').style.display='flex';setStatus('Plus Workspace için Plus üyeliği gerekiyor.');}
+     else tdNavigateStudio('/plus-workspace');
    }
    else if(action==='discover'){location.href='/kesfet';}
    else if(action==='plans'){document.getElementById('plansBack').style.display='flex';}
@@ -7587,6 +7596,50 @@ restoreGuestHistory();refreshMe();
  });
 })();
 
+</script>
+<script id="td-v34-visual-viewport-keyboard-fix">
+(function(){
+  'use strict';
+  const root=document.documentElement;
+  const main=document.querySelector('.main');
+  const composer=document.querySelector('.composerwrap');
+  const input=document.getElementById('prompt');
+  const messages=document.getElementById('messages');
+  if(!main||!composer||!input)return;
+  let focusTimer=null;
+  function syncViewport(){
+    const vv=window.visualViewport;
+    const height=vv&&Number.isFinite(vv.height)?vv.height:window.innerHeight;
+    const offsetTop=vv&&Number.isFinite(vv.offsetTop)?vv.offsetTop:0;
+    const bottom=Math.max(0,window.innerHeight-height-offsetTop);
+    root.style.setProperty('--td-v34-vv-height',Math.max(240,height)+'px');
+    root.style.setProperty('--td-v34-vv-bottom',bottom+'px');
+    if(document.activeElement===input){
+      requestAnimationFrame(()=>{
+        try{composer.scrollIntoView({block:'end',behavior:'auto'});}catch(e){}
+        if(messages)messages.scrollTop=messages.scrollHeight;
+      });
+    }
+  }
+  const style=document.createElement('style');
+  style.textContent=`
+    @media(max-width:720px){
+      .main{height:var(--td-v34-vv-height,100dvh)!important;min-height:0!important;max-height:var(--td-v34-vv-height,100dvh)!important;}
+      .composerwrap{flex:0 0 auto!important;position:relative!important;bottom:auto!important;transform:none!important;padding-bottom:calc(10px + env(safe-area-inset-bottom))!important;}
+      .messages{min-height:0!important;overscroll-behavior:contain!important;scroll-padding-bottom:18px!important;}
+      #prompt{scroll-margin-bottom:18px!important;}
+      body.td-v34-keyboard-open{overflow:hidden!important;}
+    }
+  `;
+  document.head.appendChild(style);
+  if(window.visualViewport){window.visualViewport.addEventListener('resize',syncViewport,{passive:true});window.visualViewport.addEventListener('scroll',syncViewport,{passive:true});}
+  window.addEventListener('resize',syncViewport,{passive:true});
+  window.addEventListener('orientationchange',()=>setTimeout(syncViewport,180),{passive:true});
+  input.addEventListener('focus',()=>{document.body.classList.add('td-v34-keyboard-open');syncViewport();clearTimeout(focusTimer);focusTimer=setTimeout(syncViewport,220);});
+  input.addEventListener('blur',()=>{document.body.classList.remove('td-v34-keyboard-open');clearTimeout(focusTimer);focusTimer=setTimeout(syncViewport,120);});
+  document.addEventListener('focusin',e=>{if(e.target&&e.target.matches('#authUser,#authPass')){clearTimeout(focusTimer);focusTimer=setTimeout(()=>{try{e.target.scrollIntoView({block:'center',behavior:'smooth'});}catch(err){}},180);}});
+  syncViewport();
+})();
 </script></body></html>"""
 
 @app.get("/kesfet", response_class=HTMLResponse)
@@ -15461,3 +15514,18 @@ TD_VIDEO_STUDIO_BUILD = 'v29-video-provider-failover-fix'
 # =============================================================================
 TD_IMAGE_STUDIO_BUILD = "v30-five-image-provider-fallbacks"
 TD_MOBILE_NAV_BUILD = "v31-mobile-navigation-and-studio-fix"
+
+
+@app.get("/api/version-v34", include_in_schema=False)
+def td_public_app_version_v34():
+    return {
+        "app": "Tekden AI",
+        "build": "v34-studio-keyboard-intelligence",
+        "base": "v33-auth-ui-repair",
+        "studio_navigation": True,
+        "owner_aware_plan_access_ui": True,
+        "visual_viewport_keyboard_fix": True,
+        "response_quality_instructions": True,
+        "env_changed": False,
+        "requirements_changed": False,
+    }
