@@ -1761,6 +1761,24 @@ def _td_stream_openai_response(response):
         raise RuntimeError("Sağlayıcı akışlı yanıt döndürmedi.")
 
 
+def td_public_model_error_v39(exc):
+    """Map internal model/provider exceptions to concise, safe Turkish UI text."""
+    status = getattr(exc, "status_code", None)
+    category = str(getattr(exc, "category", "") or "").lower()
+    message = str(exc or "").lower()
+    if status == 402 or "all_tried_routes_require_credits" in message or "credits_or_billing_required" in category:
+        return "Yanıt sağlayıcısının kullanım kredisi veya erişimi şu anda yeterli değil. Yapılandırılmış yedek sağlayıcı da yanıt veremedi; biraz sonra tekrar dene."
+    if status == 429 or "rate_limited" in category or "rate limit" in message:
+        return "Yanıt servisi şu anda yoğun. Biraz bekleyip yeniden deneyebilirsin."
+    if status in (401, 403) or "permission_denied" in category or "authentication" in category:
+        return "Yanıt servisinin erişim ayarlarında sorun var. Yönetici tarafında servis bağlantısı kontrol edilmeli."
+    if status in (408, 504) or "timeout" in category or "timed out" in message:
+        return "Yanıt servisi zamanında yanıt vermedi. Mesajını tekrar gönderebilirsin."
+    if status in (400, 404, 413, 422) or "request_too_large" in category:
+        return "Bu istek seçili model tarafından kabul edilmedi. Mesajı kısaltıp tekrar dene."
+    return "Yanıt servisine şu anda ulaşılamıyor. Mesajın gönderilemedi; biraz sonra tekrar dene."
+
+
 def _td_checked_stream_response(response, provider):
     if response.status_code >= 400:
         status = int(response.status_code)
@@ -1793,7 +1811,9 @@ def stream_ollama_chat_events(messages, model, think_effort, *, user=None, chat_
         # Fast provider first for ordinary chat; deep-thinking deliberately
         # prefers a native reasoning model instead of this fast route.
         effective_plan = ("plus" if user and is_owner_account(user) else normalize_plan_name((user or {}).get("plan", "free")))
+        groq_attempted = False
         if GROQ_API_KEY and think_effort != "high" and effective_plan == "free":
+            groq_attempted = True
             response = None
             try:
                 response = requests.post(
@@ -1887,10 +1907,14 @@ def stream_ollama_chat_events(messages, model, think_effort, *, user=None, chat_
             if not stream_complete and not answer_parts and last_cloud_error:
                 stream_error = last_cloud_error
 
-        # If streaming was not supported/available before the first token,
-        # preserve the original V19 -> HTTP 402/private Ollama/HF recovery chain.
+        # Recover through the legacy provider chain only when the streaming
+        # failure was not an explicit credit gate. A repeated 402 request to the
+        # same Ollama/HF account cannot repair itself and only adds mobile delay.
         if not stream_complete and not answer_parts:
+            fallback_error = stream_error
             try:
+                if stream_error is not None and getattr(stream_error, "status_code", None) == 402:
+                    raise stream_error
                 if think_effort == "high":
                     _TD_MODEL_CONTEXT_V13.think_effort = None
                 answer = _TD_V19_CALL_OLLAMA_WITH_HF(messages, selected_model)
@@ -1899,9 +1923,27 @@ def stream_ollama_chat_events(messages, model, think_effort, *, user=None, chat_
                     provider_used = "existing_fallback_chain"
                     yield emit_piece(answer)
                     stream_complete = True
-            except Exception as fallback_error:
-                detail = str(fallback_error)[:350] or "Yanıt sağlayıcısı geçici olarak kullanılamıyor."
-                raise RuntimeError(detail)
+            except Exception as caught_fallback_error:
+                fallback_error = caught_fallback_error
+
+            # Pro/Plus keep their configured primary model first. If that route
+            # fails, a configured fast provider may save the response rather
+            # than returning a provider-credit error. Deep Think never downgrades.
+            if not stream_complete and GROQ_API_KEY and think_effort != "high" and not groq_attempted:
+                try:
+                    answer = str(td_groq_chat_v20(messages) or "").strip()
+                    if answer:
+                        provider_used = "groq_recovery"
+                        yield emit_piece(answer)
+                        stream_complete = True
+                except Exception as groq_fallback_error:
+                    fallback_error = groq_fallback_error
+                    print("[Tekden AI] Son Groq yedek rotası da kullanılamadı:", type(groq_fallback_error).__name__)
+
+            if not stream_complete:
+                if fallback_error is not None:
+                    raise RuntimeError(td_public_model_error_v39(fallback_error))
+                raise RuntimeError("Yanıt sağlayıcısı şu anda kullanılamıyor. Biraz sonra tekrar dene.")
 
         answer = "".join(answer_parts).strip()
         if not answer:
@@ -1938,7 +1980,7 @@ def stream_ollama_chat_events(messages, model, think_effort, *, user=None, chat_
             "stream_complete": bool(stream_complete),
         })
     except Exception as exc:
-        yield _td_stream_ndjson_event({"type": "error", "detail": str(exc)[:400] or "Yanıt oluşturulamadı."})
+        yield _td_stream_ndjson_event({"type": "error", "detail": td_public_model_error_v39(exc)})
     finally:
         _TD_MODEL_CONTEXT_V13.think_effort = previous_think
 
@@ -7319,7 +7361,7 @@ HTML = r"""<!doctype html>
 <meta name="description" content="Tekden AI ile yapay zekâ sohbeti, web araştırması, görsel üretimi, dosya analizi ve yaratıcı proje araçlarını keşfet."><meta property="og:title" content="Tekden AI · Yapay zekâ çalışma alanı"><meta property="og:description" content="Sohbet, araştırma, dosya analizi, görsel üretimi ve kişisel çalışma araçları."><meta name="theme-color" content="#0878f9"><meta name="robots" content="index,follow"><title>Tekden AI · Yapay Zekâ Asistanı</title><style>
 :root{color-scheme:light;--bg:#fff;--panel:#fff;--panel2:#edf5ff;--text:#111c32;--muted:#526784;--accent:#086cff;--accent2:#e3f0ff;--line:#d6e5f8;--green:#0da96b;--shadow:0 10px 32px rgba(28,91,170,.10)}
 *{box-sizing:border-box}body{margin:0;background:#fff;color:var(--text);font:15px/1.5 Inter,system-ui,-apple-system,Segoe UI,sans-serif}button,input,textarea{font:inherit}button{cursor:pointer;border:1px solid transparent;border-radius:12px;padding:10px 14px;background:var(--accent);color:#fff;font-weight:650;transition:background .15s,transform .15s,border-color .15s}button:hover{background:#0067dc;transform:translateY(-1px)}button.secondary{background:#f4f8fd;color:#1a365d;border:1px solid #d9e6f5}button.secondary:hover{background:#e5f1ff;border-color:#a9d0ff}button:disabled{opacity:.5;cursor:wait;transform:none}
-.layout{display:grid;grid-template-columns:270px minmax(0,1fr) 292px;height:100dvh;background:#fff}.sidebar{background:linear-gradient(180deg,#f7fbff 0%,#ffffff 70%);border-right:1px solid var(--line);padding:16px 14px;display:flex;flex-direction:column;gap:12px;min-height:0}.brand{font-size:24px;font-weight:850;letter-spacing:-.8px;color:#0f2545}.brand span{color:#0878f9}.sideactions{display:grid;gap:8px}.sideactions #newChat{background:linear-gradient(110deg,#0878f9,#2998ff);box-shadow:0 5px 14px #0878f926}.history{overflow:auto;display:grid;gap:5px}.history button{background:transparent;color:#253a59;text-align:left;font-weight:550;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-color:transparent}.history button:hover{background:#eaf4ff}.historyrow{display:flex;gap:4px;align-items:center}.historyrow .chatopen{flex:1;min-width:0}.historyrow .archivebtn{padding:7px 8px;font-size:12px;background:#f1f7ff;color:#24527e;border:1px solid #d9e8fa}.historyrow .archivebtn:hover{background:#dceeff}.sideutility{display:flex;gap:7px}.sideutility button{flex:1;font-size:13px;padding:9px 8px}.profilebtn{display:flex;align-items:center;gap:8px}.avatar{width:34px;height:34px;display:grid;place-items:center;border-radius:50%;background:#dcecff;color:#075fcf;font-weight:850;border:1px solid #c7e0ff}.profilegrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.profileitem{background:#f5f9ff;border:1px solid #e0ebf8;border-radius:12px;padding:12px}.profileitem small{display:block;color:var(--muted);margin-bottom:4px}.profileitem b{overflow-wrap:anywhere}.userbar{margin-top:auto;border:1px solid #d5eaff;background:#eff7ff;border-radius:14px;padding:12px}.main{display:flex;flex-direction:column;min-width:0;min-height:0;background:#fff}.top{padding:12px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:12px;background:rgba(255,255,255,.96);position:relative;z-index:1;box-shadow:0 3px 16px rgba(30,83,145,.035)}.top small{color:var(--muted)}.topnav{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.topnav button{background:transparent;color:#294261;border:1px solid transparent;padding:8px 10px}.topnav button:hover,.topnav button.active{background:#e8f3ff;border-color:#d7eaff;color:#0069e8}.messages{flex:1;overflow:auto;padding:26px max(20px,calc((100% - 900px)/2));display:flex;flex-direction:column;gap:18px;background:linear-gradient(180deg,#fff 0%,#fcfdff 100%)}.welcome{margin:auto;text-align:center;max-width:820px;width:100%}.welcome h1{font-size:clamp(28px,3vw,40px);letter-spacing:-1.1px;margin:0 0 8px;color:#101b30}.welcome h1 .blue{color:#0878f9}.welcome p{color:#506887;font-size:16px}.welcomegrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:26px 0}
+.layout{display:grid;grid-template-columns:270px minmax(0,1fr) 292px;height:100dvh;background:#fff}.sidebar{background:linear-gradient(180deg,#f7fbff 0%,#ffffff 70%);border-right:1px solid var(--line);padding:16px 14px;display:flex;flex-direction:column;gap:12px;min-height:0}.brand{font-size:24px;font-weight:850;letter-spacing:-.8px;color:#0f2545}.brand span{color:#0878f9}.sideactions{display:grid;gap:8px}.sideactions #newChat{background:linear-gradient(110deg,#0878f9,#2998ff);box-shadow:0 5px 14px #0878f926}.history{flex:1 1 auto;min-height:90px;overflow:auto;display:grid;gap:5px;-webkit-overflow-scrolling:touch}.history button{background:transparent;color:#253a59;text-align:left;font-weight:550;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border-color:transparent}.history button:hover{background:#eaf4ff}.historyrow{display:flex;gap:4px;align-items:center}.historyrow .chatopen{flex:1;min-width:0}.historyrow .archivebtn{padding:7px 8px;font-size:12px;background:#f1f7ff;color:#24527e;border:1px solid #d9e8fa}.historyrow .archivebtn:hover{background:#dceeff}.sideutility{display:flex;gap:7px}.sideutility button{flex:1;font-size:13px;padding:9px 8px}.profilebtn{display:flex;align-items:center;gap:8px}.avatar{width:34px;height:34px;display:grid;place-items:center;border-radius:50%;background:#dcecff;color:#075fcf;font-weight:850;border:1px solid #c7e0ff}.profilegrid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.profileitem{background:#f5f9ff;border:1px solid #e0ebf8;border-radius:12px;padding:12px}.profileitem small{display:block;color:var(--muted);margin-bottom:4px}.profileitem b{overflow-wrap:anywhere}.userbar{margin-top:auto;border:1px solid #d5eaff;background:#eff7ff;border-radius:14px;padding:12px}.main{display:flex;flex-direction:column;min-width:0;min-height:0;background:#fff}.top{padding:12px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:12px;background:rgba(255,255,255,.96);position:relative;z-index:1;box-shadow:0 3px 16px rgba(30,83,145,.035)}.top small{color:var(--muted)}.topnav{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.topnav button{background:transparent;color:#294261;border:1px solid transparent;padding:8px 10px}.topnav button:hover,.topnav button.active{background:#e8f3ff;border-color:#d7eaff;color:#0069e8}.messages{flex:1;overflow:auto;padding:26px max(20px,calc((100% - 900px)/2));display:flex;flex-direction:column;gap:18px;background:linear-gradient(180deg,#fff 0%,#fcfdff 100%)}.welcome{margin:auto;text-align:center;max-width:820px;width:100%}.welcome h1{font-size:clamp(28px,3vw,40px);letter-spacing:-1.1px;margin:0 0 8px;color:#101b30}.welcome h1 .blue{color:#0878f9}.welcome p{color:#506887;font-size:16px}.welcomegrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:26px 0}
 .songstudio{border-color:#c9b7ff;background:linear-gradient(135deg,#fbf8ff,#fff)}.songstudio .ico{background:#efe7ff;color:#7045c6}.songmodal{width:min(680px,100%)}.songmodal textarea{display:block;width:100%;min-height:110px;padding:11px;margin:8px 0 12px;border:1px solid var(--line);border-radius:10px;font:inherit;color:var(--text);background:#fff}.songmodal input{display:block;width:100%;padding:11px;margin:8px 0 12px;border:1px solid var(--line);border-radius:10px;font:inherit;color:var(--text);background:#fff}.songmodal .songhint{font-size:12px;color:var(--muted);line-height:1.5}.feature{display:flex;gap:12px;text-align:left;align-items:flex-start;background:#fff;border:1px solid #dbe8f7;border-radius:17px;padding:17px;color:#14243b;box-shadow:0 5px 18px rgba(36,91,149,.055);min-height:112px;transition:all .18s}.feature:hover{background:#f0f7ff;border-color:#72b4ff;box-shadow:0 9px 24px rgba(8,108,255,.10);transform:translateY(-2px)}.feature .ico{display:grid;place-items:center;flex:0 0 42px;height:42px;border-radius:12px;background:#e5f2ff;color:#0878f9;font-size:20px}.feature b{display:block;margin-bottom:4px}.feature small{display:block;color:#506887;font-weight:450;line-height:1.4}.quickprompts{display:none!important}.welcome-logo{font-size:clamp(30px,3.2vw,44px);font-weight:900;letter-spacing:-1.4px;margin:0 auto 14px;color:#102a4c}.welcome-logo span{color:#0878f9}.welcome-logo .spark{display:inline-grid;place-items:center;margin-left:5px;color:#0878f9;font-size:.82em}.bubble{max-width:900px;padding:14px 17px;border-radius:17px;white-space:pre-wrap;overflow-wrap:anywhere}.bubble.user{align-self:flex-end;background:#e4f1ff;color:#103d76;border:1px solid #c8e2ff}.bubble.assistant{align-self:flex-start;background:#fff;border:1px solid var(--line);box-shadow:0 4px 18px #536b9b0d;width:min(100%,900px)}.bubble img{max-width:100%;border-radius:12px;margin-top:8px}.sources{font-size:13px;color:var(--muted);margin-top:10px}.sources a{color:#006de5}.composerwrap{padding:10px 18px 14px;background:#fff}.composer{max-width:920px;margin:auto;background:#fff;border:1.5px solid #83baff;border-radius:22px;padding:12px;box-shadow:0 8px 28px rgba(8,108,255,.09)}.composer:focus-within{border-color:#086cff;box-shadow:0 0 0 4px rgba(8,108,255,.13)}.composer textarea{width:100%;resize:vertical;min-height:58px;max-height:180px;background:transparent;border:0;outline:0;color:var(--text);padding:8px 10px}.composer textarea::placeholder{color:#7085a1}.tools{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}.toolleft{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.status{font-size:12px;color:var(--muted);padding:0 5px}.attachrow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:0 8px 8px}.attachlabel{display:inline-flex;gap:6px;align-items:center;background:#f1f7ff;border:1px solid #d8e8fa;border-radius:10px;padding:7px 10px;cursor:pointer;color:#214b7a}.attachname{font-size:12px;color:#0878f9;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rightpanel{border-left:1px solid var(--line);background:linear-gradient(180deg,#f7fbff 0%,#fff 100%);padding:14px;display:flex;flex-direction:column;gap:12px;overflow:auto}.rightcard{background:#fff;border:1px solid #dce9f8;border-radius:17px;padding:15px;box-shadow:0 5px 18px rgba(37,91,148,.045)}.rightcard h3{font-size:15px;margin:0 0 10px}.rightcard p{margin:5px 0;color:#526784;font-size:13px}.proline{display:flex;align-items:center;gap:8px;margin:9px 0;font-size:13px;color:#29415f}.check{color:#0fa66a;font-weight:900}.planbadge{display:inline-flex;align-items:center;background:#0878f9;color:#fff;border-radius:7px;padding:2px 7px;font-size:11px;font-weight:800}.meter{height:8px;border-radius:99px;background:#e9f0f8;overflow:hidden;margin:5px 0 12px}.meter span{display:block;width:20%;height:100%;background:#1683ff;border-radius:99px}.activebox{background:#effbf5;border-color:#d8f3e5}.activebox h3{color:#087b4d}.plans{display:grid;gap:10px}.plan{border:1px solid var(--line);border-radius:14px;padding:16px;background:#f8fbff}.plan:last-child{border:2px solid #1784ff;background:linear-gradient(135deg,#edf6ff,#ffffff)}.plan strong{font-size:18px}.plan p{margin:6px 0;color:var(--muted);font-size:13px}.modalback{position:fixed;inset:0;background:#0c234666;backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;padding:16px;z-index:10}.modal{width:min(440px,100%);background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:22px;box-shadow:var(--shadow)}.modal h2{margin-top:0}.modal input{display:block;width:100%;padding:12px;margin:9px 0;background:#fff;color:var(--text);border:1px solid var(--line);border-radius:10px}.modal .row{display:flex;gap:8px}.modal .row button{flex:1}.notice{color:var(--muted);font-size:12px}.mobile{display:none}
 /* Sade sohbet düzeni: iki sütun, profil ve arşiv sol menünün altında */
 .layout{grid-template-columns:250px minmax(0,1fr)}
@@ -7413,7 +7455,7 @@ HTML = r"""<!doctype html>
 <button class="secondary" id="videoStudioNavBtnV24" type="button" onclick="location.href='/video-studio'" style="display:flex!important;width:100%;justify-content:flex-start;align-items:center;gap:8px;border:1px solid #83c5ff;color:#0759ad;background:linear-gradient(110deg,#e5f4ff,#d8edff);font-weight:800;box-shadow:0 4px 14px rgba(20,110,210,.12)">🎬 Video Studio</button><button class="secondary" onclick="openSongStudio()" style="border-color:#d8c9ff;color:#6941b6;background:#faf7ff">🎤 Şarkı Stüdyosu</button></div>
 <div><small style="color:var(--muted)">SOHBETLER</small></div><div class="sideutility"><button class="secondary" id="activeChatsBtn">Son sohbetler</button><button class="secondary" id="archivedChatsBtn">Arşiv</button></div><div class="history" id="history"><div class="notice">Geçmişi görmek için giriş yap.</div></div>
 <div class="userbar" id="userbar"><div class="notice">Misafir modu · Sohbetler kaydedilmez.</div></div></aside>
-<main class="main"><header class="top"><button class="secondary mobile" id="mobileNew">＋</button><div><strong>Tekden AI</strong><br><small>Yardımcı yapay zekân</small></div><nav class="topnav"><button class="active" onclick="newChat()">◉ Sohbet</button><button onclick="$('prompt').value='Görsel oluştur: ';$('prompt').focus()">▧ Görsel</button><button onclick="$('fileInput').click()">▤ Dosya Analizi</button><button onclick="forceSearch=true;$('searchBtn').style.borderColor='var(--accent)';$('prompt').focus()">⌕ Web Arama</button><button onclick="$('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';$('prompt').focus()">▣ Uygulama</button><button onclick="$('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: '; $('prompt').focus()">🎮 Oyun</button><button onclick="openSongStudio()">🎤 Şarkı</button><button onclick="location.href='/kesfet'">✦ Keşfet</button><button id="adminNavBtn" style="display:none" onclick="location.href='/yonetim'">⚙ Yönetim</button></nav><div style="display:flex;gap:8px;align-items:center"><button class="secondary" id="mobileToolsBtn" type="button" aria-label="Diğer araçlar" aria-expanded="false">⋮</button><button class="secondary profilebtn" id="profileBtn" aria-label="Profil"><span class="avatar" id="topAvatar">?</span><span id="profileButtonText">Profil</span></button></div></header>
+<main class="main"><header class="top"><button class="secondary mobile" id="mobileNew" type="button" title="Yeni sohbet" aria-label="Yeni sohbet">＋</button><button class="secondary mobile" id="mobileHistoryBtn" type="button" title="Sohbet geçmişi" aria-label="Sohbet geçmişi">◷</button><div><strong>Tekden AI</strong><br><small>Yardımcı yapay zekân</small></div><nav class="topnav"><button class="active" onclick="newChat()">◉ Sohbet</button><button onclick="$('prompt').value='Görsel oluştur: ';$('prompt').focus()">▧ Görsel</button><button onclick="$('fileInput').click()">▤ Dosya Analizi</button><button onclick="forceSearch=true;$('searchBtn').style.borderColor='var(--accent)';$('prompt').focus()">⌕ Web Arama</button><button onclick="$('prompt').value='Bir web uygulaması tasarlamama ve kodlamama yardım et: ';$('prompt').focus()">▣ Uygulama</button><button onclick="$('prompt').value='Sıfırdan oynanabilir bir oyun oluştur: '; $('prompt').focus()">🎮 Oyun</button><button onclick="openSongStudio()">🎤 Şarkı</button><button onclick="location.href='/kesfet'">✦ Keşfet</button><button id="adminNavBtn" style="display:none" onclick="location.href='/yonetim'">⚙ Yönetim</button></nav><div style="display:flex;gap:8px;align-items:center"><button class="secondary" id="mobileToolsBtn" type="button" aria-label="Diğer araçlar" aria-expanded="false">⋮</button><button class="secondary profilebtn" id="profileBtn" aria-label="Profil"><span class="avatar" id="topAvatar">?</span><span id="profileButtonText">Profil</span></button></div></header>
 <div id="mobileToolsMenu" aria-label="Tekden AI araçları">
   <div class="mobile-menu-label">HIZLI ERİŞİM</div>
   <div class="mobile-menu-shortcuts">
@@ -7459,7 +7501,7 @@ HTML = r"""<!doctype html>
   <button class="secondary" id="mobileAdminBtn" type="button" data-mobile-action="admin" style="display:none"><span class="menuIcon">⚙</span>Yönetim</button>
 </div>
 <section class="messages" id="messages"><div class="welcome" id="welcome"><div class="td-welcome-brand" aria-label="Tekden AI"><img class="td-welcome-mark" src="/assets/tekden-ai-mark.png" alt="Tekden AI amblemi"><div class="td-welcome-name">Tekden <span>AI</span></div></div><h1>Tekden AI'ye Hoş Geldin <span class="blue">✦</span></h1><p>Size nasıl yardımcı olabilirim? İhtiyacınızı yazın; sohbet, araştırma ve üretim araçları hazır.</p><div class="welcomegrid"><button class="feature suggestion" data-kind="chat"><span class="ico">◉</span><span><b>Sohbet</b><small>Konuları açıkla, sorularını yanıtla ve adım adım ilerle.</small></span></button><button class="feature suggestion" data-kind="image"><span class="ico">▧</span><span><b>Görsel Oluştur</b><small>İstediğin sahneyi tarif et, görselini üret.</small></span></button><button class="feature suggestion" data-kind="file"><span class="ico">▤</span><span><b>Dosya Analizi</b><small>PDF, belge ve görsellerdeki içeriği incele.</small></span></button><button class="feature suggestion" data-kind="web"><span class="ico">⌕</span><span><b>Web Arama</b><small>Güncel bilgileri kaynaklarıyla araştır.</small></span></button><button class="feature suggestion" data-kind="app"><span class="ico">⌘</span><span><b>Uygulama Geliştir</b><small>Kod, site ve proje fikirleri üzerinde çalış.</small></span></button><button class="feature suggestion" data-kind="game"><span class="ico">♧</span><span><b>Oyun Tasarla</b><small>Free ile arcade oyna; Pro ile tarifinden özgün, oynanabilir oyun üret.</small></span></button><button class="feature songstudio" type="button" onclick="openSongStudio()"><span class="ico">🎤</span><span><b>Vokalli Şarkı Stüdyosu</b><small>Pro üyelerine özel: Tekden AI içinde vokalli şarkı üret.</small></span></button></div></div></section>
-<div class="composerwrap"><div class="composer"><textarea id="prompt" placeholder="Tekden AI'a mesaj yaz..."></textarea><div class="attachrow td-composer-actions"><button class="secondary td-composer-icon" id="attachBtn" type="button" title="Dosya veya görsel ekle" aria-label="Dosya veya görsel ekle">📎</button><input id="fileInput" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.docx" hidden><span class="attachname" id="fileName" hidden></span><button class="secondary td-composer-icon" id="imageBtn" type="button" title="Görsel oluştur" aria-label="Görsel oluştur">▧</button><button class="secondary td-composer-icon" id="dictationBtn" type="button" title="Konuşarak yaz" aria-label="Konuşarak yaz">🎙</button><button class="secondary td-composer-icon" id="voiceBtn" type="button" title="Sesli sohbet" aria-label="Sesli sohbet">🔊</button></div><div class="tools"><div class="toolleft"><button class="secondary" id="searchBtn" title="Otomatik web araması açık; gerektiğinde kendiliğinden arar. Tıklarsan bu mesajda aramayı zorlar.">⌕ Web ara</button><button class="secondary" id="thinkBtn" type="button" aria-pressed="false" title="Daha kapsamlı analiz; daha uzun sürebilir" style="padding:8px 10px;font-size:12px">🧠 Derin düşün</button><span class="status" id="status">Hazır</span></div><button id="sendBtn">Gönder ↑</button></div></div><div class="notice" style="text-align:center;margin-top:8px">Misafir sohbetleri bu tarayıcıda saklanır; hesap açarsan sohbet geçmişin hesabına kaydedilir.</div></div></main></div>
+<div class="composerwrap"><div class="composer"><textarea id="prompt" placeholder="Tekden AI'a mesaj yaz..."></textarea><div class="attachrow td-composer-actions"><button class="secondary td-composer-icon" id="attachBtn" type="button" title="Dosya veya görsel ekle" aria-label="Dosya veya görsel ekle">📎</button><input id="fileInput" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.docx" hidden><span class="attachname" id="fileName" hidden></span><button class="secondary td-composer-icon" id="imageBtn" type="button" title="Görsel oluştur" aria-label="Görsel oluştur">▧</button><button class="secondary td-composer-icon" id="dictationBtn" type="button" title="Konuşarak yaz" aria-label="Konuşarak yaz">🎙</button><button class="secondary td-composer-icon" id="voiceBtn" type="button" title="Sesli sohbet" aria-label="Sesli sohbet">🔊</button></div><div class="tools"><div class="toolleft"><button class="secondary td-composer-icon" id="searchBtn" type="button" title="Otomatik web araması açık. Tıklayarak bu mesajda aramayı zorla." aria-label="Web aramasını zorla">⌕</button><button class="secondary td-composer-icon" id="thinkBtn" type="button" aria-pressed="false" title="Derin düşünmeyi aç veya kapat" aria-label="Derin düşün" style="padding:8px 10px;font-size:18px">🧠</button><span class="status" id="status">Hazır</span></div><button id="sendBtn" type="button" title="Mesajı gönder" aria-label="Mesajı gönder">↑</button></div></div><div class="notice" style="text-align:center;margin-top:8px">Misafir sohbetleri bu tarayıcıda saklanır; hesap açarsan sohbet geçmişin hesabına kaydedilir.</div></div></main></div>
 <div class="modalback" id="modalback"><div class="modal auth-modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="authDescription"><div class="auth-mark">✦</div><h2 id="modalTitle">Tekden AI hesabına giriş yap</h2><p class="notice" id="authDescription">Sohbet geçmişini saklamak ve kişisel çalışma alanına erişmek için giriş yap.</p><form id="authForm" autocomplete="on"><label class="auth-label" for="authUser">Kullanıcı adı</label><input id="authUser" name="username" placeholder="Kullanıcı adın" autocomplete="username" minlength="3" maxlength="32" required><label class="auth-label" for="authPass">Şifre</label><input id="authPass" name="password" type="password" placeholder="En az 8 karakter" autocomplete="current-password" minlength="8" maxlength="128" required><div class="auth-actions"><button id="authSubmit" type="submit">Giriş yap</button><button class="secondary" id="registerBtn" type="button">Yeni hesap oluştur</button></div></form><p id="authError" class="notice auth-error" role="status" aria-live="polite"></p><button class="secondary" id="closeModal" type="button" style="width:100%;margin-top:8px">Kapat</button><p class="auth-footnote">Hesap oluşturmak ücretsizdir. Şifreni kimseyle paylaşma.</p></div></div>
 <div class="modalback" id="profileBack"><div class="modal"><h2>Profilim</h2><p class="notice">Hesap bilgilerin ve üyelik durumun</p><div class="profilegrid"><div class="profileitem"><small>Kullanıcı adı</small><b id="profileUsername">Misafir</b></div><div class="profileitem"><small>Üyelik</small><b id="profilePlan">Free</b></div></div><div class="rightcard" style="margin:12px 0"><h3>Üyelik özellikleri</h3><p id="profileFeatures">Standart sohbet ve mevcut temel araçlar.</p></div><button class="secondary" id="profileArchiveBtn" style="width:100%;margin-bottom:8px">Arşivlenmiş sohbetler</button><button id="profilePlansBtn" style="width:100%;margin-bottom:8px">Planları ve Plus avantajlarını gör</button><button class="secondary" id="profileLoginBtn" style="width:100%;margin-bottom:8px">Giriş yap / Kayıt ol</button><button class="secondary" id="profileLogoutBtn" style="width:100%;margin-bottom:8px;display:none">Çıkış yap</button><button class="secondary" id="closeProfile" style="width:100%">Kapat</button></div></div>
 <div class="modalback" id="plansBack"><div class="modal"><h2>Tekden AI planları</h2><div class="plans"><div class="plan"><strong>Free · 0 TL/ay</strong><p>Günlük sohbet, sohbet geçmişi, web araması, görsel oluşturma, desteklenen dosya türlerini inceleme ve hazır Neon Highway arcade oyununu oynama. Harici servis limitleri geçerlidir.</p><button class="secondary" disabled>Ücretsiz plan</button></div><div class="plan"><strong>✦ Plus · 400 TL/ay</strong><p><b>En kapsamlı plan:</b> Pro özelliklerinin tamamı + Zihin Atölyesi (kalıcı proje hafızası, doğruluk denetimi, odak uyarlaması, nüanslı çeviri, dijital ikiz taslakları ve fikir mimarı), 300 yeni Plus iş akışı ve Free/Pro/Plus araç kütüphanesi. Gerçek kullanım harici servislerin ve ödeme/yetki yapılandırmasının durumuna bağlıdır.</p><button id="buyPlus" type="button">Plus'a geç · 400 TL/ay</button><p class="notice">Satın alma yalnızca Stripe Price ID ve webhook yapılandırıldığında etkinleşir.</p></div><div class="plan"><strong>✦ Pro · 100 TL/ay</strong><p><b>Gelişmiş Pro modeli</b> (OLLAMA_PRO_MODEL yapılandırılmışsa), çok kaynaklı genişletilmiş web araştırması, karmaşık görevlerde derin analiz, uzun proje bağlamı, belge değerlendirme ve tarifinden kod göstermeden farklı türlerde gelişmiş, doğrudan oynanabilir oyun üretimi; tam ekran, HTML indirme ve vokalli şarkı stüdyosu (müzik motoru yapılandırıldığında). Free plan hazır arcade oyununu oynayabilir. Görsel/web sağlayıcılarının kendi limitleri devam eder; sonuçlar kullanılan model ve servislerin kapasitesine bağlıdır.</p><button id="buyPro">Pro'ya geç</button><p id="proAlreadyActive" class="notice" style="display:none;color:#087b4d;font-weight:700">Pro üyeliğin aktif. Yeniden satın alman gerekmiyor.</p></div></div><p class="notice">Ödeme Stripe Checkout üzerinden alınır. Stripe hesabında Plus için aylık fiyat oluşturup STRIPE_PRICE_ID_PLUS değerini Render ortam değişkenlerine eklemen gerekir.</p><button class="secondary" id="closePlans" style="width:100%">Kapat</button></div></div>
@@ -7662,6 +7704,7 @@ async function loadChats(){
     try{
      const result=await api('/api/chats/'+encodeURIComponent(item.id));
      chatId=String(result.chat?.id||item.id);$('messages').innerHTML='';
+     document.querySelector('.sidebar')?.classList.remove('mobile-open');
      const messages=Array.isArray(result.messages)?result.messages:[];
      if(!messages.length){bubble('assistant','Bu sohbette henüz mesaj yok.');return;}
      for(const m of messages){if(m&&['user','assistant'].includes(m.role))bubble(m.role,String(m.content||''));}
@@ -7703,6 +7746,25 @@ async function loadChats(){
 // Make chat history callable from every UI handler and recover safely if a legacy script calls it.
 window.loadChats = loadChats;
 window.refreshChatHistory = loadChats;
+async function openMobileHistory(){
+ const side=document.querySelector('.sidebar');
+ side?.classList.add('mobile-open');
+ showArchived=false;
+ const activeBtn=$('activeChatsBtn'), archivedBtn=$('archivedChatsBtn');
+ if(activeBtn)activeBtn.style.background='#e4f1ff';
+ if(archivedBtn)archivedBtn.style.background='';
+ if(!user){
+  const hint=loadUserHint();
+  if(hint){user=hint;renderUser();}
+  else{
+   try{const current=await api('/api/me');user=current.user||null;saveUserHint();renderUser();}
+   catch(err){console.warn('Mobil sohbet geçmişinde oturum kontrolü geçici olarak başarısız:',err);}
+  }
+ }
+ await loadChats();
+}
+window.tdOpenMobileHistory=openMobileHistory;
+$('mobileHistoryBtn')?.addEventListener('click',openMobileHistory);
 
 async function readDocument(file){
  const name=file.name.toLowerCase();
@@ -7834,7 +7896,7 @@ async function send(){
   }
   setStatus('Hata · Gönderilen metin konuşmada korundu; soru kutusu temizlendi.');
 }
- finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)';$('searchBtn').textContent='⌕ Web ara'}
+ finally{$('sendBtn').disabled=false;forceSearch=false;$('searchBtn').style.borderColor='var(--line)';$('searchBtn').textContent='⌕';$('searchBtn').title='Otomatik web araması açık. Tıklayarak bu mesajda aramayı zorla.';$('searchBtn').setAttribute('aria-label','Web aramasını zorla')}
 }
 
 async function generateImage(){const requestText=$('prompt').value.trim();if(!requestText){alert('Önce oluşturmak istediğin görseli ayrıntılarıyla yaz.');return}bubble('user','Görsel oluştur: '+requestText);$('prompt').value='';setStatus('İstediğin görsel oluşturuluyor…');$('imageBtn').disabled=true;try{await createAndShowImage(requestText);if(!user){guestHistory.push({role:'user',content:'Görsel oluştur: '+requestText},{role:'assistant',content:'İstenen görsel oluşturuldu. İstek: '+requestText});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Görsel hazır')}catch(e){bubble('assistant','Görsel oluşturulamadı: '+e.message);setStatus('Hata')}finally{$('imageBtn').disabled=false}}
@@ -7894,7 +7956,7 @@ bubble=function(role,content,sources=[]){
 
 const oldBubble=bubble; bubble=function(role,content,sources=[]){const el=oldBubble(role,content,sources);if(role==='assistant'&&(voiceMode||speakNext)&&'speechSynthesis'in window){speakNext=false;const u=new SpeechSynthesisUtterance(cleanAnswer(content));u.lang='tr-TR';window.speechSynthesis.cancel();window.speechSynthesis.speak(u)}return el};
 $('sendBtn').onclick=send;
-$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('attachBtn')?.addEventListener('click',()=> $('fileInput').click());$('fileInput').onchange=e=>{selectedFile=e.target.files?.[0]||null;if(selectedFile&&selectedFile.size>12*1024*1024){alert('Dosya en fazla 12 MB olabilir.');selectedFile=null;$('fileInput').value=''}$('fileName').textContent=selectedFile?selectedFile.name:'';$('fileName').hidden=!selectedFile;if(selectedFile)setStatus("Dosya hazır · sorunu yazıp Gönder'e bas")};$('imageBtn').onclick=generateImage;$('searchBtn').onclick=()=>{forceSearch=!forceSearch;$('searchBtn').style.borderColor=forceSearch?'#a78bfa':'var(--line)';$('searchBtn').textContent=forceSearch?'⌕ Bu mesajda ara':'⌕ Web ara';setStatus(forceSearch?'Bu mesajda web araması zorunlu':'Otomatik arama açık; güncel bilgi gerektiğinde kendiliğinden arar')};$('thinkBtn').onclick=()=>{deepThink=!deepThink;$('thinkBtn').setAttribute('aria-pressed',String(deepThink));$('thinkBtn').style.borderColor=deepThink?'#438de7':'var(--line)';$('thinkBtn').style.background=deepThink?'#eaf4ff':'';$('thinkBtn').textContent=deepThink?'🧠 Derin düşün açık':'🧠 Derin düşün';setStatus(deepThink?'Yüksek düşünme seviyesi açık; yanıt biraz daha uzun sürebilir.':'Hızlı yanıt modu açık.')};$('newChat').onclick=newChat;$('mobileNew').onclick=newChat;$('closeModal').onclick=closeModal;$('modalback').onclick=e=>{if(e.target===$('modalback'))closeModal()};
+$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('attachBtn')?.addEventListener('click',()=> $('fileInput').click());$('fileInput').onchange=e=>{selectedFile=e.target.files?.[0]||null;if(selectedFile&&selectedFile.size>12*1024*1024){alert('Dosya en fazla 12 MB olabilir.');selectedFile=null;$('fileInput').value=''}$('fileName').textContent=selectedFile?selectedFile.name:'';$('fileName').hidden=!selectedFile;if(selectedFile)setStatus("Dosya hazır · sorunu yazıp Gönder'e bas")};$('imageBtn').onclick=generateImage;$('searchBtn').onclick=()=>{forceSearch=!forceSearch;$('searchBtn').style.borderColor=forceSearch?'#a78bfa':'var(--line)';$('searchBtn').textContent='⌕';$('searchBtn').title=forceSearch?'Bu mesajda web araması zorunlu':'Otomatik web araması açık. Tıklayarak bu mesajda aramayı zorla.';$('searchBtn').setAttribute('aria-label',forceSearch?'Bu mesajda web araması zorunlu':'Web aramasını zorla');setStatus(forceSearch?'Bu mesajda web araması zorunlu':'Otomatik arama açık; güncel bilgi gerektiğinde kendiliğinden arar')};$('thinkBtn').onclick=()=>{deepThink=!deepThink;$('thinkBtn').setAttribute('aria-pressed',String(deepThink));$('thinkBtn').style.borderColor=deepThink?'#438de7':'var(--line)';$('thinkBtn').style.background=deepThink?'#eaf4ff':'';$('thinkBtn').textContent='🧠';$('thinkBtn').title=deepThink?'Derin düşün açık':'Derin düşünmeyi aç';$('thinkBtn').setAttribute('aria-label',deepThink?'Derin düşün açık':'Derin düşün');setStatus(deepThink?'Yüksek düşünme seviyesi açık; yanıt biraz daha uzun sürebilir.':'Hızlı yanıt modu açık.')};$('newChat').onclick=newChat;$('mobileNew').onclick=newChat;$('closeModal').onclick=closeModal;$('modalback').onclick=e=>{if(e.target===$('modalback'))closeModal()};
 let authMode='login',authBusy=false;
 function setAuthMode(mode){authMode=mode;const registering=mode==='register';$('modalTitle').textContent=registering?'Ücretsiz hesabını oluştur':'Tekden AI hesabına giriş yap';$('authDescription').textContent=registering?'Kullanıcı adını ve en az 8 karakterli bir şifre belirle.':'Sohbet geçmişini saklamak ve kişisel çalışma alanına erişmek için giriş yap.';$('authSubmit').textContent=registering?'Hesap oluştur':'Giriş yap';$('registerBtn').textContent=registering?'Giriş ekranına dön':'Yeni hesap oluştur';$('authPass').autocomplete=registering?'new-password':'current-password';$('authError').textContent='';}
 $('authForm').addEventListener('submit',e=>{e.preventDefault();auth(authMode)});
@@ -7959,28 +8021,16 @@ if(tdStudioRedirect){
  const trigger=document.getElementById('mobileToolsBtn');
  const sidebarClose=document.getElementById('mobileSidebarClose');
  if(!menu||!trigger)return;
-  // Refresh the HttpOnly session before launching. This avoids a tap racing the
-  // initial /api/me request and incorrectly treating a signed-in member as a guest.
-  window.tdLaunchStudio = async function(kind){
+  // Navigate immediately. The destination route performs the authoritative
+  // HttpOnly session and Pro/Plus entitlement checks on the server.
+  window.tdLaunchStudio = function(kind){
     const routes={video:'/video-studio',pro:'/pro-studio',plus:'/plus-workspace'};
     const route=routes[kind];
     if(!route)return;
-    setStatus('Hesap kontrol ediliyor…');
-    try{
-      const latest=await api('/api/me');
-      user=latest.user||null;
-      renderUser();
-      if(!user){
-        showModal();
-        $('authError').textContent='Bu stüdyoyu açmak için önce Tekden AI hesabına giriş yapmalısın.';
-        return;
-      }
-      setStatus('Stüdyo açılıyor…');
-      window.location.assign(new URL(route,window.location.origin).href);
-    }catch(err){
-      console.error('Stüdyo açılışında oturum kontrolü başarısız:',err);
-      setStatus('Hesap bilgisi doğrulanamadı. İnternet bağlantını kontrol edip yeniden dene.');
-    }
+    menu.classList.remove('open');
+    trigger.setAttribute('aria-expanded','false');
+    setStatus('Stüdyo açılıyor…');
+    window.location.assign(route);
   };
  sidebarClose?.addEventListener('click',()=>document.querySelector('.sidebar')?.classList.remove('mobile-open'));
  trigger.addEventListener('click',function(e){
@@ -7997,7 +8047,7 @@ if(tdStudioRedirect){
    const b=e.target.closest('[data-mobile-action]');if(!b)return;
    const action=b.dataset.mobileAction;
    menu.classList.remove('open');trigger.setAttribute('aria-expanded','false');
-   if(action==='history'){const side=document.querySelector('.sidebar');if(side)side.classList.add('mobile-open');document.getElementById('activeChatsBtn')?.click();}
+   if(action==='history'){window.tdOpenMobileHistory?.();}
    else if(action==='toolbox'){const x=document.getElementById('tdToolsOpen');if(x)x.click();else alert('Araç kutusu şu anda açılamıyor.');}
    else if(action==='mind'){if(typeof window.tdOpenMindLab==='function')window.tdOpenMindLab();else if(typeof window.tdOpenMindLocked==='function')window.tdOpenMindLocked();else alert('Zihin Atölyesi şu anda yüklenemedi. Sayfayı yenileyip tekrar dene.');}
    else if(action==='video'){window.tdLaunchStudio('video');}
@@ -13444,7 +13494,7 @@ window.taskDelete=async id=>{if(!confirm('Görevi silmek istiyor musun?'))return
 
 $('controlDelete').onclick=async()=>{const scope=$('controlScope').value,confirmation=$('controlConfirm').value;if(confirmation!=='SİL'){alert('Onay için SİL yaz.');return;}if(!confirm('Seçilen Plus verileri kalıcı olarak silinecek. Devam edilsin mi?'))return;try{const d=await api('/api/plus/control/delete',{method:'POST',body:JSON.stringify({scope,confirmation})});$('controlStatus').textContent='Silme tamamlandı: '+d.deleted_scopes;$('controlConfirm').value='';await loadProjects();await loadSummary();await loadAssets();await loadTasks();await loadVault();}catch(e){$('controlStatus').textContent=e.message;}};
 
-(async()=>{try{await loadProjects();const tasks=[loadSummary(),loadAssets(),loadTasks(),loadVault(),loadTeacherProgress()];const results=await Promise.allSettled(tasks);const failed=results.filter(x=>x.status==='rejected');if(failed.length){const n=document.createElement('div');n.style.cssText='padding:10px 14px;margin:8px 0;border:1px solid #f2d28c;border-radius:12px;background:#fff8e7;color:#765212;font:13px system-ui';n.textContent=failed.length+' çalışma alanı bölümü geç yükleniyor. Sayfayı kapatmadan ilgili bölümü yenileyebilirsin.';document.querySelector('.shell')?.prepend(n);}}catch(e){document.body.insertAdjacentHTML('afterbegin','<div style="padding:15px;background:#fee;color:#900">Çalışma alanı yüklenemedi: '+esc(e.message)+'</div>');}})();
+(async()=>{try{const tasks=[loadProjects(),loadSummary(),loadAssets(),loadTasks(),loadVault(),loadTeacherProgress()];const results=await Promise.allSettled(tasks);const failed=results.filter(x=>x.status==='rejected');if(failed.length){const n=document.createElement('div');n.style.cssText='padding:10px 14px;margin:8px 0;border:1px solid #f2d28c;border-radius:12px;background:#fff8e7;color:#765212;font:13px system-ui';n.textContent=failed.length+' çalışma alanı bölümü geç yükleniyor. Sayfayı kapatmadan ilgili bölümü yenileyebilirsin.';document.querySelector('.shell')?.prepend(n);}}catch(e){document.body.insertAdjacentHTML('afterbegin','<div style="padding:15px;background:#fee;color:#900">Çalışma alanı yüklenemedi: '+esc(e.message)+'</div>');}})();
 </script></body></html>"""
 
 
@@ -13471,28 +13521,8 @@ def td_plus_workspace_page(request: Request):
 
 @app.middleware("http")
 async def td_plus_workspace_discovery_link(request: Request, call_next):
-    response = await call_next(request)
-    if request.url.path != "/" or response.status_code != 200:
-        return response
-    content_type = response.headers.get("content-type", "")
-    body = getattr(response, "body", None)
-    if body is None or "text/html" not in content_type:
-        return response
-    script = r"""<script id="td-plus-workspace-discovery">
-(async()=>{try{const r=await fetch('/api/me',{credentials:'same-origin'});if(!r.ok)return;const d=await r.json();if(!d.user||String(d.user.plan||'').trim().toLowerCase()!=='plus')return;
-const style='display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:8px 11px;border:1px solid #b9d8fa;border-radius:11px;background:#eff7ff;color:#155db1;text-decoration:none;font:700 12px system-ui;';
-const menu=document.getElementById('mobileToolsMenu');if(menu&&!document.getElementById('tdPlusWorkspaceMenuLink')&&!document.getElementById('plusWorkspaceMobileBtn')){const a=document.createElement('a');a.id='tdPlusWorkspaceMenuLink';a.href='/plus-workspace';a.textContent='✦ Plus Çalışma Alanı';a.style.cssText=style+'width:100%;margin-top:7px;';menu.appendChild(a);}
-const top=document.querySelector('.top');if(top&&!document.getElementById('tdPlusWorkspaceTopLink')){const a=document.createElement('a');a.id='tdPlusWorkspaceTopLink';a.href='/plus-workspace';a.textContent='✦ Plus Workspace';a.style.cssText=style+'margin-left:8px;white-space:nowrap;';top.appendChild(a);}
-}catch(e){}})();
-</script>"""
-    body = body.replace(b"</body>", script.encode("utf-8") + b"</body>", 1)
-    headers = dict(response.headers)
-    headers.pop("content-length", None)
-    headers.pop("content-encoding", None)
-    headers.pop("etag", None)
-    return Response(content=body, status_code=response.status_code, headers=headers)
-
-
+    """Compatibility no-op: Plus links are rendered by the authenticated UI."""
+    return await call_next(request)
 
 
 # =============================================================================
@@ -13645,8 +13675,8 @@ async def td_chat_safe_json_errors(request: Request, call_next):
             category = str(matched_exc.category or "upstream_error")
             if status_code == 402:
                 detail = (
-                    "Yanıt modeli mevcut plan kapsamında kullanılamıyor veya ek kullanım hakkı gerekiyor. "
-                    "Temel model de yanıt veremedi. Model erişim ve kullanım durumunu kontrol et."
+                    "Yanıt sağlayıcısının kullanım kredisi veya erişimi şu anda yeterli değil. "
+                    "Yapılandırılmış yedek sağlayıcı da yanıt veremedi; biraz sonra tekrar dene."
                 )
             elif status_code in (401, 403):
                 status_code = 503
@@ -15412,9 +15442,13 @@ def td_hf_live_provider_chat_v18(messages):
                 route_index,
                 last_category,
             )
-            # Tek bir sağlayıcının yetki, kredi veya hız sınırı hatası
-            # diğer canlı sağlayıcı rotalarını denemeyi engellemesin.
-            if response.status_code in (401, 402, 403, 429):
+            # HTTP 402 from the HF router is a billing/credit gate for this
+            # account. Retrying every discovered model creates delay without
+            # restoring quota, so stop immediately and let configured non-HF
+            # fallbacks (when available) take over.
+            if response.status_code == 402:
+                raise TDModelCallError(402, "hf_credits_or_billing_required", allow_basic_fallback=False)
+            if response.status_code in (401, 403, 429):
                 continue
             continue
 
@@ -16268,3 +16302,112 @@ async def td_v35_mobile_studio_ux(request: Request, call_next):
 
 # V36 overlay, composer stacking, and mobile navigation repair
 TD_UI_BUILD_V36 = "v36-overlay-navigation-keyboard-repair"
+
+
+# =============================================================================
+# TEKDEN AI V39 — MOBILE SPEED, HISTORY AND STUDIO NAVIGATION
+# This additive middleware only decorates the three authenticated studio pages.
+# Session and entitlement checks remain inside the original server routes.
+# =============================================================================
+
+@app.middleware("http")
+async def td_v39_studio_return_control(request: Request, call_next):
+    response = await call_next(request)
+    studio_paths = {"/pro-studio", "/video-studio", "/plus-workspace", "/plus"}
+    if request.method not in ("GET", "HEAD") or request.url.path not in studio_paths:
+        return response
+    if response.status_code != 200 or "text/html" not in response.headers.get("content-type", ""):
+        return response
+
+    body = getattr(response, "body", None)
+    if body is None:
+        iterator = getattr(response, "body_iterator", None)
+        if iterator is None:
+            return response
+        chunks = []
+        async for chunk in iterator:
+            chunks.append(chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8"))
+        body = b"".join(chunks)
+    charset = getattr(response, "charset", None) or "utf-8"
+    html = body.decode(charset, errors="replace") if isinstance(body, bytes) else str(body)
+    if "id=\"tdV39BackToChat\"" not in html:
+        css = r'''<style id="td-v39-studio-return-style">
+#tdV39BackToChat{position:fixed;top:calc(env(safe-area-inset-top,0px) + 10px);left:12px;z-index:2147483000;display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:42px;padding:9px 14px;border:1px solid #cfe1f6;border-radius:13px;background:rgba(255,255,255,.97);color:#14549a;font:700 13px/1.2 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;box-shadow:0 7px 24px rgba(20,55,95,.16);cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
+#tdV39BackToChat:active{transform:translateY(1px)}
+@media(max-width:720px){#tdV39BackToChat{min-height:44px;padding:10px 13px;border-radius:14px;font-size:13px}}
+</style>'''
+        js = r'''<button id="tdV39BackToChat" type="button" aria-label="Sohbete dön" title="Sohbete dön">← Sohbete dön</button>
+<script id="td-v39-studio-return-script">
+(function(){const b=document.getElementById('tdV39BackToChat');if(!b)return;b.addEventListener('click',function(){let cameFromChat=false;try{const u=new URL(document.referrer);cameFromChat=u.origin===location.origin&&u.pathname==='/';}catch(_){}if(cameFromChat&&history.length>1){history.back();return;}location.replace('/');});})();
+</script>'''
+        if "</head>" in html:
+            html = html.replace("</head>", css + "</head>", 1)
+        else:
+            html = css + html
+        if "</body>" in html:
+            html = html.replace("</body>", js + "</body>", 1)
+        else:
+            html += js
+
+    headers = {k: v for k, v in response.headers.items()
+               if k.lower() not in ("content-length", "content-encoding", "transfer-encoding", "etag")}
+    return HTMLResponse(content=html, status_code=response.status_code, headers=headers,
+                        background=getattr(response, "background", None))
+
+
+@app.get("/api/version-v39", include_in_schema=False)
+def td_public_app_version_v39():
+    return {
+        "app": "Tekden AI",
+        "build": "2026-11-22-v39-mobile-speed-session-provider-repair",
+        "mobile_studio_preflight_removed": True,
+        "studio_return_control": True,
+        "mobile_chat_history_shortcut": True,
+        "composer_icon_only": True,
+        "plus_workspace_parallel_initial_load": True,
+        "hf_402_retries_stopped": True,
+        "server_side_plan_authorization_preserved": True,
+    }
+
+
+@app.middleware("http")
+async def td_v39_mobile_home_composer_style(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path != "/" or request.method not in ("GET", "HEAD"):
+        return response
+    if response.status_code != 200 or "text/html" not in response.headers.get("content-type", ""):
+        return response
+    body = getattr(response, "body", None)
+    if body is None:
+        iterator = getattr(response, "body_iterator", None)
+        if iterator is None:
+            return response
+        chunks = []
+        async for chunk in iterator:
+            chunks.append(chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8"))
+        body = b"".join(chunks)
+    charset = getattr(response, "charset", None) or "utf-8"
+    html = body.decode(charset, errors="replace") if isinstance(body, bytes) else str(body)
+    if "id=\"td-v39-mobile-composer-style\"" in html:
+        return response
+    style = r'''<style id="td-v39-mobile-composer-style">
+.toolleft{gap:7px;align-items:center}
+.toolleft .td-composer-icon{display:inline-flex;align-items:center;justify-content:center;width:40px;min-width:40px;height:40px;min-height:40px;padding:0!important;border-radius:12px;font-size:19px;line-height:1}
+#sendBtn{display:inline-flex;align-items:center;justify-content:center;width:48px;min-width:48px;height:44px;min-height:44px;padding:0!important;font-size:24px;line-height:1}
+@media(max-width:720px){
+ #mobileHistoryBtn{display:inline-flex!important;align-items:center;justify-content:center;width:42px;height:42px;min-width:42px;min-height:42px;padding:0!important;flex:0 0 42px;border-radius:12px;font-size:22px}
+ .sidebar.mobile-open{display:flex!important;flex-direction:column!important;overflow:hidden!important}
+ .sidebar.mobile-open .history{display:grid!important;flex:1 1 auto!important;min-height:120px!important;max-height:none!important;overflow-y:auto!important;overscroll-behavior:contain;-webkit-overflow-scrolling:touch!important}
+ .sidebar.mobile-open .sideutility,.sidebar.mobile-open .sideactions,.sidebar.mobile-open .userbar{flex:0 0 auto}
+ .toolleft .td-composer-icon{width:38px;min-width:38px;height:38px;min-height:38px}
+ #sendBtn{width:44px;min-width:44px;height:42px;min-height:42px;font-size:23px}
+}
+</style>'''
+    if "</head>" in html:
+        html = html.replace("</head>", style + "</head>", 1)
+    else:
+        html = style + html
+    headers = {k: v for k, v in response.headers.items()
+               if k.lower() not in ("content-length", "content-encoding", "transfer-encoding", "etag")}
+    return HTMLResponse(content=html, status_code=response.status_code, headers=headers,
+                        background=getattr(response, "background", None))
