@@ -1,13 +1,13 @@
 import os, re, json, time, hmac, hashlib, secrets, base64, threading, io, zipfile
 import urllib.parse
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from urllib.parse import quote
 import requests
 import psycopg
 from psycopg.rows import dict_row
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from html import escape as html_escape
 
@@ -625,12 +625,35 @@ def verify_password(password: str, stored: str) -> bool:
     except Exception:
         return False
 
+_CURRENT_USER_CACHE = {}
+_CURRENT_USER_CACHE_LOCK = threading.Lock()
+_CURRENT_USER_CACHE_TTL = 3.0
+
 def current_user(request: Request):
+    # Signature and expiry are checked on every request; only the corresponding
+    # database row is briefly cached to reduce repeated lookups across studio navigation.
     uid = read_session(request)
     if not uid:
         return None
+    now = time.monotonic()
+    with _CURRENT_USER_CACHE_LOCK:
+        cached = _CURRENT_USER_CACHE.get(uid)
+        if cached and cached[0] > now:
+            return dict(cached[1])
+        if cached:
+            _CURRENT_USER_CACHE.pop(uid, None)
     with db() as conn:
-        return conn.execute("SELECT id, username, plan FROM users WHERE id=%s", (uid,)).fetchone()
+        row = conn.execute("SELECT id, username, plan FROM users WHERE id=%s", (uid,)).fetchone()
+    if row:
+        safe_row = dict(row)
+        with _CURRENT_USER_CACHE_LOCK:
+            if len(_CURRENT_USER_CACHE) > 1024:
+                expired = [key for key, value in _CURRENT_USER_CACHE.items() if value[0] <= now]
+                for key in expired[:512]: _CURRENT_USER_CACHE.pop(key, None)
+                if len(_CURRENT_USER_CACHE) > 1024: _CURRENT_USER_CACHE.clear()
+            _CURRENT_USER_CACHE[uid] = (now + _CURRENT_USER_CACHE_TTL, safe_row)
+        return dict(safe_row)
+    return None
 
 def is_owner_account(user: dict | None) -> bool:
     """Only the provisioned owner account can enter the separate management area."""
@@ -697,10 +720,13 @@ async def enforce_site_access(request: Request, call_next):
 
 
 def web_search(query: str):
-    """Search the web with deeper results and a resilient fallback chain."""
+    """Search the web with a resilient fallback chain and a strict total latency budget."""
     query = query.strip()
     if not query:
         return []
+    search_deadline = time.monotonic() + 8.0
+    def remaining(default=3.0):
+        return max(0.5, min(float(default), search_deadline - time.monotonic()))
     if TAVILY_API_KEY:
         try:
             r = requests.post(
@@ -708,7 +734,7 @@ def web_search(query: str):
                 json={"api_key": TAVILY_API_KEY, "query": query, "search_depth": "advanced",
                       "max_results": 8, "include_answer": False, "include_raw_content": False,
                       "topic": "general"},
-                timeout=25,
+                timeout=(2, remaining(4)),
             )
             r.raise_for_status()
             data = r.json()
@@ -724,8 +750,12 @@ def web_search(query: str):
             pass
     try:
         from ddgs import DDGS
-        with DDGS() as ddgs:
-            raw = list(ddgs.text(query, max_results=8, safesearch="moderate"))
+        try:
+            ddgs_context = DDGS(timeout=remaining(4))
+        except TypeError:
+            ddgs_context = DDGS()
+        with ddgs_context as ddgs:
+            raw = list(ddgs.text(query, max_results=6, safesearch="moderate"))
         results = []
         for x in raw:
             url = x.get("href", x.get("url", ""))
@@ -737,6 +767,7 @@ def web_search(query: str):
     except Exception:
         pass
     try:
+        if time.monotonic() >= search_deadline: return []
         from html.parser import HTMLParser
         from urllib.parse import urlparse, parse_qs, unquote
         class DDGParser(HTMLParser):
@@ -757,7 +788,7 @@ def web_search(query: str):
                 elif self.current is not None and self.capture == "snippet" and tag == "div":
                     self.capture=None
         response=requests.get("https://html.duckduckgo.com/html/", params={"q":query},
-                              headers={"User-Agent":"Mozilla/5.0 (compatible; TekdenAI/1.0)"}, timeout=18)
+                              headers={"User-Agent":"Mozilla/5.0 (compatible; TekdenAI/1.0)"}, timeout=(2, remaining(3)))
         response.raise_for_status(); parser=DDGParser(); parser.feed(response.text)
         cleaned=[]
         for item in parser.items:
@@ -773,6 +804,7 @@ def web_search(query: str):
     except Exception:
         pass
     # Last-resort HTML search fallback; no extra Python package or API key required.
+    if time.monotonic() >= search_deadline: return []
     try:
         from html.parser import HTMLParser
         class BingParser(HTMLParser):
@@ -799,7 +831,7 @@ def web_search(query: str):
                 elif tag=="h2": self.capture=None
                 elif tag=="p": self.capture=None
         response=requests.get("https://www.bing.com/search",params={"q":query,"count":8},
-                              headers={"User-Agent":"Mozilla/5.0 (compatible; TekdenAI/1.0)"},timeout=18)
+                              headers={"User-Agent":"Mozilla/5.0 (compatible; TekdenAI/1.0)"},timeout=(2, remaining(3)))
         response.raise_for_status(); parser=BingParser(); parser.feed(response.text)
         return [{"title":x["title"].strip(),"url":x["url"],"snippet":x["snippet"].strip()}
                 for x in parser.items[:8]]
@@ -807,18 +839,34 @@ def web_search(query: str):
         return []
 
 def pro_web_search(query: str):
-    """Broader Pro research: search several complementary query angles and deduplicate sources."""
-    queries = [query.strip(), query.strip() + " official documentation primary sources", query.strip() + " recent analysis data"]
+    """Search two complementary angles in parallel; return useful partial results quickly."""
+    base = query.strip()
+    queries = [base, base + " official source documentation"]
+    pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="td-search")
+    futures = [pool.submit(web_search, q) for q in queries]
     combined, seen = [], set()
-    for q in queries:
-        for item in web_search(q):
-            url = item.get("url", "")
-            if url and url not in seen:
-                seen.add(url)
-                combined.append(item)
-            if len(combined) >= 18:
-                return combined
-    return combined
+    try:
+        for future in as_completed(futures, timeout=8):
+            try:
+                results = future.result()
+            except Exception:
+                continue
+            for item in results or []:
+                url = item.get("url", "")
+                if url and url not in seen:
+                    seen.add(url)
+                    combined.append(item)
+                if len(combined) >= 10:
+                    break
+            if len(combined) >= 10:
+                break
+    except FuturesTimeoutError:
+        pass
+    finally:
+        # Requests have their own bounded network timeouts; do not hold the chat
+        # response open while an unnecessary secondary query finishes.
+        pool.shutdown(wait=False, cancel_futures=True)
+    return combined[:10]
 
 def should_search(text: str) -> bool:
     """Search automatically for fresh, verifiable or niche facts; avoid searching every basic concept question."""
@@ -833,10 +881,29 @@ def should_search(text: str) -> bool:
         "internette ara", "web'de ara", "webde ara", "web ara", "web araması", "internetten bul",
         "kaynak göster", "kaynakları göster", "kaynaklarla cevapla", "kaynaklarla araştır",
         "araştır", "derin araştır", "detaylı araştır", "güncel bilgi", "güncel veriler",
-        "doğrula", "teyit et", "bul ve listele",
+        "doğrula", "teyit et", "bul ve listele", "gerçek mi", "doğru mu", "emin misin",
+        "kaynağı var mı", "son durum", "en son gelişme", "mevcut durumda", "hala geçerli mi",
+        "şu anda kim", "kim yönetiyor", "hangi sürüm", "hangi model", "ne zaman çıkacak",
         "search the web", "look up", "latest", "current", "today", "breaking news"
     )
     if any(x in t for x in explicit):
+        return True
+    # A question about a changing product/service/person is more likely to benefit
+    # from retrieval than a stable how-to or a basic concept explanation.
+    changing_fact_terms = (
+        "destekleniyor mu", "hala satılıyor mu", "kaldırıldı mı",
+        "çalışıyor mu", "aktif mi", "yayında mı", "kapandı mı", "ücretsiz mi",
+        "güncelleme geldi mi", "son sürüm", "yeni özellik", "fiyat listesi",
+        "rezervasyon", "sefer saatleri", "açılış saati", "bilet fiyatı",
+        "karşılaştır", "kıyasla", "hangisi daha iyi", "hangisini almalıyım",
+        "en iyi", "önerir misin", "tavsiye eder misin", "öneri verir misin",
+        "kullanıcı yorumları", "ürün yorumları", "incelemesi", "fiyat performans",
+        "kutu içeriği", "kutusu içeriği", "kutunun içeriği", "kutuda ne var",
+        "kutusunda ne var", "ödül havuzu", "hangi oyuncular var", "hangi kartlar var",
+        "oyun içi etkinlik", "etkinlik ödülleri",
+        "yakınımda", "yakınlarda", "gezilecek yer", "nerede yenir", "nerede oynanır"
+    )
+    if any(x in t for x in changing_fact_terms):
         return True
     time_sensitive = (
         "bugün", "şu an", "şimdi", "son dakika", "en son", "en yeni", "en güncel", "yeni model", "son model", "son gelişme", "güncel", "bu hafta", "bu ay",
@@ -849,7 +916,7 @@ def should_search(text: str) -> bool:
     if any(x in t for x in time_sensitive):
         return True
     # Current facts about named people, companies, products, services or releases usually need verification.
-    if re.search(r"\b(kimdir|kim şu anda|ceo'su kim|sahibi kim|nerede bulunuyor|hangi şirkette)\b", t):
+    if re.search(r"\b(kimdir|kim şu anda|ceo'su kim|sahibi kim|nerede bulunuyor|hangi şirkette|who is|who currently)\b", t):
         return True
     if re.search(r"\b(versiyon|sürüm|güncelleme|destekleniyor mu|kapatıldı mı|yasaklandı mı|erişim engeli)\b", t):
         return True
@@ -858,13 +925,23 @@ def should_search(text: str) -> bool:
         return True
     return False
 
-def call_ollama(messages, model=None):
+def call_ollama(messages, model=None, think=None):
+    """Non-streaming helper used by background tools; chat itself can stream."""
     if not OLLAMA_API_KEY:
         raise RuntimeError("OLLAMA_API_KEY eksik. Render Environment bölümüne Ollama Cloud API anahtarını ekle.")
+    payload = {
+        "model": model or OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False,
+        # Keep the provider's model warm between nearby requests where supported.
+        "keep_alive": "10m",
+    }
+    if think in ("low", "medium", "high"):
+        payload["think"] = think
     r = requests.post("https://ollama.com/api/chat",
         headers={"Authorization": f"Bearer {OLLAMA_API_KEY}", "Content-Type": "application/json"},
-        json={"model": model or OLLAMA_MODEL, "messages": messages, "stream": False},
-        timeout=120)
+        json=payload,
+        timeout=(10, 180 if think == "high" else 120))
     if not r.ok:
         raise RuntimeError(f"Ollama API hatası ({r.status_code}): {r.text[:500]}")
     data = r.json()
@@ -879,6 +956,8 @@ class ChatBody(BaseModel):
     chat_id: str | None = None
     guest_history: list[dict] = Field(default_factory=list)
     force_search: bool = False
+    stream: bool = False
+    deep_think: bool = False
     # Temporary style-only hint; raw camera frames and heart-rate values are never sent here.
     focus_state: str = Field(default="neutral", max_length=20)
     sensor_context: str = Field(default="none", max_length=40)
@@ -1369,10 +1448,13 @@ def database_health():
 
 @app.get("/api/me")
 def me(request: Request):
+    # Do not convert transient database faults into {user: null}; doing so makes
+    # the client erase a valid signed-in state and appear to log the member out.
     try:
         user = current_user(request)
-    except Exception:
-        user = None
+    except Exception as exc:
+        print("[AUTH][ME] Session lookup temporarily unavailable:", type(exc).__name__)
+        raise HTTPException(503, "Hesap bilgisi geçici olarak doğrulanamıyor. Giriş oturumun silinmedi; tekrar dene.")
     if user:
         user["is_owner"] = is_owner_account(user)
         if user["is_owner"]:
@@ -1604,6 +1686,263 @@ def epistemic_audit(user_question: str, answer: str, sources: list, model: str |
     return call_ollama(audit_messages, model=model).strip()
 
 
+def _ndjson_event(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+
+def _td_stream_ndjson_event(payload: dict) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+
+def _td_stream_ollama_response(response):
+    """Yield final-content deltas from an Ollama NDJSON stream; omit hidden thinking."""
+    yielded = False
+    try:
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            if isinstance(raw_line, bytes):
+                raw_line = raw_line.decode("utf-8", errors="replace")
+            try:
+                chunk = json.loads(raw_line)
+            except (TypeError, ValueError):
+                continue
+            if chunk.get("error"):
+                raise RuntimeError(str(chunk["error"])[:260])
+            message = chunk.get("message") or {}
+            piece = message.get("content") or ""
+            if piece:
+                yielded = True
+                yield piece
+            if chunk.get("done"):
+                break
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+    if not yielded:
+        raise RuntimeError("Model akışlı yanıt döndürmedi.")
+
+
+def _td_stream_openai_response(response):
+    """Yield OpenAI-compatible SSE content deltas (Groq/HF-compatible format)."""
+    yielded = False
+    try:
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            if isinstance(raw_line, bytes):
+                raw_line = raw_line.decode("utf-8", errors="replace")
+            line = str(raw_line).strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except (TypeError, ValueError):
+                continue
+            choices = chunk.get("choices") or []
+            delta = choices[0].get("delta", {}) if choices else {}
+            piece = delta.get("content") if isinstance(delta, dict) else ""
+            if isinstance(piece, list):
+                piece = "".join(str(x.get("text") or "") for x in piece if isinstance(x, dict))
+            if piece:
+                yielded = True
+                yield str(piece)
+    finally:
+        try:
+            response.close()
+        except Exception:
+            pass
+    if not yielded:
+        raise RuntimeError("Sağlayıcı akışlı yanıt döndürmedi.")
+
+
+def _td_checked_stream_response(response, provider):
+    if response.status_code >= 400:
+        status = int(response.status_code)
+        try:
+            response.close()
+        except Exception:
+            pass
+        raise TDModelCallError(status if status in (400, 402, 404, 408, 422, 429, 504) else 503, provider + "_http_" + str(status))
+    return response
+
+
+def stream_ollama_chat_events(messages, model, think_effort, *, user=None, chat_id=None,
+                              user_message="", sources=None, use_search=False, search_failed=False):
+    """Provider-aware NDJSON stream with the product's existing recovery chain."""
+    answer_parts = []
+    provider_used = ""
+    selected_model = model or OLLAMA_MODEL
+    previous_think = getattr(_TD_MODEL_CONTEXT_V13, "think_effort", None)
+    _TD_MODEL_CONTEXT_V13.think_effort = "high" if think_effort == "high" else None
+
+    def emit_piece(piece):
+        answer_parts.append(piece)
+        return _td_stream_ndjson_event({"type": "delta", "content": piece})
+
+    try:
+        prepared = td_prepare_ollama_messages_v11(messages)
+        stream_complete = False
+        stream_error = None
+
+        # Fast provider first for ordinary chat; deep-thinking deliberately
+        # prefers a native reasoning model instead of this fast route.
+        effective_plan = ("plus" if user and is_owner_account(user) else normalize_plan_name((user or {}).get("plan", "free")))
+        if GROQ_API_KEY and think_effort != "high" and effective_plan == "free":
+            response = None
+            try:
+                response = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": "Bearer " + GROQ_API_KEY,
+                             "Content-Type": "application/json", "Accept": "text/event-stream"},
+                    json={"model": GROQ_MODEL, "messages": prepared,
+                          "max_tokens": 700, "stream": True},
+                    timeout=(5, 75), stream=True,
+                )
+                response = _td_checked_stream_response(response, "groq_stream")
+                iterator = _td_stream_openai_response(response)
+                for piece in iterator:
+                    provider_used = "groq_free_tier"
+                    yield emit_piece(piece)
+                stream_complete = bool(answer_parts)
+            except Exception as exc:
+                stream_error = exc
+                if answer_parts:
+                    raise
+                print("[Tekden AI] Groq akışlı yanıt kullanılamadı; yedek rotaya geçiliyor:", type(exc).__name__)
+                if response is not None:
+                    try: response.close()
+                    except Exception: pass
+
+        # Optional private Ollama endpoint, only when explicitly configured.
+        if not stream_complete and not answer_parts:
+            local_settings = td_local_ollama_settings_v15()
+            if local_settings:
+                response = None
+                try:
+                    local_model = td_local_model_name_v15(selected_model, local_settings.get("model", ""))
+                    headers = {"Content-Type": "application/json", "Accept": "application/x-ndjson"}
+                    if local_settings.get("token"):
+                        headers["Authorization"] = "Bearer " + local_settings["token"]
+                    payload = {"model": local_model, "messages": prepared, "stream": True, "keep_alive": "10m"}
+                    if think_effort == "high": payload["think"] = "high"
+                    response = requests.post(local_settings["base_url"] + "/api/chat", headers=headers,
+                                             json=payload, timeout=(4, 120), stream=True)
+                    response = _td_checked_stream_response(response, "private_ollama_stream")
+                    for piece in _td_stream_ollama_response(response):
+                        provider_used = "private_ollama"
+                        yield emit_piece(piece)
+                    stream_complete = bool(answer_parts)
+                except Exception as exc:
+                    stream_error = exc
+                    if answer_parts:
+                        raise
+                    print("[Tekden AI] Özel Ollama akışı kullanılamadı; bulut rotasına geçiliyor:", type(exc).__name__)
+                    if response is not None:
+                        try: response.close()
+                        except Exception: pass
+
+        # Native Ollama Cloud stream. Resolve model aliases using the same
+        # cached catalogue helper used by the non-streaming provider chain.
+        if not stream_complete and not answer_parts and OLLAMA_API_KEY:
+            try:
+                candidates = td_resolve_model_ids_v13(selected_model)
+            except Exception:
+                candidates = td_api_model_candidates_v13(selected_model)
+            last_cloud_error = None
+            for candidate_index, candidate in enumerate((candidates or [])[:2]):
+                response = None
+                try:
+                    payload = {"model": candidate, "messages": prepared, "stream": True, "keep_alive": "10m"}
+                    if think_effort == "high": payload["think"] = "high"
+                    response = requests.post(
+                        "https://ollama.com/api/chat",
+                        headers={"Authorization": "Bearer " + OLLAMA_API_KEY,
+                                 "Content-Type": "application/json", "Accept": "application/x-ndjson"},
+                        json=payload, timeout=(5, 150 if think_effort == "high" else 90), stream=True,
+                    )
+                    response = _td_checked_stream_response(response, "ollama_cloud_stream")
+                    for piece in _td_stream_ollama_response(response):
+                        provider_used = "ollama_cloud"
+                        yield emit_piece(piece)
+                    stream_complete = bool(answer_parts)
+                    if stream_complete:
+                        selected_model = candidate
+                        break
+                except Exception as exc:
+                    last_cloud_error = exc
+                    if answer_parts:
+                        raise
+                    if response is not None:
+                        try: response.close()
+                        except Exception: pass
+                    status = getattr(exc, "status_code", None)
+                    if status not in (400, 404, 422) or candidate_index >= 1:
+                        break
+            if not stream_complete and not answer_parts and last_cloud_error:
+                stream_error = last_cloud_error
+
+        # If streaming was not supported/available before the first token,
+        # preserve the original V19 -> HTTP 402/private Ollama/HF recovery chain.
+        if not stream_complete and not answer_parts:
+            try:
+                if think_effort == "high":
+                    _TD_MODEL_CONTEXT_V13.think_effort = None
+                answer = _TD_V19_CALL_OLLAMA_WITH_HF(messages, selected_model)
+                answer = str(answer or "").strip()
+                if answer:
+                    provider_used = "existing_fallback_chain"
+                    yield emit_piece(answer)
+                    stream_complete = True
+            except Exception as fallback_error:
+                detail = str(fallback_error)[:350] or "Yanıt sağlayıcısı geçici olarak kullanılamıyor."
+                raise RuntimeError(detail)
+
+        answer = "".join(answer_parts).strip()
+        if not answer:
+            raise RuntimeError("Model boş yanıt döndürdü. Lütfen tekrar dene.")
+
+        saved = False
+        save_error = None
+        if user and chat_id:
+            try:
+                with db() as save_conn:
+                    save_conn.execute("INSERT INTO messages(chat_id,role,content) VALUES(%s,'user',%s)", (chat_id, user_message))
+                    save_conn.execute("INSERT INTO messages(chat_id,role,content) VALUES(%s,'assistant',%s)", (chat_id, answer))
+                    save_conn.execute(
+                        "UPDATE chats SET updated_at=NOW(), title=CASE WHEN title='Yeni sohbet' THEN %s ELSE title END WHERE id=%s AND user_id=%s",
+                        (user_message[:70] or "Yeni sohbet", chat_id, user["id"]),
+                    )
+                    verify = save_conn.execute(
+                        "SELECT COUNT(*) AS n FROM messages WHERE chat_id=%s AND ((role='user' AND content=%s) OR (role='assistant' AND content=%s))",
+                        (chat_id, user_message, answer),
+                    ).fetchone()
+                    if not verify or int(verify.get("n", 0)) < 2:
+                        raise RuntimeError("Mesaj kayıt doğrulaması başarısız.")
+                saved = True
+            except Exception as exc:
+                save_error = "Yanıt oluşturuldu ancak sohbet veritabanına kaydedilemedi."
+                print("[Tekden AI] Akışlı sohbet kaydı başarısız:", type(exc).__name__)
+        yield _td_stream_ndjson_event({
+            "type": "done", "answer": answer, "chat_id": chat_id,
+            "sources": (sources or [])[:10], "saved": saved,
+            "save_status": "saved" if saved else ("database_write_failed" if user else "guest_not_saved"),
+            "save_error": save_error, "search_attempted": bool(use_search),
+            "search_failed": bool(search_failed), "model": selected_model,
+            "provider": provider_used, "deep_think": think_effort == "high",
+            "stream_complete": bool(stream_complete),
+        })
+    except Exception as exc:
+        yield _td_stream_ndjson_event({"type": "error", "detail": str(exc)[:400] or "Yanıt oluşturulamadı."})
+    finally:
+        _TD_MODEL_CONTEXT_V13.think_effort = previous_think
+
+
 @app.post("/api/chat")
 def chat(body: ChatBody, request: Request):
     user_message = body.message.strip()
@@ -1660,6 +1999,11 @@ Yazım ve anlatım kuralları:
 - Web kaynakları sağlandıysa yanıtını bu kaynaklara dayandır, kaynakların desteklemediği iddiaları kesin sunma ve yanıt sonunda kaynak URL'lerini belirt.
 """
     system += "\n\n" + plan_rules
+    if body.deep_think:
+        system += ("\n\nDerin düşünme tercihi etkin: karmaşık noktaları dikkatlice değerlendir, "
+                   "varsayımları ve alternatif açıklamaları kontrol et, gerekiyorsa hesapları/kanıtları "
+                   "doğrula. İç düşünme izini veya gizli akıl yürütme notlarını gösterme; kullanıcıya "
+                   "yalnızca iyi yapılandırılmış, denetlenebilir nihai yanıtı ve gerekli kısa gerekçeyi sun.")
     system += "\n\nYanıt kalitesi ve akıl yürütme standardı:\n- Önce kullanıcının asıl amacını ve konuşmadaki bağlamı belirle; önceki kararları ve kısıtları koru.\n- Basit soruya doğrudan yanıt ver. Karmaşık görevlerde çözümü mantıklı adımlara ayır ve uygulanabilir bir sonuç sun.\n- Eksik bilgi sonucu ciddi biçimde değiştirecekse yalnızca en gerekli netleştirme sorusunu sor; aksi durumda makul varsayımı açıkça belirterek ilerle.\n- Bilgi, tahmin, öneri ve varsayımı birbirinden ayır. Emin olmadığın ayrıntıları kesinmiş gibi sunma; tarih, fiyat, sürüm ve güncel durum gibi değişken bilgileri gerektiğinde doğrula.\n- Kod ve teknik destek taleplerinde önce mevcut yapıyı ve hata nedenini incele; çalışan özellikleri kaldırma, gizli anahtar isteme, test edilmemiş işlemi test edilmiş gibi anlatma. Değişikliklerden sonra ilgili kontrolleri belirt.\n- Kullanıcı bir proje üzerinde çalışıyorsa yalnızca genel tavsiye vermek yerine mümkün olduğunda doğrudan kullanılabilir çıktı, kontrol listesi veya sonraki somut adımı üret.\n- Gereksiz tekrar, uzun giriş ve yapay övgü kullanma. Kullanıcının dilinde doğal, anlaşılır ve tutarlı yanıt ver."
     # Zihin Atölyesi odak uyarlaması yalnızca Plus planında etkinleşir.
     focus_state = (body.focus_state or "neutral").strip().lower() if plan == "plus" else "neutral"
@@ -1761,7 +2105,7 @@ Yazım ve anlatım kuralları:
                         (chat_id, user["id"], title),
                     )
                 history = read_conn.execute(
-                    "SELECT role, content FROM messages WHERE chat_id=%s ORDER BY id DESC LIMIT 40",
+                    f"SELECT role, content FROM messages WHERE chat_id=%s ORDER BY id DESC LIMIT {40 if body.deep_think else 22}",
                     (chat_id,),
                 ).fetchall()
             history.reverse()
@@ -1777,10 +2121,23 @@ Yazım ve anlatım kuralları:
         msgs.extend({"role": x["role"], "content": x["content"]} for x in history)
         msgs.append({"role": "user", "content": user_message})
 
+        if body.stream:
+            think_effort = "high" if body.deep_think else "low"
+            selected_model = OLLAMA_PRO_MODEL if plan in ("pro", "plus") else OLLAMA_MODEL
+            return StreamingResponse(
+                stream_ollama_chat_events(
+                    msgs, selected_model, think_effort, user=user, chat_id=chat_id,
+                    user_message=user_message, sources=sources, use_search=use_search,
+                    search_failed=search_failed,
+                ),
+                media_type="application/x-ndjson",
+                headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"},
+            )
+
         # Generate the answer without holding any database connection.
         if plan in ("pro", "plus"):
             try:
-                answer = call_ollama(msgs, OLLAMA_PRO_MODEL)
+                answer = call_ollama(msgs, OLLAMA_PRO_MODEL, think="high" if body.deep_think else None)
             except RuntimeError as model_exc:
                 if isinstance(model_exc, TDModelCallError) and not model_exc.allow_basic_fallback:
                     # Authentication, rate-limit, connection and timeout errors
@@ -1788,12 +2145,12 @@ Yazım ve anlatım kuralları:
                     # with the base model only lengthens the API request.
                     raise
                 print("[Tekden AI] Pro model başarısız, temel modele geçiliyor:", type(model_exc).__name__)
-                answer = call_ollama(msgs, OLLAMA_MODEL)
+                answer = call_ollama(msgs, OLLAMA_MODEL, think="high" if body.deep_think else None)
         else:
-            answer = call_ollama(msgs, OLLAMA_MODEL)
+            answer = call_ollama(msgs, OLLAMA_MODEL, think="high" if body.deep_think else None)
 
         audit_info = {"performed": False, "mode": "not_needed"}
-        if plan == "plus" and should_run_epistemic_audit(user_message, sources, body.force_search):
+        if plan == "plus" and not body.stream and should_run_epistemic_audit(user_message, sources, body.force_search):
             try:
                 _TD_MODEL_CONTEXT_V13.audit_mode = True
                 answer = epistemic_audit(
@@ -1864,7 +2221,18 @@ Yazım ve anlatım kuralları:
         if isinstance(item, dict) and item.get("role") in ("user","assistant") and isinstance(item.get("content"), str):
             msgs.append({"role": item["role"], "content": item["content"][:12000]})
     msgs.append({"role":"user","content":user_message})
-    answer = call_ollama(msgs)
+    if body.stream:
+        think_effort = "high" if body.deep_think else "low"
+        return StreamingResponse(
+            stream_ollama_chat_events(
+                msgs, OLLAMA_MODEL, think_effort, user=None, chat_id=None,
+                user_message=user_message, sources=sources, use_search=use_search,
+                search_failed=search_failed,
+            ),
+            media_type="application/x-ndjson",
+            headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"},
+        )
+    answer = call_ollama(msgs, think="high" if body.deep_think else None)
     audit_info = {"performed": False, "mode": "not_needed"}
     if plan == "plus" and should_run_epistemic_audit(user_message, sources, body.force_search):
         try:
@@ -7091,7 +7459,7 @@ HTML = r"""<!doctype html>
   <button class="secondary" id="mobileAdminBtn" type="button" data-mobile-action="admin" style="display:none"><span class="menuIcon">⚙</span>Yönetim</button>
 </div>
 <section class="messages" id="messages"><div class="welcome" id="welcome"><div class="td-welcome-brand" aria-label="Tekden AI"><img class="td-welcome-mark" src="/assets/tekden-ai-mark.png" alt="Tekden AI amblemi"><div class="td-welcome-name">Tekden <span>AI</span></div></div><h1>Tekden AI'ye Hoş Geldin <span class="blue">✦</span></h1><p>Size nasıl yardımcı olabilirim? İhtiyacınızı yazın; sohbet, araştırma ve üretim araçları hazır.</p><div class="welcomegrid"><button class="feature suggestion" data-kind="chat"><span class="ico">◉</span><span><b>Sohbet</b><small>Konuları açıkla, sorularını yanıtla ve adım adım ilerle.</small></span></button><button class="feature suggestion" data-kind="image"><span class="ico">▧</span><span><b>Görsel Oluştur</b><small>İstediğin sahneyi tarif et, görselini üret.</small></span></button><button class="feature suggestion" data-kind="file"><span class="ico">▤</span><span><b>Dosya Analizi</b><small>PDF, belge ve görsellerdeki içeriği incele.</small></span></button><button class="feature suggestion" data-kind="web"><span class="ico">⌕</span><span><b>Web Arama</b><small>Güncel bilgileri kaynaklarıyla araştır.</small></span></button><button class="feature suggestion" data-kind="app"><span class="ico">⌘</span><span><b>Uygulama Geliştir</b><small>Kod, site ve proje fikirleri üzerinde çalış.</small></span></button><button class="feature suggestion" data-kind="game"><span class="ico">♧</span><span><b>Oyun Tasarla</b><small>Free ile arcade oyna; Pro ile tarifinden özgün, oynanabilir oyun üret.</small></span></button><button class="feature songstudio" type="button" onclick="openSongStudio()"><span class="ico">🎤</span><span><b>Vokalli Şarkı Stüdyosu</b><small>Pro üyelerine özel: Tekden AI içinde vokalli şarkı üret.</small></span></button></div></div></section>
-<div class="composerwrap"><div class="composer"><textarea id="prompt" placeholder="Tekden AI'a mesaj yaz..."></textarea><div class="attachrow td-composer-actions"><button class="secondary td-composer-icon" id="attachBtn" type="button" title="Dosya veya görsel ekle" aria-label="Dosya veya görsel ekle">📎</button><input id="fileInput" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.docx" hidden><span class="attachname" id="fileName" hidden></span><button class="secondary td-composer-icon" id="imageBtn" type="button" title="Görsel oluştur" aria-label="Görsel oluştur">▧</button><button class="secondary td-composer-icon" id="dictationBtn" type="button" title="Konuşarak yaz" aria-label="Konuşarak yaz">🎙</button><button class="secondary td-composer-icon" id="voiceBtn" type="button" title="Sesli sohbet" aria-label="Sesli sohbet">🔊</button></div><div class="tools"><div class="toolleft"><button class="secondary" id="searchBtn" title="İnternette ara">⌕ Web ara</button><span class="status" id="status">Hazır</span></div><button id="sendBtn">Gönder ↑</button></div></div><div class="notice" style="text-align:center;margin-top:8px">Misafir sohbetleri bu tarayıcıda saklanır; hesap açarsan sohbet geçmişin hesabına kaydedilir.</div></div></main></div>
+<div class="composerwrap"><div class="composer"><textarea id="prompt" placeholder="Tekden AI'a mesaj yaz..."></textarea><div class="attachrow td-composer-actions"><button class="secondary td-composer-icon" id="attachBtn" type="button" title="Dosya veya görsel ekle" aria-label="Dosya veya görsel ekle">📎</button><input id="fileInput" type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.docx" hidden><span class="attachname" id="fileName" hidden></span><button class="secondary td-composer-icon" id="imageBtn" type="button" title="Görsel oluştur" aria-label="Görsel oluştur">▧</button><button class="secondary td-composer-icon" id="dictationBtn" type="button" title="Konuşarak yaz" aria-label="Konuşarak yaz">🎙</button><button class="secondary td-composer-icon" id="voiceBtn" type="button" title="Sesli sohbet" aria-label="Sesli sohbet">🔊</button></div><div class="tools"><div class="toolleft"><button class="secondary" id="searchBtn" title="Otomatik web araması açık; gerektiğinde kendiliğinden arar. Tıklarsan bu mesajda aramayı zorlar.">⌕ Web ara</button><button class="secondary" id="thinkBtn" type="button" aria-pressed="false" title="Daha kapsamlı analiz; daha uzun sürebilir" style="padding:8px 10px;font-size:12px">🧠 Derin düşün</button><span class="status" id="status">Hazır</span></div><button id="sendBtn">Gönder ↑</button></div></div><div class="notice" style="text-align:center;margin-top:8px">Misafir sohbetleri bu tarayıcıda saklanır; hesap açarsan sohbet geçmişin hesabına kaydedilir.</div></div></main></div>
 <div class="modalback" id="modalback"><div class="modal auth-modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="authDescription"><div class="auth-mark">✦</div><h2 id="modalTitle">Tekden AI hesabına giriş yap</h2><p class="notice" id="authDescription">Sohbet geçmişini saklamak ve kişisel çalışma alanına erişmek için giriş yap.</p><form id="authForm" autocomplete="on"><label class="auth-label" for="authUser">Kullanıcı adı</label><input id="authUser" name="username" placeholder="Kullanıcı adın" autocomplete="username" minlength="3" maxlength="32" required><label class="auth-label" for="authPass">Şifre</label><input id="authPass" name="password" type="password" placeholder="En az 8 karakter" autocomplete="current-password" minlength="8" maxlength="128" required><div class="auth-actions"><button id="authSubmit" type="submit">Giriş yap</button><button class="secondary" id="registerBtn" type="button">Yeni hesap oluştur</button></div></form><p id="authError" class="notice auth-error" role="status" aria-live="polite"></p><button class="secondary" id="closeModal" type="button" style="width:100%;margin-top:8px">Kapat</button><p class="auth-footnote">Hesap oluşturmak ücretsizdir. Şifreni kimseyle paylaşma.</p></div></div>
 <div class="modalback" id="profileBack"><div class="modal"><h2>Profilim</h2><p class="notice">Hesap bilgilerin ve üyelik durumun</p><div class="profilegrid"><div class="profileitem"><small>Kullanıcı adı</small><b id="profileUsername">Misafir</b></div><div class="profileitem"><small>Üyelik</small><b id="profilePlan">Free</b></div></div><div class="rightcard" style="margin:12px 0"><h3>Üyelik özellikleri</h3><p id="profileFeatures">Standart sohbet ve mevcut temel araçlar.</p></div><button class="secondary" id="profileArchiveBtn" style="width:100%;margin-bottom:8px">Arşivlenmiş sohbetler</button><button id="profilePlansBtn" style="width:100%;margin-bottom:8px">Planları ve Plus avantajlarını gör</button><button class="secondary" id="profileLoginBtn" style="width:100%;margin-bottom:8px">Giriş yap / Kayıt ol</button><button class="secondary" id="profileLogoutBtn" style="width:100%;margin-bottom:8px;display:none">Çıkış yap</button><button class="secondary" id="closeProfile" style="width:100%">Kapat</button></div></div>
 <div class="modalback" id="plansBack"><div class="modal"><h2>Tekden AI planları</h2><div class="plans"><div class="plan"><strong>Free · 0 TL/ay</strong><p>Günlük sohbet, sohbet geçmişi, web araması, görsel oluşturma, desteklenen dosya türlerini inceleme ve hazır Neon Highway arcade oyununu oynama. Harici servis limitleri geçerlidir.</p><button class="secondary" disabled>Ücretsiz plan</button></div><div class="plan"><strong>✦ Plus · 400 TL/ay</strong><p><b>En kapsamlı plan:</b> Pro özelliklerinin tamamı + Zihin Atölyesi (kalıcı proje hafızası, doğruluk denetimi, odak uyarlaması, nüanslı çeviri, dijital ikiz taslakları ve fikir mimarı), 300 yeni Plus iş akışı ve Free/Pro/Plus araç kütüphanesi. Gerçek kullanım harici servislerin ve ödeme/yetki yapılandırmasının durumuna bağlıdır.</p><button id="buyPlus" type="button">Plus'a geç · 400 TL/ay</button><p class="notice">Satın alma yalnızca Stripe Price ID ve webhook yapılandırıldığında etkinleşir.</p></div><div class="plan"><strong>✦ Pro · 100 TL/ay</strong><p><b>Gelişmiş Pro modeli</b> (OLLAMA_PRO_MODEL yapılandırılmışsa), çok kaynaklı genişletilmiş web araştırması, karmaşık görevlerde derin analiz, uzun proje bağlamı, belge değerlendirme ve tarifinden kod göstermeden farklı türlerde gelişmiş, doğrudan oynanabilir oyun üretimi; tam ekran, HTML indirme ve vokalli şarkı stüdyosu (müzik motoru yapılandırıldığında). Free plan hazır arcade oyununu oynayabilir. Görsel/web sağlayıcılarının kendi limitleri devam eder; sonuçlar kullanılan model ve servislerin kapasitesine bağlıdır.</p><button id="buyPro">Pro'ya geç</button><p id="proAlreadyActive" class="notice" style="display:none;color:#087b4d;font-weight:700">Pro üyeliğin aktif. Yeniden satın alman gerekmiyor.</p></div></div><p class="notice">Ödeme Stripe Checkout üzerinden alınır. Stripe hesabında Plus için aylık fiyat oluşturup STRIPE_PRICE_ID_PLUS değerini Render ortam değişkenlerine eklemen gerekir.</p><button class="secondary" id="closePlans" style="width:100%">Kapat</button></div></div>
@@ -7108,7 +7476,7 @@ HTML = r"""<!doctype html>
 </div><p class="tdSmall" style="margin-bottom:0">Kısayollar: Ctrl/⌘ + K araç kutusu · Ctrl/⌘ + Enter gönder · Esc kapat · Ctrl/⌘ + Shift + N yeni sohbet.</p></div></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs" type="module"></script><script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.8.0/mammoth.browser.min.js"></script><script src="https://js.puter.com/v2/"></script>
 <script>
-const $=id=>document.getElementById(id);let user=null,chatId=null,guestHistory=loadGuestHistory(),forceSearch=false,selectedFile=null,showArchived=false;
+const $=id=>document.getElementById(id);function loadUserHint(){try{const v=JSON.parse(localStorage.getItem('td_user_hint')||'null');if(!v||typeof v.username!=='string'||!v.username)return null;return {id:Number(v.id)||null,username:v.username.slice(0,32),plan:['free','pro','plus'].includes(String(v.plan||'').toLowerCase())?String(v.plan).toLowerCase():'free',is_owner:!!v.is_owner}}catch{return null}}let user=loadUserHint(),chatId=null,guestHistory=loadGuestHistory(),forceSearch=false,deepThink=false,selectedFile=null,showArchived=false;function saveUserHint(){try{if(user)localStorage.setItem('td_user_hint',JSON.stringify({id:user.id||null,username:user.username,plan:user.plan||'free',is_owner:!!user.is_owner}));else localStorage.removeItem('td_user_hint')}catch{}}
 function loadGuestHistory(){try{const v=JSON.parse(localStorage.getItem('tekden_guest_history')||'[]');return Array.isArray(v)?v.filter(x=>x&&['user','assistant'].includes(x.role)&&typeof x.content==='string').slice(-32):[]}catch{return []}}
 function saveGuestHistory(){try{localStorage.setItem('tekden_guest_history',JSON.stringify(guestHistory.slice(-32)))}catch{}}
 function restoreGuestHistory(){if(!guestHistory.length)return;$('messages').innerHTML='';for(const m of guestHistory)bubble(m.role,m.content)}
@@ -7162,23 +7530,60 @@ async function api(url,opts={}){
   if(Array.isArray(detail))detail=detail.map(x=>x.msg||JSON.stringify(x)).join(' · ');
   else if(typeof detail==='object')detail=JSON.stringify(detail);
   const code=data.error_code?' Destek kodu: '+data.error_code+'.':'';
-  throw new Error(String(detail)+code+' (HTTP '+response.status+', '+requestUrl+')');
+  const apiError=new Error(String(detail)+code+' (HTTP '+response.status+', '+requestUrl+')');apiError.status=response.status;throw apiError;
  }
  return data;
 }
-async function refreshMe(){
- try{
-  const d=await api('/api/me');
-  user=d.user;
-  renderUser(); // Show account state as soon as the small profile response arrives.
-  if(user){
-   // Load chat history after the interface is already interactive.
-   window.loadChats().catch(e=>console.warn('Sohbet geçmişi yüklenemedi:',e));
-  }else restoreGuestHistory();
- }catch(e){
-  console.warn('Oturum kontrolü başarısız:',e);
-  user=null;renderUser();restoreGuestHistory();
+async function apiStream(url,opts={},onChunk=()=>{}){
+ const response=await fetch(url,{credentials:'same-origin',...opts,headers:{'Content-Type':'application/json',...(opts.headers||{})}});
+ if(!response.ok){let detail='HTTP '+response.status;try{const problem=await response.json();detail=problem.detail||problem.message||detail}catch{}const err=new Error(detail);err.status=response.status;throw err}
+ if(!response.body||!response.body.getReader){const err=new Error('Bu tarayıcı yanıt akışını desteklemiyor.');err.streamUnsupported=true;throw err}
+ const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='',answer='',finalEvent=null;
+ const consume=line=>{if(!line.trim())return;let event;try{event=JSON.parse(line)}catch{return}
+  if(event.type==='delta'){answer+=event.content||'';onChunk(answer)}
+  else if(event.type==='done')finalEvent=event;
+  else if(event.type==='error'){const err=new Error(event.detail||'Model yanıtı tamamlayamadı.');err.serverStreamError=true;throw err;}
+ };
+ try{while(true){const part=await reader.read();if(part.done)break;buffer+=decoder.decode(part.value,{stream:true});const lines=buffer.split('\n');buffer=lines.pop()||'';for(const line of lines)consume(line)}buffer+=decoder.decode();if(buffer.trim())consume(buffer)}
+ catch(e){try{await reader.cancel()}catch{}throw e}
+ if(!finalEvent)throw new Error(answer?'Yanıt akışı tamamlanmadan bağlantı kesildi.':'Modelden yanıt alınamadı.');
+ return {...finalEvent,answer:finalEvent.answer||answer};
+}
+async function apiChatStream(url,opts={},onChunk=()=>{}){
+ // Detect legacy WebViews before sending the request; retrying after a request
+ // starts could generate and save the same answer twice.
+ let supportsResponseStream=false;try{const probe=new Response('');supportsResponseStream=!!(window.TextDecoder&&probe.body&&probe.body.getReader)}catch{}
+ if(!supportsResponseStream){
+  let body={};try{body=JSON.parse(opts.body||'{}')}catch{}
+  body.stream=false;
+  setStatus('Bu WebView akışlı yanıtı desteklemiyor; uyumlu moda geçiliyor…');
+  return await api(url,{...opts,body:JSON.stringify(body)});
  }
+ return await apiStream(url,opts,onChunk);
+}
+async function refreshMe(){
+ let lastError=null;
+ for(let attempt=0;attempt<3;attempt++){
+  try{
+   const d=await api('/api/me');
+   user=d.user||null;
+   saveUserHint();
+   renderUser();
+   if(user){window.loadChats().catch(e=>console.warn('Sohbet geçmişi yüklenemedi:',e));}
+   else restoreGuestHistory();
+   return user;
+  }catch(e){
+   lastError=e;
+   if(attempt<2)await new Promise(resolve=>setTimeout(resolve,350*(attempt+1)));
+  }
+ }
+ console.warn('Oturum kontrolü geçici olarak başarısız; mevcut hesap görünümü korunuyor:',lastError);
+ // Never convert a network/5xx/DB problem into a local logout. A confirmed
+ // {user:null} response above is the only path that clears the account UI.
+ renderUser();
+ if(!user)restoreGuestHistory();
+ setStatus('Hesap doğrulaması geçici olarak yavaş. Oturumun silinmedi; biraz sonra yeniden dene.');
+ return user;
 }
 function renderUser(){
  $('topAvatar').textContent=user?(user.username[0]||'U').toUpperCase():'?';
@@ -7288,10 +7693,10 @@ async function loadChats(){
   }
  }catch(e){
   if(sequence!==chatsLoadSequence)return;
-  const authFailure=/401|403|unauthori[sz]ed|oturum|giriş yap|login/i.test(String(e.message||''));
-  history.innerHTML='<div class="notice">'+(authFailure?'Oturum süresi dolmuş olabilir. Yeniden giriş yap.':'Sohbet geçmişi şu anda yüklenemedi.')+' <button class="secondary" id="retryChats">Tekrar dene</button></div>';
-  $('retryChats')?.addEventListener('click',()=>{if(authFailure){user=null;renderUser();showModal();}else loadChats();});
-  if(authFailure){user=null;renderUser();}
+  const authFailure=Number(e&&e.status)===401;
+  history.innerHTML='<div class="notice">'+(authFailure?'Oturum doğrulaması gerekiyor.':'Sohbet geçmişi şu anda yüklenemedi.')+' <button class="secondary" id="retryChats">Tekrar dene</button></div>';
+  $('retryChats')?.addEventListener('click',()=>{if(authFailure){refreshMe().then(()=>{if(!user){showModal();$('authError').textContent='Sohbet geçmişi için yeniden giriş yapmalısın.';}else loadChats();});}else loadChats();});
+  if(authFailure){refreshMe().then(()=>{if(!user){setStatus('Oturum doğrulanamadı; yeniden giriş yapabilirsin.');}});}
  }
 }
 
@@ -7393,11 +7798,10 @@ async function send(){
   if(file){const answer=await analyzeAttachment(text,file);bubble('assistant',answer);if(user){try{const saved=await api('/api/save-analysis',{method:'POST',body:JSON.stringify({question:text||'Ekli dosyayı analiz et.',answer,filename:file.name,chat_id:chatId})});if(saved.chat_id)chatId=saved.chat_id;loadChats()}catch(saveError){console.warn('Dosya analizi geçmişe kaydedilemedi',saveError)}}else {guestHistory.push({role:'user',content:(text||'Ekli dosyayı analiz et.')+' [Dosya: '+file.name+']'},{role:'assistant',content:answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}selectedFile=null;$('fileInput').value='';$('fileName').textContent='';$('fileName').hidden=true;setStatus('Dosya analizi tamamlandı');}
   else if(looksLikeGameRequest(text)){const game=await api('/api/game',{method:'POST',body:JSON.stringify({prompt:text})});gameBubble(game.html);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İsteğine göre oynanabilir bir oyun oluşturuldu.'});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Oyun hazır');}
   else if(looksLikeImageRequest(text)){await createAndShowImage(text);if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:'İstenen görsel oluşturuldu. İstek: '+text});guestHistory=guestHistory.slice(-32);saveGuestHistory()}setStatus('Görsel hazır');}
-  else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const d=await api('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})});if(d.chat_id)chatId=d.chat_id;bubble('assistant',d.answer,d.sources||[]);if(docIntent?.format==='docx'){await tdDownloadWord(d.answer,d.sources||[],docIntent.title)}else if(docIntent?.format==='pdf'){await tdDownloadPdf(d.answer,d.sources||[],docIntent.title)}else if(['txt','md','json','html','csv'].includes(docIntent?.format)){tdDownloadText(d.answer,docIntent.title,docIntent.format)}if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus(d.save_error||'UYARI: Bu mesaj Supabase’e kaydedilmedi.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else if(d.search_failed)setStatus('Web araması denendi ancak sağlayıcı sonuç döndürmedi. TAVILY_API_KEY ayarını ve arama sağlayıcısı erişimini kontrol et.');else setStatus('Tamamlandı');}
+  else {if(typeof window.tkRefreshSensorFocus==='function')window.tkRefreshSensorFocus();const streamNode=bubble('assistant','');const streamContent=streamNode.querySelector('.bubble-content');let streamPartial='';setStatus(deepThink?'Tekden AI isteğini daha kapsamlı değerlendiriyor…':'Tekden AI yanıtı hazırlıyor…');const d=await apiChatStream('/api/chat',{method:'POST',body:JSON.stringify({message:text,chat_id:chatId,guest_history:guestHistory,force_search:forceSearch,deep_think:deepThink,stream:true,focus_state:window.tkFocusState||'neutral',sensor_context:window.tkSensorContext||'none'})},value=>{streamPartial=value;streamContent.textContent=value;$('messages').scrollTop=$('messages').scrollHeight});streamContent.textContent=cleanAnswer(d.answer||streamPartial);if(d.sources?.length){const src=document.createElement('details');src.className='sources td-source-footer';const sm=document.createElement('summary');sm.textContent='Kaynakça · '+d.sources.length+' kaynak';src.appendChild(sm);const ol=document.createElement('ol');d.sources.slice(0,8).forEach(x=>{const li=document.createElement('li'),a=document.createElement('a');a.href=x.url;a.target='_blank';a.rel='noopener noreferrer';a.textContent=x.title||x.url;li.appendChild(a);ol.appendChild(li)});src.appendChild(ol);streamNode.appendChild(src)}if(d.chat_id)chatId=d.chat_id;if(docIntent?.format==='docx'){await tdDownloadWord(d.answer,d.sources||[],docIntent.title)}else if(docIntent?.format==='pdf'){await tdDownloadPdf(d.answer,d.sources||[],docIntent.title)}else if(['txt','md','json','html','csv'].includes(docIntent?.format)){tdDownloadText(d.answer,docIntent.title,docIntent.format)}if(!user){guestHistory.push({role:'user',content:text},{role:'assistant',content:d.answer});guestHistory=guestHistory.slice(-32);saveGuestHistory()}if(d.saved===false){setStatus(d.save_error||'UYARI: Bu mesaj Supabase’e kaydedilmedi.');console.error('Tekden AI chat save_status:',d.save_status||'guest-not-saved')}else if(user){try{await window.loadChats()}catch(historyError){console.warn('Sohbet geçmişi yenilenemedi:',historyError);setStatus('Yanıt hazır; sohbet geçmişi yenilenemedi. Sol menüden tekrar deneyebilirsin.')}}if(d.epistemic_check?.performed)setStatus('İkinci doğruluk denetimi tamamlandı'+(d.sources?.length?' · kaynaklar da incelendi':' · mantık ve belirsizlikler kontrol edildi'));else if(d.epistemic_check?.mode==='audit_unavailable')setStatus('Yanıt hazır; ikinci doğruluk denetimi yapılamadı');else if(d.saved===true)setStatus('Mesaj Supabase’e kaydedildi');else if(d.sources?.length)setStatus('Kaynaklarla yanıtlandı');else if(d.search_failed)setStatus('Web araması denendi ancak sağlayıcı sonuç döndürmedi. TAVILY_API_KEY ayarını ve arama sağlayıcısı erişimini kontrol et.');else setStatus('Tamamlandı');}
   if($('prompt').value.trim()===text.trim())$('prompt').value='';
  }catch(e){
-  // Failed requests are not successful conversation turns.
-  // Keep their text only in the retry/edit controls below.
+  // A broken stream can still leave useful partial text visible; retain it.
   if(outgoingBubble&&outgoingBubble.parentNode)outgoingBubble.remove();
   const errorNode=bubble('assistant',(file?'Dosya analiz edilemedi: ':looksLikeGameRequest(text)?'Oyun oluşturulamadı: ':looksLikeImageRequest(text)?'Görsel oluşturulamadı: ':'Hata: ')+e.message);
   if(text||file){
@@ -7490,7 +7894,7 @@ bubble=function(role,content,sources=[]){
 
 const oldBubble=bubble; bubble=function(role,content,sources=[]){const el=oldBubble(role,content,sources);if(role==='assistant'&&(voiceMode||speakNext)&&'speechSynthesis'in window){speakNext=false;const u=new SpeechSynthesisUtterance(cleanAnswer(content));u.lang='tr-TR';window.speechSynthesis.cancel();window.speechSynthesis.speak(u)}return el};
 $('sendBtn').onclick=send;
-$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('attachBtn')?.addEventListener('click',()=> $('fileInput').click());$('fileInput').onchange=e=>{selectedFile=e.target.files?.[0]||null;if(selectedFile&&selectedFile.size>12*1024*1024){alert('Dosya en fazla 12 MB olabilir.');selectedFile=null;$('fileInput').value=''}$('fileName').textContent=selectedFile?selectedFile.name:'';$('fileName').hidden=!selectedFile;if(selectedFile)setStatus("Dosya hazır · sorunu yazıp Gönder'e bas")};$('imageBtn').onclick=generateImage;$('searchBtn').onclick=()=>{forceSearch=!forceSearch;$('searchBtn').style.borderColor=forceSearch?'#a78bfa':'var(--line)';$('searchBtn').textContent=forceSearch?'⌕ Web açık':'⌕ Web ara';setStatus(forceSearch?'Bu mesajda web araması zorunlu':'Otomatik arama; gerekirse kendiliğinden çalışır')};$('newChat').onclick=newChat;$('mobileNew').onclick=newChat;$('closeModal').onclick=closeModal;$('modalback').onclick=e=>{if(e.target===$('modalback'))closeModal()};
+$('prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});$('attachBtn')?.addEventListener('click',()=> $('fileInput').click());$('fileInput').onchange=e=>{selectedFile=e.target.files?.[0]||null;if(selectedFile&&selectedFile.size>12*1024*1024){alert('Dosya en fazla 12 MB olabilir.');selectedFile=null;$('fileInput').value=''}$('fileName').textContent=selectedFile?selectedFile.name:'';$('fileName').hidden=!selectedFile;if(selectedFile)setStatus("Dosya hazır · sorunu yazıp Gönder'e bas")};$('imageBtn').onclick=generateImage;$('searchBtn').onclick=()=>{forceSearch=!forceSearch;$('searchBtn').style.borderColor=forceSearch?'#a78bfa':'var(--line)';$('searchBtn').textContent=forceSearch?'⌕ Bu mesajda ara':'⌕ Web ara';setStatus(forceSearch?'Bu mesajda web araması zorunlu':'Otomatik arama açık; güncel bilgi gerektiğinde kendiliğinden arar')};$('thinkBtn').onclick=()=>{deepThink=!deepThink;$('thinkBtn').setAttribute('aria-pressed',String(deepThink));$('thinkBtn').style.borderColor=deepThink?'#438de7':'var(--line)';$('thinkBtn').style.background=deepThink?'#eaf4ff':'';$('thinkBtn').textContent=deepThink?'🧠 Derin düşün açık':'🧠 Derin düşün';setStatus(deepThink?'Yüksek düşünme seviyesi açık; yanıt biraz daha uzun sürebilir.':'Hızlı yanıt modu açık.')};$('newChat').onclick=newChat;$('mobileNew').onclick=newChat;$('closeModal').onclick=closeModal;$('modalback').onclick=e=>{if(e.target===$('modalback'))closeModal()};
 let authMode='login',authBusy=false;
 function setAuthMode(mode){authMode=mode;const registering=mode==='register';$('modalTitle').textContent=registering?'Ücretsiz hesabını oluştur':'Tekden AI hesabına giriş yap';$('authDescription').textContent=registering?'Kullanıcı adını ve en az 8 karakterli bir şifre belirle.':'Sohbet geçmişini saklamak ve kişisel çalışma alanına erişmek için giriş yap.';$('authSubmit').textContent=registering?'Hesap oluştur':'Giriş yap';$('registerBtn').textContent=registering?'Giriş ekranına dön':'Yeni hesap oluştur';$('authPass').autocomplete=registering?'new-password':'current-password';$('authError').textContent='';}
 $('authForm').addEventListener('submit',e=>{e.preventDefault();auth(authMode)});
@@ -7506,7 +7910,7 @@ async function auth(mode){
  try{
   const d=await api('/api/'+mode,{method:'POST',body:JSON.stringify({username,password})});
   if(!d||!d.user)throw new Error('Sunucu başarılı yanıt verdi ancak hesap bilgisi dönmedi.');
-  user=d.user;showArchived=false;closeModal();$('authPass').value='';renderUser();newChat();
+  user=d.user;saveUserHint();showArchived=false;closeModal();$('authPass').value='';renderUser();newChat();
   try{await loadChats()}catch(loadError){console.warn('Hesap açıldı ancak sohbet geçmişi yüklenemedi:',loadError);setStatus('Hesabın açıldı. Sohbet geçmişi şu anda yüklenemedi; yeniden deneyebilirsin.')}
   if(user&&user.plan==='plus')location.reload();else setStatus(mode==='register'?'Hesabın başarıyla oluşturuldu.':'Giriş başarılı.');
  }catch(e){$('authError').textContent=e&&e.message?e.message:'İşlem tamamlanamadı. Lütfen tekrar dene.'}
@@ -7523,7 +7927,7 @@ document.querySelectorAll('.suggestion').forEach(b=>b.onclick=()=>{const kind=b.
 $('activeChatsBtn').onclick=()=>{showArchived=false;$('activeChatsBtn').style.background='#e4f1ff';$('archivedChatsBtn').style.background='';loadChats()};$('archivedChatsBtn').onclick=()=>{if(!user){showModal();$('authError').textContent='Arşiv için giriş yapmalısın.';return}showArchived=true;$('archivedChatsBtn').style.background='#e4f1ff';$('activeChatsBtn').style.background='';loadChats()};$('profileBtn').onclick=()=>{if(user)$('profileBack').style.display='flex';else showModal()};$('profilePlansBtn').onclick=()=>{$('profileBack').style.display='none';renderUser();$('plansBack').style.display='flex'};$('closeProfile').onclick=()=>$('profileBack').style.display='none';$('profileBack').onclick=e=>{if(e.target===$('profileBack'))$('profileBack').style.display='none'};$('profileArchiveBtn').onclick=()=>{$('profileBack').style.display='none';if(!user){showModal();return}showArchived=true;$('archivedChatsBtn').style.background='#e4f1ff';$('activeChatsBtn').style.background='';loadChats()};$('profileLoginBtn').onclick=()=>{$('profileBack').style.display='none';if(!user)showModal();else alert('Hesabın açık: '+user.username)};$('profileLogoutBtn').onclick=()=>{
  // Optimistic logout: update the interface immediately; cookie cleanup continues
  // in the background so a slow database/network round-trip cannot freeze the UI.
- user=null;chatId=null;guestHistory=[];showArchived=false;
+ user=null;saveUserHint();chatId=null;guestHistory=[];showArchived=false;
  $('messages').innerHTML='';$('history').innerHTML='<div class="notice">Misafir oturumu</div>';
  $('profileBack').style.display='none';newChat();renderUser();
  setStatus('Oturum kapatıldı.');
@@ -7534,7 +7938,13 @@ $('closePlans').onclick=()=>$('plansBack').style.display='none';$('plansBack').o
 $('buyPro').onclick=async()=>{if(!user){$('plansBack').style.display='none';showModal();$('authError').textContent='Pro üyeliği için giriş yap veya kayıt ol.';return}try{const d=await api('/api/billing/checkout',{method:'POST'});if(d.url)location.href=d.url}catch(e){alert(e.message)}};
 $('buyPlus').onclick=async()=>{if(!user){$('plansBack').style.display='none';showModal();$('authError').textContent='Plus üyeliği için giriş yap veya kayıt ol.';return}try{const d=await api('/api/billing/checkout',{method:'POST',body:JSON.stringify({plan:'plus'})});if(d.url)location.href=d.url}catch(e){alert(e.message)}};
 const payState=new URLSearchParams(location.search).get('payment');if(payState==='success')setTimeout(()=>alert('Ödeme alındıysa üyelik, Stripe webhook doğrulaması sonrasında etkinleşir.'),300);if(payState==='cancelled')setStatus('Ödeme iptal edildi');
-restoreGuestHistory();refreshMe();
+restoreGuestHistory();renderUser();refreshMe();
+window.addEventListener('pageshow',event=>{if(event.persisted)refreshMe();});
+let tdLastHiddenAt=0;
+document.addEventListener('visibilitychange',()=>{
+ if(document.visibilityState==='hidden')tdLastHiddenAt=Date.now();
+ else if(tdLastHiddenAt&&Date.now()-tdLastHiddenAt>10000){tdLastHiddenAt=0;refreshMe();}
+});
 const tdStudioRedirect=new URLSearchParams(location.search).get('studio');
 if(tdStudioRedirect){
   const messages={login:'Stüdyoya devam etmek için giriş yapmalısın.',pro:'Pro Stüdyo için Pro veya Plus üyeliği gerekiyor.',plus:'Plus Workspace yalnızca Plus üyelerine açık.',video:'Video Studio ücretsiz erişim dönemi sona erdiğinde Pro ve Plus planlarına özel olacak.'};
@@ -7665,10 +8075,23 @@ if(tdStudioRedirect){
 def discover_page():
     return HTMLResponse("""<!doctype html><html lang='tr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Keşfet · Tekden AI</title><style>body{font:16px/1.6 system-ui;max-width:900px;margin:32px auto;padding:0 18px;color:#172b46}a,button{color:#0878f9}li{margin:8px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.card{border:1px solid #d8e6f6;border-radius:14px;padding:16px}</style><h1>Tekden AI ile daha fazlasını keşfet</h1><p><b>175 çalışma aracı:</b> öğrenme, yazı, kodlama, araştırma, proje yönetimi, tasarım, verimlilik, veri analizi ve kalite kontrolü için hazır iş akışları ana sayfadaki araç kutusunda bulunur.</p><p>Sohbetten kişisel çalışma alanına kadar mevcut araçları keşfet.</p><div class='grid'><div class='card'><h2>✦ Akıllı sohbet</h2><p>Çalışma tarzına göre yanıtlar, hazır prompt kütüphanesi ve kaynaklı araştırma.</p></div><div class='card'><h2>📝 Kişisel çalışma alanı</h2><p>Notlar, kaydedilen yanıtlar ve kullanıcı tercihleri.</p></div><div class='card'><h2>📂 Sohbet düzeni</h2><p>Geçmişi ara, sohbetleri arşivle ve dışa aktar.</p></div><div class='card'><h2>♿ Erişilebilir arayüz</h2><p>Koyu tema, odak görünümü, yazı boyutu ve klavye kısayolları.</p></div><div class='card'><h2>🧩 Hazır promptlar</h2><p>Eğitim, yazı, kodlama, araştırma, planlama ve yaratıcılık için şablonlar.</p></div><div class='card'><h2>⚡ Araç kütüphanesi</h2><p>175 çalışma akışı ve hazır görev şablonunu keşfet.</p></div></div><p><a href='/'>← Tekden AI'a dön</a></p></html>""")
 
+
+def td_auth_retry_html_v38(studio_name):
+    label = html_escape(str(studio_name or "Stüdyo")[:60])
+    return ("<!doctype html><html lang='tr'><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>Tekden AI · Bağlantı</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f4f8ff;color:#19314e;font:15px system-ui}.card{width:min(440px,calc(100% - 32px));padding:26px;border:1px solid #d9e7f7;border-radius:20px;background:#fff;box-shadow:0 16px 45px #19314e12}button,a{display:inline-block;margin:8px 8px 0 0;padding:10px 14px;border:0;border-radius:10px;background:#0878f9;color:#fff;text-decoration:none;font-weight:700}</style>"
+            "<main class='card'><h1>" + label + " geçici olarak yavaş</h1><p>Hesap oturumun silinmedi. Sunucu hesabını şu anda doğrulayamıyor. Birkaç saniye sonra yeniden deneyebilirsin.</p><button onclick='location.reload()'>Yeniden dene</button><a href='/'>Ana sayfa</a></main></html>")
+
 @app.get("/pro-studio", response_class=HTMLResponse)
 def pro_studio(request: Request):
-    # Enforce plan access on the server as well as in the page UI.
-    studio_user = current_user(request)
+    # Enforce plan access on the server as well as in the page UI. A transient
+    # database fault must not be confused with a real logout.
+    try:
+        studio_user = current_user(request)
+    except Exception as exc:
+        print("[AUTH][PRO STUDIO] Temporary lookup failure:", type(exc).__name__)
+        return HTMLResponse(td_auth_retry_html_v38("Pro Stüdyo"), status_code=503,
+                            headers={"Cache-Control": "no-store"})
     if not studio_user:
         return RedirectResponse(url="/?studio=login", status_code=303)
     # Use the shared normalized access helper; stored plan casing must not block valid members.
@@ -7841,7 +8264,7 @@ $('tdAvatarNameInput').addEventListener('input',()=>{$('tdAvatarName').textConte
 document.querySelectorAll('[data-avatar-script]').forEach(b=>b.addEventListener('click',()=>{$('tdAvatarText').value=b.dataset.avatarScript;}));
 $('tdAvatarSpeak').onclick=()=>tdSpeakAvatar($('tdAvatarText').value);$('tdAvatarPreviewVoice').onclick=()=>tdSpeakAvatar('Merhaba! Ben '+($('tdAvatarNameInput').value.trim()||'Tekden Avatar')+'. Ses denemesi yapıyorum.');$('tdAvatarStop').onclick=()=>{tdSynth?.cancel();tdSetSpeaking(false);$('tdAvatarStatus').textContent='Konuşma durduruldu.';};tdRenderAvatar();
 async function api(url,opts={}){const r=await fetch(url,{...opts,credentials:'same-origin',headers:{'Content-Type':'application/json',...(opts.headers||{})}});let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.detail||'İstek başarısız oldu.');return d}
-async function check(){try{const d=await api('/api/me');if(!d.user){location.href='/?login=1';return}if(!['pro','plus'].includes(String(d.user.plan||'').trim().toLowerCase())){document.body.innerHTML=`<main style="max-width:700px;margin:12vh auto;padding:24px;font:16px system-ui"><h1>Bu alan Pro ve Plus üyelerine özel</h1><p>Pro veya Plus üyeliğinle giriş yaparak bu stüdyoyu kullanabilirsin.</p><button onclick="location.href='/'">Ana sayfaya dön</button></main>`;return}}catch(e){location.href='/?login=1'}}
+async function check(){try{const d=await api('/api/me');if(!d.user){location.href='/?studio=login';return}if(!['pro','plus'].includes(String(d.user.plan||'').trim().toLowerCase())){document.body.innerHTML=`<main style="max-width:700px;margin:12vh auto;padding:24px;font:16px system-ui"><h1>Bu alan Pro ve Plus üyelerine özel</h1><p>Pro veya Plus üyeliğinle giriş yaparak bu stüdyoyu kullanabilirsin.</p><button onclick="location.href='/'">Ana sayfaya dön</button></main>`;return}}catch(e){const n=document.createElement('div');n.style.cssText='position:fixed;z-index:99999;left:12px;right:12px;top:12px;padding:14px 16px;border:1px solid #f0c36d;border-radius:14px;background:#fff8e7;color:#6b4c13;font:14px/1.5 system-ui';n.textContent='Hesap bağlantısı geçici olarak yavaş. Oturumun kapatılmadı. ';const b=document.createElement('button');b.textContent='Yeniden dene';b.style.cssText='margin-left:8px;padding:7px 10px';b.onclick=()=>{n.remove();check()};n.appendChild(b);document.body.appendChild(n);console.warn('Pro Studio session check:',e)}}
 document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{$('prompt').value=b.dataset.p;$('prompt').focus()});$('clear').onclick=()=>{$('prompt').value='';$('prompt').focus()};
 $('generate').onclick=async()=>{const prompt=$('prompt').value.trim();if(prompt.length<3){$('status').textContent='Önce oyunu biraz tarif et.';return}const btn=$('generate');btn.disabled=true;btn.textContent='⏳ Oyun hazırlanıyor…';$('status').textContent='Pro modeli oyun kodunu oluşturuyor. Bu işlem biraz sürebilir…';try{const d=await api('/api/game',{method:'POST',body:JSON.stringify({prompt})});currentHtml=d.html;$('preview').innerHTML='';frame=document.createElement('iframe');frame.title='Oynanabilir oyun';frame.setAttribute('sandbox','allow-scripts allow-pointer-lock');frame.srcdoc=currentHtml;$('preview').appendChild(frame);$('tools').style.display='flex';$('status').textContent='Oyun hazır. Kontrolleri deneyebilir, tam ekran açabilir veya HTML indirebilirsin.'}catch(e){$('status').textContent='Oyun oluşturulamadı: '+e.message}finally{btn.disabled=false;btn.textContent='✦ Oyunu oluştur'}};
 $('fullscreen').onclick=()=>frame?.requestFullscreen?.();$('download').onclick=()=>{const a=document.createElement('a'),url=URL.createObjectURL(new Blob([currentHtml],{type:'text/html;charset=utf-8'}));a.href=url;a.download='tekden-ai-pro-oyunu.html';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};check();
@@ -8620,7 +9043,7 @@ def home(request: Request):
   .attachlabel { display:inline-flex !important; align-items:center !important; min-height:30px !important; padding:5px 9px !important; border-radius:9px !important; font-size:11px !important; }
   .attachname { display:none !important; }
   .tools { display:flex !important; align-items:center !important; justify-content:flex-end !important; gap:6px !important; margin-top:3px !important; }
-  .toolleft { display:none !important; }
+  .toolleft { display:flex !important; flex-wrap:wrap !important; gap:6px !important; min-width:0 !important; }
   #sendBtn { min-height:40px !important; min-width:90px !important; padding:8px 15px !important; border-radius:11px !important; }
   .composerwrap > .notice { display:none !important; }
 
@@ -13021,14 +13444,19 @@ window.taskDelete=async id=>{if(!confirm('Görevi silmek istiyor musun?'))return
 
 $('controlDelete').onclick=async()=>{const scope=$('controlScope').value,confirmation=$('controlConfirm').value;if(confirmation!=='SİL'){alert('Onay için SİL yaz.');return;}if(!confirm('Seçilen Plus verileri kalıcı olarak silinecek. Devam edilsin mi?'))return;try{const d=await api('/api/plus/control/delete',{method:'POST',body:JSON.stringify({scope,confirmation})});$('controlStatus').textContent='Silme tamamlandı: '+d.deleted_scopes;$('controlConfirm').value='';await loadProjects();await loadSummary();await loadAssets();await loadTasks();await loadVault();}catch(e){$('controlStatus').textContent=e.message;}};
 
-(async()=>{try{await loadProjects();await loadSummary();await loadAssets();await loadTasks();await loadVault();await loadTeacherProgress();}catch(e){document.body.insertAdjacentHTML('afterbegin','<div style="padding:15px;background:#fee;color:#900">Çalışma alanı yüklenemedi: '+esc(e.message)+'</div>');}})();
+(async()=>{try{await loadProjects();const tasks=[loadSummary(),loadAssets(),loadTasks(),loadVault(),loadTeacherProgress()];const results=await Promise.allSettled(tasks);const failed=results.filter(x=>x.status==='rejected');if(failed.length){const n=document.createElement('div');n.style.cssText='padding:10px 14px;margin:8px 0;border:1px solid #f2d28c;border-radius:12px;background:#fff8e7;color:#765212;font:13px system-ui';n.textContent=failed.length+' çalışma alanı bölümü geç yükleniyor. Sayfayı kapatmadan ilgili bölümü yenileyebilirsin.';document.querySelector('.shell')?.prepend(n);}}catch(e){document.body.insertAdjacentHTML('afterbegin','<div style="padding:15px;background:#fee;color:#900">Çalışma alanı yüklenemedi: '+esc(e.message)+'</div>');}})();
 </script></body></html>"""
 
 
 @app.get("/plus-workspace", response_class=HTMLResponse)
 @app.get("/plus", response_class=HTMLResponse, include_in_schema=False)
 def td_plus_workspace_page(request: Request):
-    workspace_user = current_user(request)
+    try:
+        workspace_user = current_user(request)
+    except Exception as exc:
+        print("[AUTH][PLUS WORKSPACE] Temporary lookup failure:", type(exc).__name__)
+        return HTMLResponse(td_auth_retry_html_v38("Plus Workspace"), status_code=503,
+                            headers={"Cache-Control": "no-store"})
     if not workspace_user:
         return RedirectResponse(url="/?studio=login", status_code=303)
     if not user_has_plus_access(workspace_user):
@@ -13078,7 +13506,7 @@ const top=document.querySelector('.top');if(top&&!document.getElementById('tdPlu
 
 _TD_BASE_CALL_OLLAMA = call_ollama
 
-def call_ollama(messages, model=None):
+def call_ollama(messages, model=None, think=None):
     """Preserve the configured model call and add a truthful product-identity rule."""
     prepared_messages = [dict(item) for item in (messages or [])]
     infrastructure_rule = (
@@ -13103,7 +13531,7 @@ def call_ollama(messages, model=None):
         )
     else:
         prepared_messages.insert(0, {"role": "system", "content": infrastructure_rule})
-    return _TD_BASE_CALL_OLLAMA(prepared_messages, model=model)
+    return _TD_BASE_CALL_OLLAMA(prepared_messages, model=model, think=think)
 
 
 # =============================================================================
@@ -14064,6 +14492,8 @@ def td_model_request_v13(url, model_name, messages, timeout, endpoint_label):
             "model": model_name,
             "messages": messages,
             "stream": False,
+            "keep_alive": "10m",
+            **({"think": "high"} if getattr(_TD_MODEL_CONTEXT_V13, "think_effort", None) == "high" and endpoint_label == "native_chat" else {}),
         },
         timeout=timeout,
     )
@@ -14380,6 +14810,8 @@ def td_call_private_local_ollama_v15(messages, configured_model):
                 "model": local_model,
                 "messages": prepared_messages,
                 "stream": False,
+                "keep_alive": "10m",
+                **({"think": "high"} if getattr(_TD_MODEL_CONTEXT_V13, "think_effort", None) == "high" else {}),
             },
             timeout=(4, 55),
         )
@@ -15221,68 +15653,56 @@ def td_groq_chat_v20(messages):
 _TD_V19_CALL_OLLAMA_WITH_HF = call_ollama
 
 
-def call_ollama(messages, model=None):
-    """
-    Provider order:
-      1) Groq free-tier API (when GROQ_API_KEY exists)
-      2) Private/local Ollama endpoint (when OLLAMA_LOCAL_URL is configured)
-      3) Existing V19 chain: Ollama Cloud/private Ollama/Hugging Face
-
-    Provider keys and private endpoint URLs are never returned by diagnostics.
-    """
+def call_ollama(messages, model=None, think=None):
+    """Keep the configured failover order and apply high reasoning only when asked."""
+    previous_think = getattr(_TD_MODEL_CONTEXT_V13, "think_effort", None)
+    _TD_MODEL_CONTEXT_V13.think_effort = "high" if think == "high" else None
     failures = []
+    try:
+        # The low-latency provider is preferred for normal chat. Deep mode skips
+        # it so an Ollama reasoning model can use its native high-effort setting.
+        if GROQ_API_KEY and think != "high":
+            try:
+                answer = td_groq_chat_v20(messages)
+                if answer:
+                    print("[Tekden AI] Yanıt Groq ücretsiz kullanım rotasından alındı.")
+                    return answer
+            except TDModelCallError as groq_error:
+                failures.append(("groq", groq_error.status_code, groq_error.category))
+                print("[Tekden AI] Groq kullanılamadı; yedek sağlayıcıya geçiliyor:", groq_error.status_code, groq_error.category)
 
-    if GROQ_API_KEY:
         try:
-            answer = td_groq_chat_v20(messages)
-            if answer:
-                print("[Tekden AI] Yanıt Groq ücretsiz kullanım rotasından alındı.")
-                return answer
-        except TDModelCallError as groq_error:
-            failures.append(("groq", groq_error.status_code, groq_error.category))
-            print(
-                "[Tekden AI] Groq kullanılamadı; yedek sağlayıcıya geçiliyor:",
-                groq_error.status_code,
-                groq_error.category,
+            local_answer = td_call_private_local_ollama_v15(messages, str(model or OLLAMA_MODEL or "").strip())
+            if local_answer:
+                print("[Tekden AI] Yanıt özel Ollama sunucusundan alındı.")
+                return local_answer
+        except TDModelCallError as local_error:
+            failures.append(("private_ollama", local_error.status_code, local_error.category))
+            print("[Tekden AI] Özel Ollama rotası kullanılamadı; mevcut yedek zincire geçiliyor:", local_error.status_code, local_error.category)
+
+        try:
+            return _TD_V19_CALL_OLLAMA_WITH_HF(messages, model)
+        except TDModelCallError as model_error:
+            if think == "high" and model_error.status_code in (400, 404, 422):
+                print("[Tekden AI] Bu model native derin düşünme ayarını kabul etmedi; aynı sağlayıcı zincirinde standart istek deneniyor.")
+                _TD_MODEL_CONTEXT_V13.think_effort = None
+                return _TD_V19_CALL_OLLAMA_WITH_HF(messages, model)
+            raise
+        except Exception as final_error:
+            if isinstance(final_error, TDModelCallError):
+                final_status = final_error.status_code
+                final_category = final_error.category
+            else:
+                final_status = 503
+                final_category = "legacy_provider_chain_" + type(final_error).__name__.lower()
+            print("[Tekden AI] Son yedek zincir de yanıt veremedi:", final_status, final_category)
+            raise TDModelCallError(
+                final_status if final_status in (402, 413, 429, 504) else 503,
+                "all_provider_routes_failed:" + final_category,
+                allow_basic_fallback=False,
             )
-
-    # Try the existing authenticated private Ollama endpoint directly before
-    # cloud APIs. It is skipped unless the operator has configured it privately.
-    try:
-        local_answer = td_call_private_local_ollama_v15(
-            messages,
-            str(model or OLLAMA_MODEL or "").strip(),
-        )
-        if local_answer:
-            print("[Tekden AI] Yanıt özel Ollama sunucusundan alındı.")
-            return local_answer
-    except TDModelCallError as local_error:
-        failures.append(("private_ollama", local_error.status_code, local_error.category))
-        print(
-            "[Tekden AI] Özel Ollama rotası kullanılamadı; mevcut yedek zincire geçiliyor:",
-            local_error.status_code,
-            local_error.category,
-        )
-
-    try:
-        return _TD_V19_CALL_OLLAMA_WITH_HF(messages, model)
-    except Exception as final_error:
-        if isinstance(final_error, TDModelCallError):
-            final_status = final_error.status_code
-            final_category = final_error.category
-        else:
-            final_status = 503
-            final_category = "legacy_provider_chain_" + type(final_error).__name__.lower()
-        print(
-            "[Tekden AI] Son yedek zincir de yanıt veremedi:",
-            final_status,
-            final_category,
-        )
-        raise TDModelCallError(
-            final_status if final_status in (402, 413, 429, 504) else 503,
-            "all_provider_routes_failed:" + final_category,
-            allow_basic_fallback=False,
-        )
+    finally:
+        _TD_MODEL_CONTEXT_V13.think_effort = previous_think
 
 
 @app.get("/api/health/providers-v20", include_in_schema=False)
@@ -15626,7 +16046,12 @@ def td_require_video_studio_access_v21(request: Request):
 
 @app.get("/video-studio", response_class=HTMLResponse, include_in_schema=False)
 def td_video_studio_page_v21(request: Request):
-    user = current_user(request)
+    try:
+        user = current_user(request)
+    except Exception as exc:
+        print("[AUTH][VIDEO STUDIO] Temporary lookup failure:", type(exc).__name__)
+        return HTMLResponse(td_auth_retry_html_v38("Video Studio"), status_code=503,
+                            headers={"Cache-Control": "no-store"})
     if not user:
         return RedirectResponse(url="/?studio=login", status_code=303)
     if td_video_studio_is_pro_only_v21() and not user_has_pro_access(user):
@@ -15716,6 +16141,32 @@ def td_public_app_version_v34():
         "owner_aware_plan_access_ui": True,
         "visual_viewport_keyboard_fix": True,
         "response_quality_instructions": True,
+        "env_changed": False,
+        "requirements_changed": False,
+    }
+
+
+# TEKDEN AI V38 — persistent login, streaming chat, quicker retrieval, optional high-effort thinking
+
+@app.get("/api/version-v38", include_in_schema=False)
+def td_public_app_version_v38():
+    return {
+        "app": "Tekden AI",
+        "build": "2026-11-22-v38-speed-session-thinking",
+        "session_days": SESSION_DAYS,
+        "session_db_errors_are_not_logout": True,
+        "streaming_chat": True,
+        "streaming_preserves_provider_order": True,
+        "fast_reasoning_default": True,
+        "high_effort_thinking_toggle": True,
+        "deep_mode_uses_native_ollama_effort_when_available": True,
+        "automatic_web_search": True,
+        "parallel_pro_search": True,
+        "workspace_initial_load_parallel": True,
+        "session_user_cache_seconds": _CURRENT_USER_CACHE_TTL,
+        "web_search_total_timeout_seconds": 8,
+        "chat_legacy_webview_fallback": True,
+        "groq_fast_route_free_only": True,
         "env_changed": False,
         "requirements_changed": False,
     }
