@@ -81,7 +81,7 @@ PUBLIC_BASE_URL = "https://tekden-ai-2.onrender.com"
 def robots_txt():
     # Public content is indexable; admin and API routes stay out of search results.
     return PlainTextResponse(
-        "User-agent: *\\nAllow: /\\nDisallow: /yonetim\\nDisallow: /api/\\nSitemap: https://tekden-ai-2.onrender.com/sitemap.xml\\n",
+        "User-agent: *\nAllow: /\nDisallow: /yonetim\nDisallow: /api/\nSitemap: https://tekden-ai-2.onrender.com/sitemap.xml\n",
         media_type="text/plain; charset=utf-8",
         headers={"Cache-Control": "no-cache, max-age=0"},
     )
@@ -129,34 +129,116 @@ def db():
         raise RuntimeError("DATABASE_URL eksik. Supabase PostgreSQL bağlantısını Render Environment bölümüne ekle.")
     return psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
 
-# Basic Turkish profanity/insult filter. Keep matching word-boundary based to reduce false positives.
+# Turkish profanity moderation: match explicit offensive expressions only.
+# Important: keep Turkish dotless "ı" distinct from dotted "i". Converting ı -> i
+# made ordinary words such as "sıkmak", "sıkı", "sıkılmak" and "sıkıntı" false positives.
 PROFANITY_RE = re.compile(
     r"(?i)(?<![\w])(?:"
-    r"amk|aq|a\.q|oç|mal/oc|orospu|siktir|sikik|sikerim|sikeyim|sik\w*|"
-    r"yarrak|yarr\w*|piç|pic|kahpe|pezevenk|göt|got|bok\w*|"
-    r"ananı|ananin|anan\w*|ibne|gerizekalı|gerizekali|"
-    r"salak\s+or\w*|mal\s+oğlu\s+mal|fuck\w*|shit|bitch|asshole|motherfucker"
+    r"amk|aq|a\.q|oç|mal/oc|orospu|siktir(?:in|ler|e|)?|sikik|sikerim|sikeyim|sikiyorum|siktim|"
+    r"yarrak|piç|kahpe|pezevenk|göt|bok|ananı|ananin|ibne|gerizekalı|gerizekali|"
+    r"salak\s+or\w*|fuck\w*|shit|bitch|asshole|motherfucker"
     r")(?![\w])"
 )
 
 
 def normalize_moderation_text(value: str) -> str:
-    value = (value or "").casefold().translate(str.maketrans({"ı":"i", "ş":"s", "ğ":"g", "ü":"u", "ö":"o", "ç":"c", "0":"o", "1":"i", "3":"e", "4":"a", "@":"a", "$":"s"}))
-    # Collapse punctuation/spacing between letters to catch common obfuscation without storing message contents.
-    return re.sub(r"[^a-z]+", "", value)
+    """Case-fold text without collapsing Turkish dotless ı into i."""
+    return (value or "").casefold()
 
-NORMALIZED_PROFANITY = tuple("amk aq oc orospu siktir sikik sikerim yarrak pic kahpe pezevenk got bok ibne gerizekali fuck shit bitch asshole motherfucker".split())
+
+# Explicit tokens are retained for simple punctuation/spacing obfuscation checks.
+# Deliberately excludes broad stems such as "sik", "anan" and "yarr".
+NORMALIZED_PROFANITY = tuple(
+    "amk aq orospu siktir sikik sikerim sikeyim sikiyorum siktim yarrak piç kahpe pezevenk göt bok ananı ananin ibne gerizekalı gerizekali fuck shit bitch asshole motherfucker".split()
+)
+
 
 def contains_profanity(value: str) -> bool:
-    value = (value or "").casefold().translate(str.maketrans({"ı":"i", "ş":"s", "ğ":"g", "ü":"u", "ö":"o", "ç":"c", "0":"o", "1":"i", "3":"e", "4":"a", "@":"a", "$":"s"}))
+    value = normalize_moderation_text(value)
     if PROFANITY_RE.search(value):
         return True
-    # Detect common punctuation/space obfuscation while preserving word boundaries.
+    # Catch punctuation or up to two separators inserted between letters.
+    # Unicode \w keeps Turkish ı as a letter, so it cannot masquerade as "i".
     for term in NORMALIZED_PROFANITY:
-        pattern = r"(?<![a-z])" + r"[^a-z]{0,2}".join(map(re.escape, term)) + r"(?![a-z])"
-        if re.search(pattern, value):
+        pattern = r"(?<![\w])" + r"[\W_]{0,2}".join(map(re.escape, term)) + r"(?![\w])"
+        if re.search(pattern, value, flags=re.IGNORECASE):
             return True
     return False
+
+
+# Repair the common UTF-8 -> Latin-1/Windows-1252 mojibake patterns seen in
+# provider-generated text. Only accept a conversion when it measurably removes
+# corruption markers/control characters; ordinary Unicode is left untouched.
+_TD_MOJIBAKE_MARKERS = ("Ã", "Â", "Ä", "Å", "â€", "â€™", "â€œ", "â€“", "â€”", "ðŸ", "ï¿½", "�")
+
+
+def _td_mojibake_score(value: str) -> int:
+    marker_score = sum(value.count(marker) for marker in _TD_MOJIBAKE_MARKERS) * 6
+    control_score = sum(1 for ch in value if ord(ch) < 32 and ch not in "\n\r\t") * 5
+    replacement_score = value.count("�") * 20
+    return marker_score + control_score + replacement_score
+
+
+def td_repair_mojibake_text(value: str) -> str:
+    if not isinstance(value, str) or not value:
+        return value
+    current = value
+    for _ in range(2):
+        current_score = _td_mojibake_score(current)
+        if current_score == 0:
+            break
+        best = current
+        best_score = current_score
+        for encoding in ("latin-1", "cp1252"):
+            try:
+                candidate = current.encode(encoding).decode("utf-8")
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                continue
+            candidate_score = _td_mojibake_score(candidate)
+            if candidate_score < best_score:
+                best, best_score = candidate, candidate_score
+        if best is current:
+            break
+        current = best
+    return current
+
+
+def td_normalize_assistant_output(value: str, user_message: str = "") -> str:
+    """Repair encoding and localize a known irrelevant English crisis template."""
+    value = td_repair_mojibake_text(value)
+    if not isinstance(value, str) or not value:
+        return value
+    lower_answer = value.casefold()
+    has_generic_crisis_template = (
+        "if you're feeling unsafe" in lower_answer
+        or "if you’re feeling unsafe" in lower_answer
+        or "thinking about harming yourself or others" in lower_answer
+        or ("988" in lower_answer and "crisis helpline" in lower_answer)
+    )
+    if not has_generic_crisis_template:
+        return value
+
+    user_text = str(user_message or "").casefold()
+    looks_turkish = (
+        bool(re.search(r"[çğıöşü]", user_text))
+        or any(term in user_text for term in ("ben", "bana", "nasıl", "neden", "yardım", "üzgün", "sıkıldım"))
+    )
+    if not looks_turkish:
+        return value
+
+    risk_terms = (
+        "kendime zarar", "kendini öldür", "intihar", "ölmek istiyorum",
+        "yaşamak istemiyorum", "kendime kıy", "birine zarar vermek",
+        "birini öldür", "hurt myself", "harm myself", "suicide",
+        "kill myself", "harm someone", "hurt someone",
+    )
+    if any(term in user_text for term in risk_terms):
+        return (
+            "Şu anda güvende değilsen, güvendiğin bir yetişkine veya sağlık uzmanına hemen haber ver. "
+            "Acil bir tehlike varsa bulunduğun yerdeki acil yardım hizmetine başvur."
+        )
+    return "Önceki yanıtım isteğinle ilgili değildi. Sorunu tekrar yazar mısın?"
+
 
 def client_ip(request: Request) -> str:
     # Do not trust arbitrary X-Forwarded-For input; this is a network address, not a unique device ID.
@@ -1517,7 +1599,16 @@ def get_chat(chat_id: str, request: Request):
         if not chat:
             raise HTTPException(404, "Sohbet bulunamadı.")
         messages = conn.execute("SELECT role, content FROM messages WHERE chat_id=%s ORDER BY id", (chat_id,)).fetchall()
-    return {"chat": chat, "messages": messages}
+    cleaned_messages = []
+    last_user_message = ""
+    for row in messages:
+        item = dict(row)
+        if item.get("role") == "user":
+            last_user_message = str(item.get("content") or "")
+        elif item.get("role") == "assistant":
+            item["content"] = td_normalize_assistant_output(item.get("content") or "", last_user_message)
+        cleaned_messages.append(item)
+    return {"chat": chat, "messages": cleaned_messages}
 
 @app.delete("/api/chats/{chat_id}")
 def delete_chat(chat_id: str, request: Request):
@@ -1945,9 +2036,13 @@ def stream_ollama_chat_events(messages, model, think_effort, *, user=None, chat_
                     raise RuntimeError(td_public_model_error_v39(fallback_error))
                 raise RuntimeError("Yanıt sağlayıcısı şu anda kullanılamıyor. Biraz sonra tekrar dene.")
 
-        answer = "".join(answer_parts).strip()
+        raw_answer = "".join(answer_parts).strip()
+        answer = td_normalize_assistant_output(raw_answer, user_message)
         if not answer:
             raise RuntimeError("Model boş yanıt döndürdü. Lütfen tekrar dene.")
+        if answer != raw_answer:
+            answer_parts[:] = [answer]
+            yield _td_stream_ndjson_event({"type": "replace", "content": answer})
 
         saved = False
         save_error = None
@@ -2099,6 +2194,7 @@ Yazım ve anlatım kuralları:
         custom_instructions = str(account_preferences.get("custom_instructions") or "").strip()[:2000]
         if custom_instructions:
             system += "\n\nKullanıcının kendi yanıt tercihleri (güvenlik ve doğruluk kurallarıyla çelişmediği sürece uygula):\n" + custom_instructions
+    system += "\n\nDil, anlatım ve çıktı temizliği:\n- Kullanıcının son mesajının dilinde yanıt ver. Türkçe mesajlara doğal, akıcı ve doğru Türkçe ile cevap ver; kullanıcı istemedikçe yanıtın ortasında İngilizceye geçme.\n- Türkçe karakterleri doğru kullan: ç, ğ, ı, İ, ö, ş, ü. Bozuk kodlanmış karakterler, anlamsız sembol dizileri veya rastgele kelimeler üretme.\n- Açık ve doğrudan konuş. Gereksiz uzun girişler, tekrarlar, aşırı emoji ve hazır kalıp paragraflar kullanma.\n- Güvenlik uyarısını yalnızca kullanıcının mesajı gerçekten ilgili bir risk içeriyorsa ver. Böyle bir yanıt gerekiyorsa kullanıcının dilinde, konuyla ilgili ve kısa yaz; ilgisiz sohbetlere otomatik İngilizce kriz metni ekleme. Güvenlik açısından gerekli desteği veya sınırları yok sayma.\n"
     msgs = [{"role":"system","content":system}]
     # Zihin Atölyesi proje hafızası yalnızca Plus üyelerinin sohbetlerine eklenir.
     if user and plan == "plus":
@@ -2160,7 +2256,10 @@ Yazım ve anlatım kuralları:
                 "Sohbet veritabanına şu anda bağlanılamıyor. Biraz sonra tekrar dene; mesajın gönderilmedi.",
             )
 
-        msgs.extend({"role": x["role"], "content": x["content"]} for x in history)
+        msgs.extend({
+            "role": x["role"],
+            "content": td_repair_mojibake_text(x["content"]) if x["role"] == "assistant" else x["content"],
+        } for x in history)
         msgs.append({"role": "user", "content": user_message})
 
         if body.stream:
@@ -7583,6 +7682,7 @@ async function apiStream(url,opts={},onChunk=()=>{}){
  const reader=response.body.getReader(),decoder=new TextDecoder();let buffer='',answer='',finalEvent=null;
  const consume=line=>{if(!line.trim())return;let event;try{event=JSON.parse(line)}catch{return}
   if(event.type==='delta'){answer+=event.content||'';onChunk(answer)}
+  else if(event.type==='replace'){answer=event.content||'';onChunk(answer)}
   else if(event.type==='done')finalEvent=event;
   else if(event.type==='error'){const err=new Error(event.detail||'Model yanıtı tamamlayamadı.');err.serverStreamError=true;throw err;}
  };
@@ -16411,3 +16511,42 @@ async def td_v39_mobile_home_composer_style(request: Request, call_next):
                if k.lower() not in ("content-length", "content-encoding", "transfer-encoding", "etag")}
     return HTMLResponse(content=html, status_code=response.status_code, headers=headers,
                         background=getattr(response, "background", None))
+
+
+# =============================================================================
+# TEKDEN AI V40 — TURKISH UTF-8, FALSE-POSITIVE MODERATION AND SEO FIXES
+# Additive update on V39. Keeps plan checks, providers, prices, .env and
+# requirements.txt unchanged.
+# =============================================================================
+TD_V40_BUILD = "2026-11-25-v40-turkish-utf8-moderation-seo"
+_TD_V39_FINAL_CALL_OLLAMA = call_ollama
+
+
+def call_ollama(messages, model=None, think=None):
+    """Preserve the V39 provider order and repair only confirmed mojibake."""
+    answer = _TD_V39_FINAL_CALL_OLLAMA(messages, model, think=think)
+    if not isinstance(answer, str):
+        return answer
+    last_user_message = next(
+        (str(item.get("content") or "") for item in reversed(messages or [])
+         if isinstance(item, dict) and item.get("role") == "user"),
+        "",
+    )
+    return td_normalize_assistant_output(answer, last_user_message)
+
+
+@app.get("/api/version-v40", include_in_schema=False)
+def td_public_app_version_v40():
+    return {
+        "app": "Tekden AI",
+        "build": TD_V40_BUILD,
+        "v39_features_preserved": True,
+        "turkish_dotless_i_preserved_in_moderation": True,
+        "broad_sik_prefix_removed": True,
+        "assistant_mojibake_repair": True,
+        "chat_history_display_repair": True,
+        "localized_response_language_rules": True,
+        "robots_txt_line_breaks_fixed": True,
+        "sitemap_available": True,
+        "server_side_plan_authorization_preserved": True,
+    }
