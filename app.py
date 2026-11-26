@@ -16585,3 +16585,115 @@ def owner_admin_revoke_all_bans(request: Request):
     with db() as conn:
         result = conn.execute("DELETE FROM moderation_bans")
     return {"ok": True, "revoked_count": result.rowcount}
+
+# =============================================================================
+# TEKDEN AI V43 — SITE-WIDE ADSENSE CODE PLACEMENT
+# Insert the exact AdSense script supplied by the publisher into the <head> of
+# public HTML pages. Existing guide pages already contain the same script, so
+# duplicate insertion is prevented. No ad-unit markup or layout is injected.
+# =============================================================================
+TD_V43_BUILD = "2026-11-26-v43-adsense-sitewide-code"
+
+ADSENSE_SITEWIDE_HEAD_CODE = (
+    '<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3311978441761062"\n'
+    '     crossorigin="anonymous"></script>'
+)
+
+
+@app.get("/api/version-v43", include_in_schema=False)
+def td_public_app_version_v43():
+    return {
+        "app": "Tekden AI",
+        "build": TD_V43_BUILD,
+        "adsense_code_added_to_public_html_heads": True,
+        "exact_publisher_snippet_preserved": True,
+        "duplicate_script_insertion_prevented": True,
+        "v42_account_device_moderation_preserved": True,
+        "v40_utf8_seo_and_plan_rules_preserved": True,
+    }
+
+
+@app.middleware("http")
+async def td_v43_adsense_code_on_public_pages(request: Request, call_next):
+    """Place AdSense's exact loader in public HTML <head>s, once per page.
+
+    API, site verification, admin/access screens and authenticated studio tools
+    are intentionally excluded. Public pages including the homepage, policy,
+    contact, discover, partnership and guide pages are eligible.
+    """
+    response = await call_next(request)
+    if request.method not in ("GET", "HEAD"):
+        return response
+
+    path = request.url.path or "/"
+    excluded_prefixes = (
+        "/api/", "/yonetim", "/admin", "/access", "/pro-studio",
+        "/video-studio", "/plus-workspace", "/plus", "/arcade",
+        "/game", "/games", "/song-studio", "/image-studio",
+    )
+    if path.startswith(excluded_prefixes) or path == "/google60fefbe52fe7bb22.html":
+        return response
+
+    content_type = response.headers.get("content-type", "").lower()
+    if response.status_code != 200 or "text/html" not in content_type:
+        return response
+
+    # Avoid adding AdSense to pages explicitly marked noindex.
+    robots_header = response.headers.get("x-robots-tag", "").lower()
+    if "noindex" in robots_header:
+        return response
+
+    body = getattr(response, "body", None)
+    if body is None:
+        iterator = getattr(response, "body_iterator", None)
+        if iterator is None:
+            return response
+        chunks = []
+        async for chunk in iterator:
+            chunks.append(chunk if isinstance(chunk, bytes) else str(chunk).encode("utf-8"))
+        body = b"".join(chunks)
+
+    charset = getattr(response, "charset", None) or "utf-8"
+    if isinstance(body, bytes):
+        html = body.decode(charset, errors="replace")
+    else:
+        html = str(body)
+
+    # Do not inject into HTML documents that declare themselves non-indexable.
+    lowered = html.lower()
+    if 'name="robots"' in lowered and "noindex" in lowered:
+        return HTMLResponse(
+            content=html,
+            status_code=response.status_code,
+            headers={k: v for k, v in response.headers.items()
+                     if k.lower() not in ("content-length", "content-encoding", "transfer-encoding", "etag")},
+            background=getattr(response, "background", None),
+        )
+
+    # Guide articles already contain this exact loader. Keep exactly one copy.
+    marker = "pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-3311978441761062"
+    if marker not in html:
+        head_end = html.lower().find("</head>")
+        if head_end >= 0:
+            html = html[:head_end] + ADSENSE_SITEWIDE_HEAD_CODE + "\n" + html[head_end:]
+        else:
+            # Simple legacy public pages may omit an explicit <head> wrapper.
+            head_open_end = html.lower().find("<head")
+            if head_open_end >= 0:
+                tag_end = html.find(">", head_open_end)
+                if tag_end >= 0:
+                    html = html[:tag_end + 1] + ADSENSE_SITEWIDE_HEAD_CODE + html[tag_end + 1:]
+
+    headers = {
+        k: v for k, v in response.headers.items()
+        if k.lower() not in ("content-length", "content-encoding", "transfer-encoding", "etag")
+    }
+    headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    headers["X-Tekden-AdSense-Code"] = "present-on-public-html"
+    return HTMLResponse(
+        content=html,
+        status_code=response.status_code,
+        headers=headers,
+        background=getattr(response, "background", None),
+    )
+
