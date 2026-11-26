@@ -129,27 +129,31 @@ def db():
         raise RuntimeError("DATABASE_URL eksik. Supabase PostgreSQL bağlantısını Render Environment bölümüne ekle.")
     return psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=10)
 
-# Turkish profanity moderation: match explicit offensive expressions only.
-# Important: keep Turkish dotless "ı" distinct from dotted "i". Converting ı -> i
-# made ordinary words such as "sıkmak", "sıkı", "sıkılmak" and "sıkıntı" false positives.
+# V41 moderation: only clear, explicit profanity/abuse tokens are matched.
+# Do not normalize Turkish dotless ı to i, and do not match ambiguous stems.
+# Common words such as "sıkmak", "sıkı", "sıkılmak", "sıkıldım", "sıkıntı",
+# "götürmek" and ordinary references to a mother are not moderation violations.
 PROFANITY_RE = re.compile(
     r"(?i)(?<![\w])(?:"
-    r"amk|aq|a\.q|oç|mal/oc|orospu|siktir(?:in|ler|e|)?|sikik|sikerim|sikeyim|sikiyorum|siktim|"
-    r"yarrak|piç|kahpe|pezevenk|göt|bok|ananı|ananin|ibne|gerizekalı|gerizekali|"
-    r"salak\s+or\w*|fuck\w*|shit|bitch|asshole|motherfucker"
+    # Clear profanity / direct insults. Keep explicit family/body-part insults,
+    # but match complete words/forms only (never broad roots like anan\w* or got\w*).
+    r"amk|a\.q|aq|oç|orospu|siktir(?:in|ler|e|)?|sikik|sikerim|sikeyim|sikiyorum|siktim|"
+    r"yarrak|piç|kahpe|pezevenk|ibne|gerizekalı|gerizekali|"
+    r"göt(?:ünü|ünün|üne|ünden|ünde|ün|ü|ünüzü|ünüz)?|ananı|ananın|anan|"
+    r"fuck\w*|shit|bitch|asshole|motherfucker"
     r")(?![\w])"
 )
 
 
 def normalize_moderation_text(value: str) -> str:
-    """Case-fold text without collapsing Turkish dotless ı into i."""
+    """Case-fold text while preserving Turkish dotted/dotless i distinction."""
     return (value or "").casefold()
 
 
-# Explicit tokens are retained for simple punctuation/spacing obfuscation checks.
-# Deliberately excludes broad stems such as "sik", "anan" and "yarr".
+# Spacing/punctuation obfuscation checks use only the same explicit terms.
+# Avoid ambiguous short roots and everyday Turkish words.
 NORMALIZED_PROFANITY = tuple(
-    "amk aq orospu siktir sikik sikerim sikeyim sikiyorum siktim yarrak piç kahpe pezevenk göt bok ananı ananin ibne gerizekalı gerizekali fuck shit bitch asshole motherfucker".split()
+    "amk aq orospu siktir sikik sikerim sikeyim sikiyorum siktim yarrak piç kahpe pezevenk ibne gerizekalı gerizekali göt götü götün götünü götünün götüne götünden götünde götünüzü ananı ananın anan fuck shit bitch asshole motherfucker".split()
 )
 
 
@@ -240,24 +244,6 @@ def td_normalize_assistant_output(value: str, user_message: str = "") -> str:
     return "Önceki yanıtım isteğinle ilgili değildi. Sorunu tekrar yazar mısın?"
 
 
-def client_ip(request: Request) -> str:
-    # Do not trust arbitrary X-Forwarded-For input; this is a network address, not a unique device ID.
-    return request.client.host if request.client else "unknown"
-
-
-def active_ip_ban(ip: str):
-    if not DATABASE_URL or ip == "unknown":
-        return None
-    with db() as conn:
-        row = conn.execute(
-            "SELECT expires_at FROM moderation_bans WHERE ip_address=%s AND expires_at > NOW()",
-            (ip,),
-        ).fetchone()
-        if row:
-            return row["expires_at"]
-        conn.execute("DELETE FROM moderation_bans WHERE ip_address=%s AND expires_at <= NOW()", (ip,))
-    return None
-
 def device_cookie_hash(request: Request) -> str | None:
     token = request.cookies.get("tekden_device_id", "")
     if not token or len(token) < 32 or len(token) > 160:
@@ -287,13 +273,12 @@ def active_user_ban(user_id: int):
 
 @app.middleware("http")
 async def enforce_moderation_ban(request: Request, call_next):
-    # Ban checks cover the public site, API, new chats and refreshed sessions.
+    # Authenticated users are checked by account on every device; guests by device cookie only.
+    # Shared hosting/proxy IP addresses are never used for moderation.
     exempt = request.url.path in ("/health", "/api/health/db", "/api/health/deep")
     try:
         if not exempt:
-            expires = active_ip_ban(client_ip(request))
-            if not expires:
-                expires = active_device_ban(request)
+            expires = active_device_ban(request)
             if not expires:
                 try:
                     session_user = current_user(request)
@@ -304,7 +289,7 @@ async def enforce_moderation_ban(request: Request, call_next):
             if expires:
                 return JSONResponse(
                     status_code=403,
-                    content={"detail": "Tekden AI kullanım kuralları nedeniyle erişimin 30 gün boyunca engellendi.",
+                    content={"detail": "Açıkça uygunsuz ifade nedeniyle hesabının geçici erişimi engellendi.",
                              "ban_expires_at": expires.isoformat()},
                 )
         response = await call_next(request)
@@ -321,33 +306,34 @@ async def enforce_moderation_ban(request: Request, call_next):
         return await call_next(request)
 
 
-def ban_ip_for_month(ip: str, user_id: int | None = None, request: Request | None = None):
-    if not DATABASE_URL or (ip == "unknown" and not user_id and not request):
-        raise RuntimeError("Moderasyon veritabanı yapılandırılmamış.")
+def apply_moderation_ban(user_id: int | None = None, request: Request | None = None):
+    """Apply a 30-day ban to the responsible account, or device for guests only.
+
+    The legacy function name is kept to minimize changes at existing call sites.
+    Hosted reverse-proxy IP addresses are intentionally never stored or blocked.
+    """
+    token_hash = device_cookie_hash(request) if request else None
+    if not DATABASE_URL or (not user_id and not token_hash):
+        raise RuntimeError("Moderasyon veritabanı yapılandırılmamış veya cihaz oturumu bulunamadı.")
     with db() as conn:
-        if ip != "unknown":
+        if user_id:
+            # Signed-in members are restricted by their own account only.
+            key = "account:" + str(user_id)
             conn.execute("""
                 INSERT INTO moderation_bans(ip_address, user_id, reason, banned_at, expires_at)
-                VALUES(%s, %s, 'Hakaret/küfür içeren mesaj', NOW(), NOW() + INTERVAL '30 days')
-                ON CONFLICT(ip_address) DO UPDATE SET
-                    user_id=COALESCE(EXCLUDED.user_id, moderation_bans.user_id),
+                VALUES(%s, %s, 'Açıkça uygunsuz ifade', NOW(), NOW() + INTERVAL '30 days')
+                ON CONFLICT(ip_address) DO UPDATE SET user_id=EXCLUDED.user_id,
                     reason=EXCLUDED.reason, banned_at=NOW(), expires_at=NOW() + INTERVAL '30 days'
-            """, (ip, user_id))
-        elif user_id:
+            """, (key, user_id))
+        elif token_hash:
+            # Guests are restricted on this browser only; no shared network ban.
+            key = "device:" + token_hash
             conn.execute("""
                 INSERT INTO moderation_bans(ip_address, user_id, reason, banned_at, expires_at)
-                VALUES('account:' || %s::text, %s, 'Hakaret/küfür içeren mesaj', NOW(), NOW() + INTERVAL '30 days')
-                ON CONFLICT(ip_address) DO UPDATE SET user_id=EXCLUDED.user_id, reason=EXCLUDED.reason,
-                    banned_at=NOW(), expires_at=NOW() + INTERVAL '30 days'
-            """, (user_id, user_id))
-        token_hash = device_cookie_hash(request) if request else None
-        if token_hash:
-            conn.execute("""
-                INSERT INTO moderation_bans(ip_address, user_id, reason, banned_at, expires_at)
-                VALUES(%s, %s, 'Hakaret/küfür içeren mesaj', NOW(), NOW() + INTERVAL '30 days')
-                ON CONFLICT(ip_address) DO UPDATE SET user_id=COALESCE(EXCLUDED.user_id, moderation_bans.user_id),
+                VALUES(%s, NULL, 'Açıkça uygunsuz ifade', NOW(), NOW() + INTERVAL '30 days')
+                ON CONFLICT(ip_address) DO UPDATE SET user_id=NULL,
                     reason=EXCLUDED.reason, banned_at=NOW(), expires_at=NOW() + INTERVAL '30 days'
-            """, ("device:" + token_hash, user_id))
+            """, (key,))
 
 
 def init_db():
@@ -385,7 +371,8 @@ def init_db():
         conn.execute("ALTER TABLE chats ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_chats_user_updated ON chats(user_id, archived, updated_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id, id)")
-        # IP-based temporary moderation bans. This is a network-level approximation, not a unique device ID.
+        # Account-scoped and device-scoped moderation records. ip_address is a legacy column
+        # name retained for schema compatibility; values are account:<id> or device:<hash>, never IPs.
         conn.execute("""
         CREATE TABLE IF NOT EXISTS moderation_bans (
             id BIGSERIAL PRIMARY KEY,
@@ -2086,13 +2073,15 @@ def chat(body: ChatBody, request: Request):
     user = current_user(request)
     if contains_profanity(user_message):
         try:
-            ban_ip_for_month(client_ip(request), user["id"] if user else None, request)
+            apply_moderation_ban(user["id"] if user else None, request)
         except Exception as exc:
+            # Block the offending message, but do not let a storage error become
+            # a site-wide or proxy-wide ban.
             print("[Tekden AI] Moderasyon banı kaydedilemedi:", type(exc).__name__)
-            raise HTTPException(503, "Moderasyon kaydı şu anda tamamlanamadı. Lütfen daha sonra tekrar dene.")
         raise HTTPException(
             status_code=403,
-            detail="Uygunsuz ifade nedeniyle bu hesap, tarayıcı cihaz anahtarı ve mevcut ağ adresi 30 gün engellendi."
+            detail=("Açıkça uygunsuz ifade nedeniyle hesabına 30 günlük geçici erişim engeli uygulandı."
+                    if user else "Açıkça uygunsuz ifade nedeniyle bu tarayıcıya 30 günlük geçici erişim engeli uygulandı.")
         )
     plan = "plus" if user and user.get("username", "").lower() == OWNER_USERNAME.lower() and OWNER_PASSWORD else (user or {}).get("plan", "free")
     account_preferences = None
@@ -9330,7 +9319,7 @@ ADMIN_HTML = r"""<!doctype html>
 const $=id=>document.getElementById(id);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(url,opts={}){const r=await fetch(url,{credentials:'same-origin',...opts,headers:{'Content-Type':'application/json',...(opts.headers||{})}});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.detail||'İstek başarısız');return d}
 function table(headers,rows){return '<table class="table"><thead><tr>'+headers.map(x=>'<th>'+x+'</th>').join('')+'</tr></thead><tbody>'+rows+'</tbody></table>'}
-async function load(){ $('notice').textContent='Yönetim verileri güncelleniyor…';try{const [o,u,b,a]=await Promise.all([api('/api/admin/overview'),api('/api/admin/users'),api('/api/admin/bans'),api('/api/admin/app-stats')]);const c=o.counts;$('stats').innerHTML=[['Üye sayısı',c.users],['Sohbet sayısı',c.chats],['Mesaj sayısı',c.messages],['Aktif erişim engeli',c.active_bans]].map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');$('plans').innerHTML=Object.entries(o.plans).map(([k,v])=>'<div class="card"><small>'+esc(k.toUpperCase())+' üyeleri</small><div class="value">'+v+'</div></div>').join('');$('newUsers').textContent=c.new_users_7d;$('usersTable').innerHTML=table(['Kullanıcı','Plan','Kayıt tarihi'],u.users.map(x=>'<tr><td>'+esc(x.username)+'</td><td><span class="pill">'+esc(x.plan)+'</span></td><td>'+esc(x.created_at||'')+'</td></tr>').join('')||'<tr><td colspan="3">Henüz üye yok.</td></tr>');$('bansTable').innerHTML=table(['IP / Hesap','Neden','Bitiş','İşlem'],b.bans.map(x=>'<tr><td>'+esc(x.ip_address)+(x.user_id?' · kullanıcı #'+esc(x.user_id):'')+'</td><td>'+esc(x.reason)+'</td><td>'+esc(x.expires_at||'')+'</td><td><button data-revoke="'+x.id+'">Engeli kaldır</button></td></tr>').join('')||'<tr><td colspan="4">Aktif engel yok.</td></tr>');$('servicesGrid').innerHTML=o.services.map(x=>'<div class="service"><b class="'+(x.configured?'ok':'warn')+'">'+(x.configured?'● ':'○ ')+esc(x.name)+'</b><small class="muted">'+esc(x.detail)+'</small></div>').join('');const ac=a.counts;$('appStats').innerHTML=[['İlk açılış / izin veren cihaz',ac.first_opens],['Son 7 gün aktif',ac.active_7d],['Son 30 gün aktif',ac.active_30d],['Toplam açılış',ac.launches],['Takipli indirme bağlantısı tıklaması',ac.tracked_download_clicks],['Geri bildirim',ac.feedback_count]].map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');$('appDevices').innerHTML=table(['Hesap','Sürüm','İlk açılış','Son kullanım','Açılış sayısı'],a.devices.map(x=>'<tr><td>'+esc(x.account)+'</td><td>'+esc(x.app_version)+'</td><td>'+esc(x.first_seen)+'</td><td>'+esc(x.last_seen)+'</td><td>'+esc(x.launch_count)+'</td></tr>').join('')||'<tr><td colspan="5">Henüz izin veren uygulama cihazı yok.</td></tr>');$('appFeedback').innerHTML=table(['Hesap','Yanıt','Beğenilen özellik','Tarih'],a.feedback.map(x=>'<tr><td>'+esc(x.account)+'</td><td>'+esc(x.answer)+'</td><td>'+esc(x.favorite_feature)+'</td><td>'+esc(x.created_at)+'</td></tr>').join('')||'<tr><td colspan="4">Henüz geri bildirim yok.</td></tr>');$('notice').textContent='Son güncelleme: '+new Date().toLocaleString('tr-TR')+'. Bu panel yalnızca yönetim özetlerini gösterir.';}catch(e){$('notice').className='notice error';$('notice').textContent=e.message}}
+async function load(){ $('notice').textContent='Yönetim verileri güncelleniyor…';try{const [o,u,b,a]=await Promise.all([api('/api/admin/overview'),api('/api/admin/users'),api('/api/admin/bans'),api('/api/admin/app-stats')]);const c=o.counts;$('stats').innerHTML=[['Üye sayısı',c.users],['Sohbet sayısı',c.chats],['Mesaj sayısı',c.messages],['Aktif erişim engeli',c.active_bans]].map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');$('plans').innerHTML=Object.entries(o.plans).map(([k,v])=>'<div class="card"><small>'+esc(k.toUpperCase())+' üyeleri</small><div class="value">'+v+'</div></div>').join('');$('newUsers').textContent=c.new_users_7d;$('usersTable').innerHTML=table(['Kullanıcı','Plan','Kayıt tarihi'],u.users.map(x=>'<tr><td>'+esc(x.username)+'</td><td><span class="pill">'+esc(x.plan)+'</span></td><td>'+esc(x.created_at||'')+'</td></tr>').join('')||'<tr><td colspan="3">Henüz üye yok.</td></tr>');$('bansTable').innerHTML=table(['Hesap / Cihaz','Neden','Bitiş','İşlem'],b.bans.map(x=>'<tr><td>'+esc(x.ip_address)+(x.user_id?' · kullanıcı #'+esc(x.user_id):'')+'</td><td>'+esc(x.reason)+'</td><td>'+esc(x.expires_at||'')+'</td><td><button data-revoke="'+x.id+'">Engeli kaldır</button></td></tr>').join('')||'<tr><td colspan="4">Aktif engel yok.</td></tr>');$('servicesGrid').innerHTML=o.services.map(x=>'<div class="service"><b class="'+(x.configured?'ok':'warn')+'">'+(x.configured?'● ':'○ ')+esc(x.name)+'</b><small class="muted">'+esc(x.detail)+'</small></div>').join('');const ac=a.counts;$('appStats').innerHTML=[['İlk açılış / izin veren cihaz',ac.first_opens],['Son 7 gün aktif',ac.active_7d],['Son 30 gün aktif',ac.active_30d],['Toplam açılış',ac.launches],['Takipli indirme bağlantısı tıklaması',ac.tracked_download_clicks],['Geri bildirim',ac.feedback_count]].map(x=>'<div class="card"><small>'+x[0]+'</small><div class="value">'+x[1]+'</div></div>').join('');$('appDevices').innerHTML=table(['Hesap','Sürüm','İlk açılış','Son kullanım','Açılış sayısı'],a.devices.map(x=>'<tr><td>'+esc(x.account)+'</td><td>'+esc(x.app_version)+'</td><td>'+esc(x.first_seen)+'</td><td>'+esc(x.last_seen)+'</td><td>'+esc(x.launch_count)+'</td></tr>').join('')||'<tr><td colspan="5">Henüz izin veren uygulama cihazı yok.</td></tr>');$('appFeedback').innerHTML=table(['Hesap','Yanıt','Beğenilen özellik','Tarih'],a.feedback.map(x=>'<tr><td>'+esc(x.account)+'</td><td>'+esc(x.answer)+'</td><td>'+esc(x.favorite_feature)+'</td><td>'+esc(x.created_at)+'</td></tr>').join('')||'<tr><td colspan="4">Henüz geri bildirim yok.</td></tr>');$('notice').textContent='Son güncelleme: '+new Date().toLocaleString('tr-TR')+'. Bu panel yalnızca yönetim özetlerini gösterir.';}catch(e){$('notice').className='notice error';$('notice').textContent=e.message}}
 document.querySelectorAll('[data-view]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-view]').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('.view').forEach(x=>x.classList.toggle('active',x.id==='view-'+b.dataset.view))}));$('refresh').addEventListener('click',load);$('bansTable').addEventListener('click',async e=>{const b=e.target.closest('[data-revoke]');if(!b)return;if(!confirm('Bu erişim engelini kaldırmak istiyor musun?'))return;try{await api('/api/admin/bans/'+b.dataset.revoke,{method:'DELETE'});await load()}catch(err){alert(err.message)}});load();
 </script></body></html>"""
 
@@ -16550,3 +16539,49 @@ def td_public_app_version_v40():
         "sitemap_available": True,
         "server_side_plan_authorization_preserved": True,
     }
+
+
+# =============================================================================
+# TEKDEN AI V42 — ACCOUNT-SESSION / GUEST-DEVICE MODERATION
+# Authenticated accounts are checked across all their active devices.
+# Guests are restricted only by their persistent device cookie.
+# Shared proxy/IP bans are never stored or enforced.
+# =============================================================================
+TD_V41_BUILD = "2026-11-26-v41-account-device-only-moderation"
+TD_V42_BUILD = "2026-11-26-v42-account-session-guest-device-moderation"
+
+
+@app.get("/api/version-v41", include_in_schema=False)
+def td_public_app_version_v41():
+    return {
+        "app": "Tekden AI",
+        "build": TD_V41_BUILD,
+        "ip_based_moderation_disabled": True,
+        "authenticated_bans_are_account_scoped": True,
+        "guest_bans_are_device_scoped": True,
+        "v40_utf8_and_seo_fixes_preserved": True,
+        "server_side_plan_authorization_preserved": True,
+    }
+
+
+@app.get("/api/version-v42", include_in_schema=False)
+def td_public_app_version_v42():
+    return {
+        "app": "Tekden AI",
+        "build": TD_V42_BUILD,
+        "shared_ip_bans_disabled": True,
+        "signed_in_account_blocked_across_its_devices": True,
+        "guest_blocked_on_originating_device_only": True,
+        "explicit_got_and_anan_forms_moderated": True,
+        "safe_turkish_words_excluded": True,
+        "v40_utf8_seo_and_plan_rules_preserved": True,
+    }
+
+
+@app.delete("/api/admin/bans")
+def owner_admin_revoke_all_bans(request: Request):
+    """Owner-only emergency action to clear all current moderation ban records."""
+    require_owner(request)
+    with db() as conn:
+        result = conn.execute("DELETE FROM moderation_bans")
+    return {"ok": True, "revoked_count": result.rowcount}
